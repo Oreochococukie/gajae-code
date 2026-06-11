@@ -4,7 +4,7 @@
 
 Proposal for maintainer design review. This document intentionally does not add a bundled provider implementation. It records the product/API decisions that must be accepted before any Grok Build implementation PR should land.
 
-This is not an authorization claim for xAI endpoints, not a final naming decision, and not approval for a bundled-loading exception. Those three items require explicit owner sign-off before implementation.
+This is not an authorization claim for xAI endpoints, not a final naming decision, not approval for a bundled-loading exception, and not trademark/display-name approval. Those items require explicit owner sign-off before implementation.
 
 ## Required owner sign-off gates
 
@@ -13,6 +13,7 @@ Implementation should remain blocked until the owner signs off on these gates:
 1. **Authorized use / ToS** — confirm that GJC may use `cli-chat-proxy.grok.com` and the xAI CLI OAuth public client from a third-party tool. A public OAuth client id is not proof that this use is authorized.
 2. **Bundled-loading trust boundary** — confirm whether a source-controlled bundled provider may load even when ordinary user extension discovery is disabled.
 3. **Public selector naming** — choose the stable provider selector prefix: `grok-cli`, `grok-build`, or another owner-selected id.
+4. **Trademark/display-name** — confirm whether GJC may present the provider/profile using `Grok Build` or should use a more neutral owner-approved label.
 
 If gate 1 is not accepted, the Grok Build provider implementation should not ship against `cli-chat-proxy.grok.com`. The fallback direction would be a documented user-supplied xAI/API-key provider or a different officially authorized integration path.
 
@@ -30,7 +31,7 @@ The previously proposed implementation touched bundled extension loading, OAuth 
 
 - Keep Grok Build, if accepted, as a bundled provider extension rather than a workflow skill.
 - Preserve the existing four bundled workflow skills and four role agents.
-- Define the `/login` OAuth contract for a provider displayed as `Grok Build`.
+- Define the `/login` OAuth contract for an owner-approved display name, with `Grok Build` only as a candidate label.
 - Define the `/model` contract for `grok-composer-2.5-fast` without committing to the final selector prefix before owner sign-off.
 - Define the guardrails for any bundled provider that loads while ordinary extension discovery is disabled.
 - Keep credentials in the existing auth storage path; no tokens or user env values are checked into the repo.
@@ -52,7 +53,7 @@ These are candidate values for owner review, not final commitments:
 | Field | Candidate value | Decision status | Notes |
 | --- | --- | --- | --- |
 | Public provider id | `grok-cli` or `grok-build` | **Owner decision required** | See naming section below. |
-| Display name | `Grok Build` | Proposed | Name shown in `/login` and UI surfaces. |
+| Display name | `Grok Build` or owner-selected label | **Owner decision required** | Name shown in `/login` and UI surfaces; see trademark/display-name section below. |
 | Default model id | `grok-composer-2.5-fast` | Proposed | Full selector depends on final provider id. |
 | Secondary model id | `grok-build` | Proposed | Candidate for executor/architect roles if a profile is accepted. |
 | Base URL | `https://cli-chat-proxy.grok.com/v1` | **Authorized-use sign-off required** | Undocumented/private-looking endpoint; do not ship without owner approval. |
@@ -73,11 +74,21 @@ Before implementation, the owner should explicitly decide one of:
 
 Implementation PRs must not describe the public client id as a secret, but they also must not present it as authorization. Tests should avoid real tokens and should not require an xAI account.
 
+## Trademark/display-name caveat
+
+`Grok` and `xAI` are third-party marks. `Grok Build` may also imply an official xAI/Grok product relationship even when the integration is third-party. Before implementation, the owner should explicitly choose one of:
+
+- **Use `Grok Build`** — acceptable as the user-facing provider/profile label after trademark/product-risk review.
+- **Use a neutral label** — for example `xAI Grok`, `Grok OAuth`, or another owner-selected name that avoids implying official endorsement.
+- **Avoid built-in branding** — keep any Grok-specific naming only in user-provided configuration until authorization/branding is clarified.
+
+Implementation PRs should avoid lock-in language such as "official" unless there is explicit authorization. UI labels, profile names, docs, tests, and screenshots must all use the owner-approved label consistently.
+
 ## OAuth behavior
 
 If authorized-use is accepted, the OAuth implementation should use the existing custom OAuth provider path:
 
-1. The chosen provider id registers an OAuth provider named `Grok Build`.
+1. The chosen provider id registers an OAuth provider using the owner-approved display name.
 2. `/login` calls the existing auth storage login path for that provider.
 3. The provider opens an xAI authorization URL using OIDC discovery, PKCE, `state`, and a loopback callback.
 4. The callback exchanges the authorization code for access and refresh tokens.
@@ -171,7 +182,7 @@ No Grok vendor implementation in this PR.
 
 ### PR 3: Grok Build provider extension
 
-Provider implementation only, after owner sign-off on authorized use and naming:
+Provider implementation only, after owner sign-off on authorized use, public selector naming, and trademark/display-name:
 
 - Add bundled Grok Build provider source.
 - Register the chosen provider id, OAuth provider, and models.
@@ -194,9 +205,9 @@ Optional observability PR:
 
 ## Acceptance criteria for the implementation series
 
-- Owner sign-off is recorded for authorized use, bundled loading, and selector naming before implementation lands.
+- Owner sign-off is recorded for authorized use, bundled loading, selector naming, and trademark/display-name before implementation lands.
 - Fresh checkout test proves `createAgentSession` registers the bundled provider under the accepted bootstrap rules.
-- `/login` includes `Grok Build` for the owner-selected provider id.
+- `/login` includes the owner-approved display name for the owner-selected provider id.
 - `/model` includes `<provider-id>/grok-composer-2.5-fast`.
 - A real OAuth URL redirects to the owner-approved xAI account login page.
 - Third-party extension paths still load alongside bundled providers when configured.
@@ -207,5 +218,6 @@ Optional observability PR:
 - Is using `cli-chat-proxy.grok.com` plus the xAI CLI OAuth client from GJC authorized and acceptable for this project?
 - Should bundled provider defaults load while `disableExtensionDiscovery: true`, and under which guardrails?
 - Should the final public provider id be `grok-cli`, `grok-build`, or another id?
+- May GJC use `Grok Build` as the display/profile name, or should the integration use a neutral owner-selected label?
 - Should `grok-pro` be a built-in profile or documented as a user profile?
 - Should usage reporting be included in the initial provider PR or kept as a separate follow-up?
