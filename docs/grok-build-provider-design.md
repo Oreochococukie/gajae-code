@@ -2,55 +2,82 @@
 
 ## Status
 
-Proposal for maintainer design review. This document intentionally does not add a bundled provider implementation. It defines the provider contract and the staged PR split for adding a Grok Build integration after the contract is accepted.
+Proposal for maintainer design review. This document intentionally does not add a bundled provider implementation. It records the product/API decisions that must be accepted before any Grok Build implementation PR should land.
+
+This is not an authorization claim for xAI endpoints, not a final naming decision, and not approval for a bundled-loading exception. Those three items require explicit owner sign-off before implementation.
+
+## Required owner sign-off gates
+
+Implementation should remain blocked until the owner signs off on these gates:
+
+1. **Authorized use / ToS** — confirm that GJC may use `cli-chat-proxy.grok.com` and the xAI CLI OAuth public client from a third-party tool. A public OAuth client id is not proof that this use is authorized.
+2. **Bundled-loading trust boundary** — confirm whether a source-controlled bundled provider may load even when ordinary user extension discovery is disabled.
+3. **Public selector naming** — choose the stable provider selector prefix: `grok-cli`, `grok-build`, or another owner-selected id.
+
+If gate 1 is not accepted, the Grok Build provider implementation should not ship against `cli-chat-proxy.grok.com`. The fallback direction would be a documented user-supplied xAI/API-key provider or a different officially authorized integration path.
 
 ## Problem
 
-GJC can load third-party extensions, but the first-run interactive path currently needs a maintainer-owned decision before a bundled Grok Build provider can be accepted. The desired product flow is:
+GJC can load third-party extensions, but the first-run interactive path needs a maintainer-owned decision before a bundled Grok Build provider can be accepted. The desired product flow is:
 
 ```text
-gjc -> /login -> OAuth -> Grok Build -> browser xAI login -> /model -> grok-cli/grok-composer-2.5-fast
+gjc -> /login -> OAuth -> Grok Build -> browser xAI login -> /model -> <provider-id>/grok-composer-2.5-fast
 ```
 
-The previously proposed implementation touched bundled extension loading, OAuth registration, model profiles, vendor code, usage reporting, and tests in one PR. That is too much surface for review without first agreeing on the provider contract.
+The previously proposed implementation touched bundled extension loading, OAuth registration, model profiles, vendor code, usage reporting, and tests in one PR. That is too much surface for review without first agreeing on the provider contract and the owner sign-off gates above.
 
 ## Goals
 
-- Keep Grok Build as a bundled provider extension, not a workflow skill.
+- Keep Grok Build, if accepted, as a bundled provider extension rather than a workflow skill.
 - Preserve the existing four bundled workflow skills and four role agents.
-- Make `/login` show an OAuth provider named `Grok Build` with provider id `grok-cli`.
-- Make `/model` expose `grok-cli/grok-composer-2.5-fast` after the bundled provider is loaded.
-- Let first-run sessions load maintainer-approved bundled providers even when regular extension discovery is disabled.
+- Define the `/login` OAuth contract for a provider displayed as `Grok Build`.
+- Define the `/model` contract for `grok-composer-2.5-fast` without committing to the final selector prefix before owner sign-off.
+- Define the guardrails for any bundled provider that loads while ordinary extension discovery is disabled.
 - Keep credentials in the existing auth storage path; no tokens or user env values are checked into the repo.
-- Keep implementation PRs small enough for independent review and rollback.
+- Keep implementation PRs small enough for independent review, rejection, or rollback.
 
 ## Non-goals
 
 - No new workflow command or `/skill` surface.
 - No automatic installation from npm or remote code at runtime.
-- No `models.json` direct edits.
-- No broad model-profile reshuffle beyond a reviewed Grok-specific profile.
-- No provider-specific secrets in source. The xAI OAuth client id is a public client id, not a secret.
+- No direct `packages/ai/src/models.json` edits.
+- No broad model-profile reshuffle.
+- No provider-specific secrets in source.
+- No claim that xAI has authorized this endpoint/client usage without owner review.
 
-## Proposed provider contract
+## Candidate provider contract
 
-| Field | Proposed value | Notes |
-| --- | --- | --- |
-| Provider id | `grok-cli` | Stable selector prefix and auth key. |
-| Display name | `Grok Build` | Name shown in `/login` and UI surfaces. |
-| Default user-facing model | `grok-composer-2.5-fast` | Full selector: `grok-cli/grok-composer-2.5-fast`. |
-| Secondary model | `grok-build` | Used by a future `grok-pro` role profile if accepted. |
-| Base URL | `https://cli-chat-proxy.grok.com/v1` | Overridable by explicit env/config for debugging only. |
-| OAuth issuer | `https://auth.x.ai` | OIDC discovery must validate xAI-owned HTTPS endpoints. |
-| OAuth callback | loopback `127.0.0.1` | Uses PKCE + state validation. |
-| API adapter | `grok-cli-responses` | Provider-specific stream adapter; not a new generic API shape. |
-| Env bypass | `GROK_CLI_OAUTH_TOKEN` | Optional local bypass; no refresh or discovery guarantees. |
+These are candidate values for owner review, not final commitments:
+
+| Field | Candidate value | Decision status | Notes |
+| --- | --- | --- | --- |
+| Public provider id | `grok-cli` or `grok-build` | **Owner decision required** | See naming section below. |
+| Display name | `Grok Build` | Proposed | Name shown in `/login` and UI surfaces. |
+| Default model id | `grok-composer-2.5-fast` | Proposed | Full selector depends on final provider id. |
+| Secondary model id | `grok-build` | Proposed | Candidate for executor/architect roles if a profile is accepted. |
+| Base URL | `https://cli-chat-proxy.grok.com/v1` | **Authorized-use sign-off required** | Undocumented/private-looking endpoint; do not ship without owner approval. |
+| OAuth issuer | `https://auth.x.ai` | **Authorized-use sign-off required** | OIDC discovery must validate xAI-owned HTTPS endpoints. |
+| OAuth callback | loopback `127.0.0.1` | Proposed | Uses PKCE + state validation. |
+| API adapter | `grok-cli-responses` | Proposed internal name | Provider-specific stream adapter; not a new generic API shape. |
+| Env bypass | `GROK_CLI_OAUTH_TOKEN` | Optional follow-up | Local bypass only; no refresh or discovery guarantees. |
+
+## Authorized-use and ToS caveat
+
+`cli-chat-proxy.grok.com` and the xAI CLI OAuth public client appear to be designed for xAI/Grok CLI traffic. Reusing them from GJC may be technically possible but still unauthorized or contrary to xAI terms.
+
+Before implementation, the owner should explicitly decide one of:
+
+- **Accept** — proceed with this integration after reviewing the legal/product risk.
+- **Defer** — keep this design document only; no code ships until authorization is clarified.
+- **Reject** — do not integrate against `cli-chat-proxy.grok.com`; use only an official public API path.
+
+Implementation PRs must not describe the public client id as a secret, but they also must not present it as authorization. Tests should avoid real tokens and should not require an xAI account.
 
 ## OAuth behavior
 
-The OAuth implementation should use the existing custom OAuth provider path:
+If authorized-use is accepted, the OAuth implementation should use the existing custom OAuth provider path:
 
-1. `grok-cli` registers an OAuth provider named `Grok Build`.
+1. The chosen provider id registers an OAuth provider named `Grok Build`.
 2. `/login` calls the existing auth storage login path for that provider.
 3. The provider opens an xAI authorization URL using OIDC discovery, PKCE, `state`, and a loopback callback.
 4. The callback exchanges the authorization code for access and refresh tokens.
@@ -59,39 +86,59 @@ The OAuth implementation should use the existing custom OAuth provider path:
 
 Security constraints:
 
-- OIDC `authorization_endpoint` and `token_endpoint` must be HTTPS and under xAI-owned hosts.
+- OIDC `authorization_endpoint` and `token_endpoint` must be HTTPS and under owner-approved xAI hosts.
 - The callback server binds to loopback by default.
 - The callback must reject state mismatches.
-- Access and refresh tokens must not be logged, rendered, or committed.
-- Error messages should include status and provider error text, but not credential values.
+- Access and refresh tokens must not be logged, rendered, committed, or included in tests.
+- Error messages may include status and provider error text, but not credential values.
+- Env overrides for base URL, scope, callback host, or client id must be treated as local developer/debug escape hatches, not default product behavior.
 
-## Bundled loading behavior
+## Bundled-loading trust boundary
 
-A bundled provider is different from user extension discovery:
+A bundled provider is different from ordinary user extension discovery, but loading it while `disableExtensionDiscovery: true` still expands the bootstrap trust boundary. Owner sign-off is required before implementation.
 
-- It is committed under source-controlled bundled defaults.
-- It is loaded by maintainer-owned bootstrap code before model selection.
-- It is still represented as an extension/provider internally so the same provider registration APIs are exercised.
-- It must load even when `disableExtensionDiscovery: true` is used for first-run interactive sessions.
-- It must coexist with caller-supplied `additionalExtensionPaths`.
+Minimum guardrails if accepted:
 
-The bootstrap change should be its own PR because it is useful independently of Grok Build and is the highest-risk core-path change.
+- Load only source-controlled, maintainer-reviewed bundled provider paths.
+- Use a static allowlist or exported enumerator; never scan arbitrary user directories for this path.
+- Do not install, fetch, or resolve remote package code at runtime.
+- Keep ordinary user extension discovery disabled when `disableExtensionDiscovery: true`; the exception is only for bundled provider defaults.
+- Add tests proving bundled providers load before model selection and caller-supplied `additionalExtensionPaths` still coexist.
+- Keep this bootstrap change separate from the Grok vendor implementation so it can be reviewed independently.
+
+Alternatives the owner may choose:
+
+- Do not load bundled providers when extension discovery is disabled; require explicit setup/defaults install.
+- Gate bundled provider loading behind a setting or compile-time default.
+- Allow bundled loading only in packaged builds, not arbitrary source checkouts.
+
+## Provider selector naming
+
+The selector prefix is a stable user-facing contract and must be chosen before implementation.
+
+| Option | Example selector | Pros | Cons |
+| --- | --- | --- | --- |
+| `grok-cli` | `grok-cli/grok-composer-2.5-fast` | Matches the upstream CLI/proxy lineage and existing prototype. | User-facing name is less aligned with `Grok Build`; may expose implementation detail. |
+| `grok-build` | `grok-build/grok-composer-2.5-fast` | Matches UI label and requested product wording. | Diverges from existing prototype and env names; migration needed if prototypes used `grok-cli`. |
+| Owner-selected third id | `<id>/grok-composer-2.5-fast` | Lets maintainers align with broader provider taxonomy. | Requires updating all docs/tests before implementation. |
+
+Until this is decided, implementation docs and PRs should use `<provider-id>` when describing the public selector. Internal adapter names may still use `grok-cli-responses` if maintainers accept that as an implementation detail.
 
 ## Model/profile behavior
 
-Model registration should be provider-owned. The Grok provider should register at least:
+Model registration should be provider-owned. If accepted, the provider should register at least:
 
 - `grok-composer-2.5-fast`
 - `grok-build`
 
-A built-in profile is optional and should be reviewed separately. If accepted, the proposed profile is:
+A built-in profile is optional and should be reviewed separately. If accepted, a candidate profile is:
 
 ```text
-grok-pro.default  -> grok-cli/grok-composer-2.5-fast
-grok-pro.planner  -> grok-cli/grok-composer-2.5-fast
-grok-pro.critic   -> grok-cli/grok-composer-2.5-fast
-grok-pro.executor -> grok-cli/grok-build
-grok-pro.architect -> grok-cli/grok-build
+grok-pro.default   -> <provider-id>/grok-composer-2.5-fast
+grok-pro.planner   -> <provider-id>/grok-composer-2.5-fast
+grok-pro.critic    -> <provider-id>/grok-composer-2.5-fast
+grok-pro.executor  -> <provider-id>/grok-build
+grok-pro.architect -> <provider-id>/grok-build
 ```
 
 If maintainers prefer not to add a built-in profile, the provider can still satisfy the core `/login` and `/model` flow through direct model selection.
@@ -100,33 +147,34 @@ If maintainers prefer not to add a built-in profile, the provider can still sati
 
 Usage reporting should be an optional follow-up after login/model support lands:
 
-- Provider id: `grok-cli`.
+- Provider id: the owner-selected `<provider-id>`.
 - Fetches usage with the effective OAuth access token.
 - Returns `null` when no token is available.
 - Does not require the usage provider for chat/model selection to work.
+- Should be skipped entirely if the authorized-use gate is not accepted.
 
 ## Staged PR plan
 
 ### PR 1: this design document
 
-Purpose: agree on the provider id, OAuth contract, bundled-loading contract, model selector, security boundaries, and implementation split.
+Purpose: agree on caveats, owner sign-off gates, provider id, OAuth contract, bundled-loading trust boundary, model selector, security boundaries, and implementation split.
 
 ### PR 2: bundled provider bootstrap contract
 
-Small core change only:
+Small core change only, after owner sign-off on the bundled-loading gate:
 
 - Add a maintainer-owned way to enumerate bundled provider extension paths.
-- Load those paths during session/bootstrap even when user extension discovery is disabled.
+- Load those paths during session/bootstrap only under the accepted guardrails.
 - Add tests proving bundled providers and caller-supplied extension paths coexist.
 
 No Grok vendor implementation in this PR.
 
 ### PR 3: Grok Build provider extension
 
-Provider implementation only:
+Provider implementation only, after owner sign-off on authorized use and naming:
 
-- Add bundled `grok-build` and `grok-cli` provider source.
-- Register `grok-cli` OAuth and models.
+- Add bundled Grok Build provider source.
+- Register the chosen provider id, OAuth provider, and models.
 - Include sanitize and provider-specific stream handling.
 - Test `/login` provider registration and `grok-composer-2.5-fast` model availability.
 
@@ -141,21 +189,23 @@ Optional product-surface PR:
 
 Optional observability PR:
 
-- Add `grok-cli` usage provider.
+- Add usage provider for the owner-selected provider id.
 - Add focused usage tests.
 
 ## Acceptance criteria for the implementation series
 
-- Fresh checkout test proves `createAgentSession` registers the bundled provider with `disableExtensionDiscovery: true`.
-- `/login` includes `Grok Build` for provider id `grok-cli`.
-- `/model` includes `grok-cli/grok-composer-2.5-fast`.
-- A real OAuth URL redirects to the xAI account login page.
-- Third-party extension paths still load alongside bundled providers.
+- Owner sign-off is recorded for authorized use, bundled loading, and selector naming before implementation lands.
+- Fresh checkout test proves `createAgentSession` registers the bundled provider under the accepted bootstrap rules.
+- `/login` includes `Grok Build` for the owner-selected provider id.
+- `/model` includes `<provider-id>/grok-composer-2.5-fast`.
+- A real OAuth URL redirects to the owner-approved xAI account login page.
+- Third-party extension paths still load alongside bundled providers when configured.
 - Token values never appear in tests, logs, checked-in docs, or git history.
 
 ## Open maintainer decisions
 
-- Should `grok-cli` be the final provider id, or should the project prefer `grok-build` as the public selector prefix?
-- Should the bundled bootstrap contract be provider-specific at first or generic for future bundled providers?
+- Is using `cli-chat-proxy.grok.com` plus the xAI CLI OAuth client from GJC authorized and acceptable for this project?
+- Should bundled provider defaults load while `disableExtensionDiscovery: true`, and under which guardrails?
+- Should the final public provider id be `grok-cli`, `grok-build`, or another id?
 - Should `grok-pro` be a built-in profile or documented as a user profile?
 - Should usage reporting be included in the initial provider PR or kept as a separate follow-up?
