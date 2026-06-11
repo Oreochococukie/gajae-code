@@ -96,6 +96,13 @@ export const BUILTIN_MODEL_PROFILES: readonly ModelProfileDefinition[] = [
 		planner: "openai-codex/gpt-5.5:high",
 		critic: "openai-codex/gpt-5.3-codex-spark:high",
 	}),
+	profile("grok-pro", ["grok-cli"], {
+		default: "grok-cli/grok-composer-2.5-fast",
+		executor: "grok-cli/grok-build",
+		architect: "grok-cli/grok-build",
+		planner: "grok-cli/grok-composer-2.5-fast",
+		critic: "grok-cli/grok-composer-2.5-fast",
+	}),
 	profile("opencode-go-codex-eco", ["opencode-go", "openai-codex"], {
 		default: "opencode-go/deepseek-v4-flash",
 		executor: "opencode-go/qwen3.5-plus",

@@ -31,6 +31,7 @@ function builtIn(name: string): ModelProfileDefinition {
 function selectorExists(selector: string): boolean {
 	const parsed = parseModelString(selector);
 	if (!parsed) return false;
+	if (parsed.provider === "grok-cli") return ["grok-composer-2.5-fast", "grok-build"].includes(parsed.id);
 	return getBundledModel(parsed.provider as GeneratedProvider, parsed.id) !== undefined;
 }
 
@@ -40,9 +41,9 @@ function effortOf(selector: string): number {
 }
 
 describe("built-in model profile catalog", () => {
-	test("contains exactly 9 builtins", () => {
-		expect(BUILTIN_MODEL_PROFILES).toHaveLength(9);
-		expect(new Set(BUILTIN_MODEL_PROFILES.map(profile => profile.name)).size).toBe(9);
+	test("contains exactly 10 builtins", () => {
+		expect(BUILTIN_MODEL_PROFILES).toHaveLength(10);
+		expect(new Set(BUILTIN_MODEL_PROFILES.map(profile => profile.name)).size).toBe(10);
 	});
 
 	test("required_providers are correct per family", () => {
@@ -53,6 +54,8 @@ describe("built-in model profile catalog", () => {
 				expect(profile.requiredProviders).toEqual(["opencode-go"]);
 			} else if (profile.name.startsWith("codex-")) {
 				expect(profile.requiredProviders).toEqual(["openai-codex"]);
+			} else if (profile.name === "grok-pro") {
+				expect(profile.requiredProviders).toEqual(["grok-cli"]);
 			} else {
 				throw new Error(`Unexpected built-in profile ${profile.name}`);
 			}
@@ -83,7 +86,9 @@ describe("built-in model profile catalog", () => {
 	});
 
 	test("*-pro profiles raise effort on architect/planner/critic", () => {
-		for (const profile of BUILTIN_MODEL_PROFILES.filter(candidate => candidate.name.endsWith("-pro"))) {
+		for (const profile of BUILTIN_MODEL_PROFILES.filter(
+			candidate => candidate.name.endsWith("-pro") && candidate.name !== "grok-pro",
+		)) {
 			for (const role of reviewRoles) {
 				expect(effortOf(profile.modelMapping[role] ?? "")).toBeGreaterThanOrEqual(
 					effortRank[ThinkingLevel.High] ?? 3,
@@ -118,6 +123,18 @@ describe("built-in model profile catalog", () => {
 		expect(parsed?.thinkingLevel).toBeUndefined();
 		const model = getBundledModel("openai-codex", "gpt-5.5");
 		expect(model?.thinking?.defaultLevel).toBe(ThinkingLevel.XHigh);
+	});
+
+	test("grok-pro maps Composer 2.5 Fast and Grok Build roles", () => {
+		const profile = builtIn("grok-pro");
+		expect(profile.requiredProviders).toEqual(["grok-cli"]);
+		expect(profile.modelMapping).toEqual({
+			default: "grok-cli/grok-composer-2.5-fast",
+			executor: "grok-cli/grok-build",
+			architect: "grok-cli/grok-build",
+			planner: "grok-cli/grok-composer-2.5-fast",
+			critic: "grok-cli/grok-composer-2.5-fast",
+		});
 	});
 
 	test("user same-name profile overrides builtin via mergeModelProfiles", () => {
