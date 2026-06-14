@@ -50,7 +50,7 @@ import { CursorExecHandlers } from "./cursor";
 import "./discovery";
 import { resolveConfigValue } from "./config/resolve-config-value";
 import { getEmbeddedDefaultGjcSkills } from "./defaults/gjc-defaults";
-import { getBundledGrokBuildExtensionPaths } from "./defaults/gjc-grok-cli";
+import { BUNDLED_GROK_BUILD_EXTENSION_ID, getBundledGrokBuildExtensionFactory } from "./defaults/gjc-grok-cli";
 import { initializeWithSettings } from "./discovery";
 import { disposeAllKernelSessions, disposeKernelSessionsByOwner } from "./eval/py/executor";
 import { TtsrManager } from "./export/ttsr";
@@ -65,7 +65,6 @@ import {
 	type ExtensionUIContext,
 	type LoadExtensionsResult,
 	loadExtensionFromFactory,
-	loadExtensions,
 	type ToolDefinition,
 	wrapRegisteredTools,
 } from "./extensibility/extensions";
@@ -1342,22 +1341,25 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			inlineExtensions.push(createCustomToolsExtension(customTools));
 		}
 
-		// Extension/module discovery is quarantined from the public GJC utility surface.
-		// The bundled Grok Build provider is part of the shipped product surface, so
-		// load it explicitly even when filesystem extension discovery is disabled.
-		const bundledGrokExtensionPaths = await getBundledGrokBuildExtensionPaths();
-		const extensionsResult: LoadExtensionsResult =
-			options.preloadedExtensions ??
-			(await loadExtensions(
-				[...bundledGrokExtensionPaths, ...(options.additionalExtensionPaths ?? [])],
+		// Extension/module discovery is quarantined; retain only the private
+		// runtime needed for bundled product extensions, explicitly supplied SDK
+		// extension factories, and custom tools. Filesystem extension paths remain
+		// ignored here even when options.additionalExtensionPaths is supplied.
+		const extensionsResult: LoadExtensionsResult = options.preloadedExtensions ?? {
+			extensions: [],
+			errors: [],
+			runtime: new ExtensionRuntime(),
+		};
+
+		if (!extensionsResult.extensions.some(extension => extension.path === BUNDLED_GROK_BUILD_EXTENSION_ID)) {
+			const bundledGrokExtension = await loadExtensionFromFactory(
+				getBundledGrokBuildExtensionFactory(),
 				cwd,
 				eventBus,
-			));
-		const bundledGrokLoadErrors = extensionsResult.errors.filter(error =>
-			bundledGrokExtensionPaths.includes(error.path),
-		);
-		if (bundledGrokLoadErrors.length > 0) {
-			throw new Error(bundledGrokLoadErrors.map(error => error.error).join("\n"));
+				extensionsResult.runtime,
+				BUNDLED_GROK_BUILD_EXTENSION_ID,
+			);
+			extensionsResult.extensions.push(bundledGrokExtension);
 		}
 
 		// Load inline extensions from factories

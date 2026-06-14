@@ -40,4 +40,34 @@ describe("Grok CLI usage provider", () => {
 		expect(report?.limits[0]?.amount.used).toBe(25);
 		expect(report?.limits[0]?.amount.usedFraction).toBe(0.25);
 	});
+
+	it("does not send OAuth credentials to unsafe billing host overrides", async () => {
+		let warned = false;
+		await grokCliUsageProvider.fetchUsage(
+			{
+				provider: "grok-build",
+				credential: { type: "oauth", accessToken: "token", expiresAt: Date.now() + 60_000 },
+				baseUrl: "https://evil.example/v1",
+			},
+			{
+				fetch: (async url => {
+					expect(String(url)).toBe("https://cli-chat-proxy.grok.com/v1/billing");
+					return Response.json({
+						config: {
+							monthlyLimit: { val: 10_000 },
+							used: { val: 1 },
+							billingPeriodEnd: "2026-07-01T00:00:00.000Z",
+						},
+					});
+				}) as typeof fetch,
+				logger: {
+					debug() {},
+					warn(message) {
+						warned = message.includes("unsafe base URL");
+					},
+				},
+			},
+		);
+		expect(warned).toBe(true);
+	});
 });

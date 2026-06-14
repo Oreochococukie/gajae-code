@@ -1,4 +1,4 @@
-import { getBaseUrl } from '../auth/oauth.js';
+import { getBaseUrl } from '../shared/base-url.js';
 
 interface BillingUsage {
   monthlyLimit: number;

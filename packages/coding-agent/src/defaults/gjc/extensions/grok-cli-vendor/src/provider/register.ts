@@ -7,7 +7,7 @@ import type { Api, Model } from '@gajae-code/ai';
 import type { OAuthCredentials, OAuthLoginCallbacks } from '@gajae-code/ai/utils/oauth/types';
 import { XAI_OAUTH_SCOPE, loginXai, refreshXaiToken } from '@gajae-code/ai/utils/oauth/xai';
 import type { ExtensionAPI, ProviderConfig } from '@gajae-code/coding-agent';
-import { getBaseUrl } from '../auth/oauth.js';
+import { getBaseUrl, isGrokBuildBaseUrlOverrideIgnored } from '../shared/base-url.js';
 import { type GrokCliModelConfig, resolveModels } from '../models/catalog.js';
 import { sanitizePayload } from '../payload/sanitize.js';
 import { streamGrokCli } from './stream.js';
@@ -74,6 +74,12 @@ export default function registerGrokCli(api: ExtensionAPI) {
     if (process.env.GROK_CLI_OAUTH_TOKEN) {
       ctx.ui.notify(
         '[Grok Build] Using GROK_CLI_OAUTH_TOKEN env bypass — no auto-refresh, no model discovery. Login with /login grok-build for persisted refreshable auth.',
+        'warning',
+      );
+    }
+    if (isGrokBuildBaseUrlOverrideIgnored()) {
+      ctx.ui.notify(
+        '[Grok Build] Ignoring unsafe Grok base URL override for OAuth credential safety. Set GJC_GROK_CLI_ALLOW_UNSAFE_BASE_URL=1 only for trusted local testing.',
         'warning',
       );
     }

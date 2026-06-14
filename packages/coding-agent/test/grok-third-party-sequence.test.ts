@@ -5,14 +5,34 @@ import * as path from "node:path";
 import { Settings } from "../src/config/settings";
 import { createAgentSession } from "../src/sdk";
 import { SessionManager } from "../src/session/session-manager";
+import type { ExtensionAPI } from "../src/extensibility/extensions";
+
+function registerTestProvider(api: ExtensionAPI, providerName: string): void {
+	api.registerProvider(providerName, {
+		baseUrl: "https://example.invalid/v1",
+		apiKey: "$THIRD_PARTY_TEST_KEY",
+		api: "openai-responses",
+		models: [
+			{
+				id: "model",
+				name: "Model",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 1000,
+				maxTokens: 100,
+			},
+		],
+	});
+}
 
 describe("Grok Build with explicit third-party extensions", () => {
-	it("loads bundled Grok Build alongside caller-supplied extension paths", async () => {
+	it("loads bundled and inline extensions while keeping filesystem paths quarantined", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-grok-third-party-"));
 		const extensionPath = path.join(root, "third-party.ts");
 		await Bun.write(
 			extensionPath,
-			`export default function thirdParty(api) { api.registerProvider("third-party-test", { name: "Third Party", baseUrl: "https://example.invalid/v1", apiKey: "$THIRD_PARTY_TEST_KEY", api: "openai-responses", models: [{ id: "model", name: "Model", reasoning: false, input: ["text"], cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1000, maxTokens: 100 }] }); }`,
+			`export default function thirdParty(api) { api.registerProvider("filesystem-test", { name: "Filesystem", baseUrl: "https://example.invalid/v1", apiKey: "$THIRD_PARTY_TEST_KEY", api: "openai-responses", models: [{ id: "model", name: "Model", reasoning: false, input: ["text"], cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1000, maxTokens: 100 }] }); }`,
 		);
 		try {
 			const { session } = await createAgentSession({
@@ -22,6 +42,7 @@ describe("Grok Build with explicit third-party extensions", () => {
 				sessionManager: SessionManager.inMemory(root),
 				disableExtensionDiscovery: true,
 				additionalExtensionPaths: [extensionPath],
+				extensions: [api => registerTestProvider(api, "inline-test")],
 				skills: [],
 				rules: [],
 				contextFiles: [],
@@ -33,7 +54,8 @@ describe("Grok Build with explicit third-party extensions", () => {
 			});
 			try {
 				expect(session.modelRegistry.find("grok-build", "grok-composer-2.5-fast")).toBeTruthy();
-				expect(session.modelRegistry.find("third-party-test", "model")).toBeTruthy();
+				expect(session.modelRegistry.find("inline-test", "model")).toBeTruthy();
+				expect(session.modelRegistry.find("filesystem-test", "model")).toBeUndefined();
 			} finally {
 				await session.dispose();
 			}

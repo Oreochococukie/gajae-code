@@ -1,36 +1,22 @@
-import * as path from "node:path";
+import type { ExtensionFactory } from "../extensibility/extensions/types";
+import grokBuildExtensionFactory from "./gjc/extensions/grok-build/index";
+import grokCliModelDefaults from "./gjc/agent.models.grok-cli.yml" with { type: "text" };
 
-export function getBundledGrokBuildExtensionPath(): string {
-	return path.join(import.meta.dir, "gjc", "extensions", "grok-build", "index.ts");
+export const BUNDLED_GROK_BUILD_EXTENSION_ID = "bundled:grok-build";
+
+export function getBundledGrokBuildExtensionFactory(): ExtensionFactory {
+	return grokBuildExtensionFactory;
 }
 
-export function getBundledGrokBuildExtensionDir(): string {
-	return path.dirname(getBundledGrokBuildExtensionPath());
-}
-
-export function getBundledGrokCliVendorDir(): string {
-	return path.join(import.meta.dir, "gjc", "extensions", "grok-cli-vendor");
-}
-
-export function getBundledGrokCliModelDefaultsPath(): string {
-	return path.join(import.meta.dir, "gjc", "agent.models.grok-cli.yml");
+export function getBundledGrokCliModelDefaults(): string {
+	return grokCliModelDefaults;
 }
 
 export async function assertBundledGrokCliDefaults(): Promise<void> {
-	const required = [
-		getBundledGrokBuildExtensionPath(),
-		path.join(getBundledGrokCliVendorDir(), "src", "index.ts"),
-		path.join(getBundledGrokCliVendorDir(), "src", "provider", "register.ts"),
-		getBundledGrokCliModelDefaultsPath(),
-	];
-	for (const filePath of required) {
-		if (!(await Bun.file(filePath).exists())) {
-			throw new Error(`Bundled Grok Build default is missing: ${filePath}`);
-		}
+	if (typeof grokBuildExtensionFactory !== "function") {
+		throw new Error("Bundled Grok Build extension factory is missing");
 	}
-}
-
-export async function getBundledGrokBuildExtensionPaths(): Promise<string[]> {
-	await assertBundledGrokCliDefaults();
-	return [getBundledGrokBuildExtensionPath()];
+	if (!grokCliModelDefaults.includes("grok-composer-2.5-fast")) {
+		throw new Error("Bundled Grok Build model defaults are missing Composer 2.5 Fast");
+	}
 }

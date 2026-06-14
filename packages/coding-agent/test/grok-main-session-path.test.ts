@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { getOAuthProviders } from "@gajae-code/ai/utils/oauth";
 import { setAgentDir } from "@gajae-code/utils";
 import { Settings } from "../src/config/settings";
-import { getBundledGrokBuildExtensionPath } from "../src/defaults/gjc-grok-cli";
+import { BUNDLED_GROK_BUILD_EXTENSION_ID } from "../src/defaults/gjc-grok-cli";
 import { createAgentSession } from "../src/sdk";
 import { SessionManager } from "../src/session/session-manager";
 
@@ -35,9 +35,9 @@ describe("bundled Grok Build session path", () => {
 				expect(grokModels.some(model => model.id === "grok-build")).toBe(true);
 				expect(getOAuthProviders().find(provider => provider.id === "grok-build")?.name).toBe("Grok Build");
 				expect(
-					(session.extensionRunner as unknown as { extensions?: Array<{ path: string }> } | undefined)?.extensions?.some(
-						extension => extension.path === getBundledGrokBuildExtensionPath(),
-					),
+					(
+						session.extensionRunner as unknown as { extensions?: Array<{ path: string }> } | undefined
+					)?.extensions?.some(extension => extension.path === BUNDLED_GROK_BUILD_EXTENSION_ID),
 				).toBe(true);
 			} finally {
 				await session.dispose();

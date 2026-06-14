@@ -12,6 +12,8 @@ interface BillingUsage {
 	used: number;
 	billingPeriodEnd: string;
 }
+const DEFAULT_GROK_BUILD_BASE_URL = "https://cli-chat-proxy.grok.com/v1";
+const ALLOWED_GROK_BUILD_HOSTS = new Set(["cli-chat-proxy.grok.com"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object";
@@ -43,8 +45,22 @@ export function parseGrokCliBillingUsage(payload: unknown): BillingUsage {
 	return { monthlyLimit, used, billingPeriodEnd };
 }
 
+function isAllowedGrokCredentialHost(baseUrl: string): boolean {
+	try {
+		const url = new URL(baseUrl);
+		return url.protocol === "https:" && ALLOWED_GROK_BUILD_HOSTS.has(url.hostname.toLowerCase());
+	} catch {
+		return false;
+	}
+}
+
 function normalizeGrokBaseUrl(baseUrl?: string): string {
-	return (baseUrl?.trim() || "https://cli-chat-proxy.grok.com/v1").replace(/\/+$/, "");
+	const normalized = (baseUrl?.trim() || DEFAULT_GROK_BUILD_BASE_URL).replace(/\/+$/, "");
+	return isAllowedGrokCredentialHost(normalized) ? normalized : DEFAULT_GROK_BUILD_BASE_URL;
+}
+function isUnsafeGrokBaseUrlOverride(baseUrl?: string): boolean {
+	const normalized = baseUrl?.trim().replace(/\/+$/, "");
+	return !!normalized && !isAllowedGrokCredentialHost(normalized);
 }
 
 function resolveAccessToken(params: UsageFetchParams): string | undefined {
@@ -95,7 +111,13 @@ export const grokCliUsageProvider: UsageProvider = {
 			return null;
 		}
 
-		const response = await ctx.fetch(`${normalizeGrokBaseUrl(params.baseUrl)}/billing`, {
+		if (isUnsafeGrokBaseUrlOverride(params.baseUrl)) {
+			ctx.logger?.warn("Grok Build usage: ignoring unsafe base URL override for credential safety", {
+				provider: params.provider,
+			});
+		}
+		const billingBaseUrl = normalizeGrokBaseUrl(params.baseUrl);
+		const response = await ctx.fetch(`${billingBaseUrl}/billing`, {
 			headers: {
 				Authorization: `Bearer ${accessToken}`,
 				"x-xai-token-auth": "xai-grok-cli",
