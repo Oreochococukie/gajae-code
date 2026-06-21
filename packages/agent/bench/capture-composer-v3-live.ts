@@ -47,7 +47,6 @@ type RunResult = {
 	sessionDir: string;
 	sessionFile?: string;
 	exitCode: number;
-	stdout: string;
 	stderr: string;
 	finalText: string;
 	toolCount: number;
@@ -137,6 +136,8 @@ function slugModel(model: string): string {
 	return model.replace(/[/:]/g, "_");
 }
 
+const STDERR_CAPTURE_MAX = 64 * 1024;
+
 async function runGjcPrint(input: {
 	gjcBin: string;
 	cwd: string;
@@ -144,7 +145,7 @@ async function runGjcPrint(input: {
 	prompt: string;
 	sessionDir: string;
 	timeoutSec: number;
-}): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+}): Promise<{ exitCode: number; stderr: string }> {
 	return new Promise((resolve, reject) => {
 		const child = spawn(
 			input.gjcBin,
@@ -155,13 +156,14 @@ async function runGjcPrint(input: {
 				stdio: ["ignore", "pipe", "pipe"],
 			},
 		);
-		let stdout = "";
 		let stderr = "";
-		child.stdout?.on("data", (chunk: Buffer) => {
-			stdout += chunk.toString("utf8");
+		child.stdout?.on("data", () => {
+			// discard JSONL stream; session jsonl on disk is the source of truth
 		});
 		child.stderr?.on("data", (chunk: Buffer) => {
-			stderr += chunk.toString("utf8");
+			if (stderr.length < STDERR_CAPTURE_MAX) {
+				stderr += chunk.toString("utf8").slice(0, STDERR_CAPTURE_MAX - stderr.length);
+			}
 		});
 		const timer = setTimeout(() => {
 			child.kill("SIGTERM");
@@ -172,7 +174,7 @@ async function runGjcPrint(input: {
 		});
 		child.on("close", code => {
 			clearTimeout(timer);
-			resolve({ exitCode: code ?? 1, stdout, stderr });
+			resolve({ exitCode: code ?? 1, stderr });
 		});
 	});
 }
@@ -194,24 +196,21 @@ function countToolsFromSession(lines: Awaited<ReturnType<typeof readSessionJsonl
 	return { toolCount, toolErrorCount };
 }
 
-function extractFinalText(stdout: string): string {
-	const lines = stdout.split("\n").filter(Boolean);
+async function extractFinalTextFromSession(sessionFile: string | undefined): Promise<string> {
+	if (!sessionFile) return "";
+	const lines = await readSessionJsonl(sessionFile);
 	for (let i = lines.length - 1; i >= 0; i--) {
-		try {
-			const obj = JSON.parse(lines[i]!) as Record<string, unknown>;
-			if (obj.type === "message" && obj.message && typeof obj.message === "object") {
-				const content = (obj.message as Record<string, unknown>).content;
-				if (Array.isArray(content)) {
-					for (const part of content) {
-						if (part && typeof part === "object" && (part as Record<string, unknown>).type === "text") {
-							const text = (part as Record<string, unknown>).text;
-							if (typeof text === "string" && text.trim()) return text.trim();
-						}
-					}
-				}
+		const line = lines[i]!;
+		if (line.type !== "message") continue;
+		const message = line.message as Record<string, unknown> | undefined;
+		if (message?.role !== "assistant") continue;
+		const content = message.content;
+		if (!Array.isArray(content)) continue;
+		for (const part of content) {
+			if (part && typeof part === "object" && (part as Record<string, unknown>).type === "text") {
+				const text = (part as Record<string, unknown>).text;
+				if (typeof text === "string" && text.trim()) return text.trim();
 			}
-		} catch {
-			// skip non-json lines
 		}
 	}
 	return "";
@@ -233,7 +232,7 @@ async function executeRow(
 	await fs.mkdir(sessionDir, { recursive: true });
 	await seedScenarioWorkdir(workdir, row.scenarioId);
 
-	const { exitCode, stdout, stderr } = await runGjcPrint({
+	const { exitCode, stderr } = await runGjcPrint({
 		gjcBin: args.gjcBin,
 		cwd: workdir,
 		model: row.model,
@@ -266,6 +265,7 @@ async function executeRow(
 		expected: traceExpectationForScenario(row.scenarioId),
 	});
 
+	const finalText = await extractFinalTextFromSession(sessionFile);
 	const run: RunResult = {
 		role: row.role,
 		model: row.model,
@@ -274,9 +274,8 @@ async function executeRow(
 		sessionDir,
 		sessionFile,
 		exitCode,
-		stdout,
 		stderr,
-		finalText: extractFinalText(stdout),
+		finalText,
 		toolCount,
 		toolErrorCount,
 	};
