@@ -56,6 +56,7 @@ type RunResult = {
 
 function parseArgs(argv: string[]): {
 	dryRun: boolean;
+	skipCredCheck: boolean;
 	k: number;
 	out?: string;
 	candidateModel: string;
@@ -65,6 +66,7 @@ function parseArgs(argv: string[]): {
 	timeoutSec: number;
 } {
 	let dryRun = true;
+	let skipCredCheck = false;
 	let k = 1;
 	let out: string | undefined;
 	let candidateModel = DEFAULT_COMPOSER_CANDIDATE_MODEL;
@@ -76,6 +78,7 @@ function parseArgs(argv: string[]): {
 		const arg = argv[i];
 		if (arg === "--run") dryRun = false;
 		if (arg === "--dry-run") dryRun = true;
+		if (arg === "--skip-cred-check") skipCredCheck = true;
 		if (arg === "-k" || arg === "--k") k = Number(argv[++i] ?? "1");
 		if (arg === "--out") out = argv[++i];
 		if (arg === "--model") candidateModel = argv[++i] ?? candidateModel;
@@ -87,7 +90,7 @@ function parseArgs(argv: string[]): {
 			scenarioFilter = new Set(ids);
 		}
 	}
-	return { dryRun, k, out, candidateModel, baselineModel, gjcBin, scenarioFilter, timeoutSec };
+	return { dryRun, skipCredCheck, k, out, candidateModel, baselineModel, gjcBin, scenarioFilter, timeoutSec };
 }
 
 function hasGrokCreds(): boolean {
@@ -305,7 +308,7 @@ async function main(): Promise<void> {
 			baseline: hasBaselineCreds(),
 		},
 		repo_root: REPO_ROOT,
-		gjc_bin: args.gjcBin,
+		gjc_bin_basename: path.basename(args.gjcBin),
 		planned,
 	};
 
@@ -314,7 +317,7 @@ async function main(): Promise<void> {
 		return;
 	}
 
-	if (!hasGrokCreds() || !hasBaselineCreds()) {
+	if (!args.skipCredCheck && (!hasGrokCreds() || !hasBaselineCreds())) {
 		process.stderr.write(
 			"capture-composer-v3-live: missing GROK_CLI_OAUTH_TOKEN and/or OpenAI/Codex credentials; use --dry-run or set env\n",
 		);
@@ -360,7 +363,7 @@ async function main(): Promise<void> {
 			summaryPath,
 			composer_scenarios_version: COMPOSER_SCENARIOS_VERSION,
 			record_count: records.length,
-			gjc_bin: args.gjcBin,
+			gjc_bin_basename: path.basename(args.gjcBin),
 			trace_sha256: await sha256File(tracePath),
 		},
 		null,
