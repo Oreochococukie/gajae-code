@@ -1,0 +1,396 @@
+#!/usr/bin/env bun
+/**
+ * Plans or runs live Composer V3 matrix capture via isolated GJC print-mode sessions.
+ * Default: --dry-run prints the matrix without API calls.
+ */
+import { spawn } from "node:child_process";
+import * as crypto from "node:crypto";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import { seedScenarioWorkdir } from "./composer-live-fixtures";
+import {
+	buildTraceRecord,
+	findLatestSessionFile,
+	readSessionJsonl,
+	sessionLinesToTraceEvents,
+	traceExpectationForScenario,
+} from "./composer-print-trace";
+import {
+	COMPOSER_SCENARIOS,
+	COMPOSER_SCENARIOS_VERSION,
+	DEFAULT_CODEX_BASELINE_MODEL,
+	DEFAULT_COMPOSER_CANDIDATE_MODEL,
+	SCENARIO_BY_ID,
+	TOTAL_SCENARIO_COUNT,
+	type ScenarioId,
+} from "./composer-scenarios";
+import { scanTextForPublishSecrets } from "./composer-evidence";
+import type { TraceRecord } from "./composer-stability-v3";
+
+const REPO_ROOT = path.resolve(import.meta.dir, "../../..");
+
+type Role = "candidate" | "baseline";
+
+type PlannedRow = {
+	scenarioId: ScenarioId;
+	role: Role;
+	model: string;
+	trial: number;
+	userPrompt: string;
+};
+
+type RunResult = {
+	role: Role;
+	model: string;
+	scenarioId: ScenarioId;
+	workdir: string;
+	sessionDir: string;
+	sessionFile?: string;
+	exitCode: number;
+	stdout: string;
+	stderr: string;
+	finalText: string;
+	toolCount: number;
+	toolErrorCount: number;
+};
+
+function parseArgs(argv: string[]): {
+	dryRun: boolean;
+	k: number;
+	out?: string;
+	candidateModel: string;
+	baselineModel: string;
+	gjcBin: string;
+	scenarioFilter?: Set<ScenarioId>;
+	timeoutSec: number;
+} {
+	let dryRun = true;
+	let k = 1;
+	let out: string | undefined;
+	let candidateModel = DEFAULT_COMPOSER_CANDIDATE_MODEL;
+	let baselineModel = DEFAULT_CODEX_BASELINE_MODEL;
+	let gjcBin = process.env.GJC_BIN?.trim() || "gjc";
+	let scenarioFilter: Set<ScenarioId> | undefined;
+	let timeoutSec = 600;
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i];
+		if (arg === "--run") dryRun = false;
+		if (arg === "--dry-run") dryRun = true;
+		if (arg === "-k" || arg === "--k") k = Number(argv[++i] ?? "1");
+		if (arg === "--out") out = argv[++i];
+		if (arg === "--model") candidateModel = argv[++i] ?? candidateModel;
+		if (arg === "--baseline-model") baselineModel = argv[++i] ?? baselineModel;
+		if (arg === "--gjc") gjcBin = argv[++i] ?? gjcBin;
+		if (arg === "--timeout") timeoutSec = Number(argv[++i] ?? "600");
+		if (arg === "--scenarios") {
+			const ids = (argv[++i] ?? "").split(",").map(s => s.trim()).filter(Boolean) as ScenarioId[];
+			scenarioFilter = new Set(ids);
+		}
+	}
+	return { dryRun, k, out, candidateModel, baselineModel, gjcBin, scenarioFilter, timeoutSec };
+}
+
+function hasGrokCreds(): boolean {
+	return Boolean(process.env.GROK_CLI_OAUTH_TOKEN?.trim());
+}
+
+function hasBaselineCreds(): boolean {
+	return Boolean(
+		process.env.OPENAI_CODEX_OAUTH_TOKEN?.trim() ||
+			process.env.CODEX_OAUTH_TOKEN?.trim() ||
+			process.env.OPENAI_OAUTH_TOKEN?.trim() ||
+			process.env.OPENAI_API_KEY?.trim(),
+	);
+}
+
+function buildMatrix(args: ReturnType<typeof parseArgs>): PlannedRow[] {
+	const scenarios = args.scenarioFilter
+		? COMPOSER_SCENARIOS.filter(s => args.scenarioFilter!.has(s.id))
+		: COMPOSER_SCENARIOS;
+	const planned: PlannedRow[] = [];
+	let trial = 0;
+	for (const scenario of scenarios) {
+		for (let t = 0; t < args.k; t++) {
+			planned.push({
+				scenarioId: scenario.id,
+				role: "candidate",
+				model: args.candidateModel,
+				trial: trial++,
+				userPrompt: scenario.userPrompt,
+			});
+			planned.push({
+				scenarioId: scenario.id,
+				role: "baseline",
+				model: args.baselineModel,
+				trial: trial++,
+				userPrompt: scenario.userPrompt,
+			});
+		}
+	}
+	return planned;
+}
+
+function slugModel(model: string): string {
+	return model.replace(/[/:]/g, "_");
+}
+
+async function runGjcPrint(input: {
+	gjcBin: string;
+	cwd: string;
+	model: string;
+	prompt: string;
+	sessionDir: string;
+	timeoutSec: number;
+}): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+	return new Promise((resolve, reject) => {
+		const child = spawn(
+			input.gjcBin,
+			["-p", "--mode", "json", "--model", input.model, "--session-dir", input.sessionDir, input.prompt],
+			{
+				cwd: input.cwd,
+				env: process.env,
+				stdio: ["ignore", "pipe", "pipe"],
+			},
+		);
+		let stdout = "";
+		let stderr = "";
+		child.stdout?.on("data", (chunk: Buffer) => {
+			stdout += chunk.toString("utf8");
+		});
+		child.stderr?.on("data", (chunk: Buffer) => {
+			stderr += chunk.toString("utf8");
+		});
+		const timer = setTimeout(() => {
+			child.kill("SIGTERM");
+		}, input.timeoutSec * 1000);
+		child.on("error", err => {
+			clearTimeout(timer);
+			reject(err);
+		});
+		child.on("close", code => {
+			clearTimeout(timer);
+			resolve({ exitCode: code ?? 1, stdout, stderr });
+		});
+	});
+}
+
+function countToolsFromSession(lines: Awaited<ReturnType<typeof readSessionJsonl>>): {
+	toolCount: number;
+	toolErrorCount: number;
+} {
+	let toolCount = 0;
+	let toolErrorCount = 0;
+	for (const line of lines) {
+		if (line.type !== "message") continue;
+		const message = line.message as Record<string, unknown> | undefined;
+		if (message?.role === "toolResult") {
+			toolCount++;
+			if (message.isError === true) toolErrorCount++;
+		}
+	}
+	return { toolCount, toolErrorCount };
+}
+
+function extractFinalText(stdout: string): string {
+	const lines = stdout.split("\n").filter(Boolean);
+	for (let i = lines.length - 1; i >= 0; i--) {
+		try {
+			const obj = JSON.parse(lines[i]!) as Record<string, unknown>;
+			if (obj.type === "message" && obj.message && typeof obj.message === "object") {
+				const content = (obj.message as Record<string, unknown>).content;
+				if (Array.isArray(content)) {
+					for (const part of content) {
+						if (part && typeof part === "object" && (part as Record<string, unknown>).type === "text") {
+							const text = (part as Record<string, unknown>).text;
+							if (typeof text === "string" && text.trim()) return text.trim();
+						}
+					}
+				}
+			}
+		} catch {
+			// skip non-json lines
+		}
+	}
+	return "";
+}
+
+async function executeRow(
+	args: ReturnType<typeof parseArgs>,
+	row: PlannedRow,
+	outDir: string,
+	tracePath: string,
+	index: number,
+): Promise<{ run: RunResult; record: TraceRecord }> {
+	const scenario = SCENARIO_BY_ID.get(row.scenarioId);
+	if (!scenario) throw new Error(`unknown scenario ${row.scenarioId}`);
+	const workSlug = `${index}-${row.role}-${row.scenarioId}-${slugModel(row.model)}`;
+	const workdir = path.join(outDir, "work", workSlug);
+	const sessionDir = path.join(outDir, "sessions", workSlug);
+	await fs.mkdir(workdir, { recursive: true });
+	await fs.mkdir(sessionDir, { recursive: true });
+	await seedScenarioWorkdir(workdir, row.scenarioId);
+
+	const { exitCode, stdout, stderr } = await runGjcPrint({
+		gjcBin: args.gjcBin,
+		cwd: workdir,
+		model: row.model,
+		prompt: row.userPrompt,
+		sessionDir,
+		timeoutSec: args.timeoutSec,
+	});
+
+	const sessionFile = await findLatestSessionFile(sessionDir);
+	let events: ReturnType<typeof sessionLinesToTraceEvents> = [];
+	let toolCount = 0;
+	let toolErrorCount = 0;
+	if (sessionFile) {
+		const lines = await readSessionJsonl(sessionFile);
+		events = sessionLinesToTraceEvents(lines, exitCode);
+		const counts = countToolsFromSession(lines);
+		toolCount = counts.toolCount;
+		toolErrorCount = counts.toolErrorCount;
+	} else {
+		events = [{ type: "scenario_result", status: "failed", message: "missing session jsonl" }];
+	}
+
+	const record = buildTraceRecord({
+		scenarioId: row.scenarioId,
+		modelRole: row.role,
+		model: row.model,
+		trial: row.trial,
+		events,
+		tracePath,
+		expected: traceExpectationForScenario(row.scenarioId),
+	});
+
+	const run: RunResult = {
+		role: row.role,
+		model: row.model,
+		scenarioId: row.scenarioId,
+		workdir,
+		sessionDir,
+		sessionFile,
+		exitCode,
+		stdout,
+		stderr,
+		finalText: extractFinalText(stdout),
+		toolCount,
+		toolErrorCount,
+	};
+	return { run, record };
+}
+
+async function sha256File(filePath: string): Promise<string> {
+	const data = await fs.readFile(filePath);
+	return crypto.createHash("sha256").update(data).digest("hex");
+}
+
+async function main(): Promise<void> {
+	const args = parseArgs(process.argv.slice(2));
+	const planned = buildMatrix(args);
+	const runId = new Date().toISOString().replace(/[:.]/g, "-");
+	const outDir =
+		args.out ?? path.join(REPO_ROOT, ".gjc/ultragoal/artifacts", `composer-evidence-${runId}`);
+	const tracePath = path.join(outDir, "traces", "real-gjc-print-traces.json");
+
+	const payload = {
+		schemaVersion: 1,
+		composer_scenarios_version: COMPOSER_SCENARIOS_VERSION,
+		scenario_count: TOTAL_SCENARIO_COUNT,
+		planned_records: planned.length,
+		k: args.k,
+		dry_run: args.dryRun,
+		credentials: {
+			grok: hasGrokCreds(),
+			baseline: hasBaselineCreds(),
+		},
+		repo_root: REPO_ROOT,
+		gjc_bin: args.gjcBin,
+		planned,
+	};
+
+	if (args.dryRun) {
+		process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+		return;
+	}
+
+	if (!hasGrokCreds() || !hasBaselineCreds()) {
+		process.stderr.write(
+			"capture-composer-v3-live: missing GROK_CLI_OAUTH_TOKEN and/or OpenAI/Codex credentials; use --dry-run or set env\n",
+		);
+		process.exit(2);
+	}
+
+	await fs.mkdir(path.dirname(tracePath), { recursive: true });
+	const results: RunResult[] = [];
+	const records: TraceRecord[] = [];
+
+	for (let i = 0; i < planned.length; i++) {
+		const row = planned[i]!;
+		process.stderr.write(`capture: ${row.scenarioId} ${row.role} trial=${row.trial}\n`);
+		const { run, record } = await executeRow(args, row, outDir, tracePath, i);
+		results.push(run);
+		records.push(record);
+	}
+
+	const traceArtifact = {
+		schemaVersion: 1,
+		runId,
+		generatedAt: new Date().toISOString(),
+		records,
+	};
+	await fs.writeFile(tracePath, `${JSON.stringify(traceArtifact, null, 2)}\n`, "utf8");
+
+	const summary = {
+		schemaVersion: 1,
+		runId,
+		outDir,
+		tracePath,
+		results,
+	};
+	const summaryPath = path.join(outDir, "summary.json");
+	await fs.writeFile(summaryPath, `${JSON.stringify(summary, null, 2)}\n`, "utf8");
+
+	const manifestText = JSON.stringify(
+		{
+			schemaVersion: 1,
+			runId,
+			outDir,
+			tracePath,
+			summaryPath,
+			composer_scenarios_version: COMPOSER_SCENARIOS_VERSION,
+			record_count: records.length,
+			gjc_bin: args.gjcBin,
+			trace_sha256: await sha256File(tracePath),
+		},
+		null,
+		2,
+	);
+	const lint = scanTextForPublishSecrets(manifestText);
+	if (!lint.ok) {
+		process.stderr.write(`capture-composer-v3-live: manifest linter failed: ${lint.findings.join(", ")}\n`);
+		process.exit(3);
+	}
+	const manifestPath = path.join(outDir, "provenance-manifest.json");
+	await fs.writeFile(manifestPath, `${manifestText}\n`, "utf8");
+
+	process.stdout.write(
+		`${JSON.stringify(
+			{
+				ok: true,
+				outDir,
+				tracePath,
+				summaryPath,
+				manifestPath,
+				planned_records: planned.length,
+				captured_records: records.length,
+			},
+			null,
+			2,
+		)}\n`,
+	);
+}
+
+if (import.meta.main) {
+	await main();
+}

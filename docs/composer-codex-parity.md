@@ -72,3 +72,16 @@ bun scripts/verify-g002-gates.ts
 ```
 
 Use `mise x bun@1.3.14 -- <command>` when `bun` is not on `PATH`.
+
+## Evidence ladder (code constants)
+
+- `MIN_COMPARABLE_TRACE_SCENARIOS` = 3 — P1 anti-fake-pass for trace scoring.
+- `L2_MIN_SCENARIO_COVERAGE` = 10 — public **L2** claim requires `l2Eligible` on `evidence-report.json` (separate from P1 pass at 3 scenarios).
+- Scenarios + frozen prompts: `packages/agent/bench/composer-scenarios.ts` (`COMPOSER_SCENARIOS_VERSION=v1`).
+
+```sh
+bun packages/agent/bench/capture-composer-v3-live.ts --dry-run
+bun packages/agent/bench/capture-composer-v3-live.ts --run --k 1 --out .gjc/ultragoal/artifacts/composer-evidence-<run-id>
+bun packages/agent/bench/composer-evidence-report.ts --trace-file packages/agent/test/fixtures/composer-stability-v3/traces/parity.json --out /tmp/evidence-report.json
+bun test packages/agent/test/composer-evidence.test.ts
+```
