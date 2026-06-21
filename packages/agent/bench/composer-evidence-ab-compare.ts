@@ -1,0 +1,112 @@
+#!/usr/bin/env bun
+/**
+ * Compare two scored trace corpora (e.g. gjc v0.5.3 vs v0.6.4 live captures).
+ * Point estimate only — not a statistical hypothesis test.
+ */
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import { buildEvidenceReport, type EvidenceReport } from "./composer-evidence";
+import { classifyTraceRecord, type TraceRecord } from "./composer-stability-v3";
+
+const REPO_ROOT = path.resolve(import.meta.dir, "../../..");
+
+async function loadRecords(filePath: string): Promise<TraceRecord[]> {
+	const raw = await fs.readFile(filePath, "utf8");
+	const parsed = JSON.parse(raw) as unknown;
+	if (Array.isArray(parsed)) return parsed as TraceRecord[];
+	if (typeof parsed === "object" && parsed !== null && "records" in parsed) {
+		return (parsed as { records: TraceRecord[] }).records;
+	}
+	return [parsed as TraceRecord];
+}
+
+function trialsFromRecords(records: TraceRecord[]) {
+	return records.map(record => {
+		const c = classifyTraceRecord(record);
+		return {
+			scenarioId: record.scenarioId,
+			modelRole: record.modelRole,
+			model: record.model,
+			trial: record.trial,
+			status: c.status,
+			failureClass: c.failureClasses[0],
+			failureClasses: c.failureClasses,
+			evidence: c.evidence,
+			tracePath: record.tracePath,
+		};
+	});
+}
+
+function armSummary(label: string, gjcVersion: string, report: EvidenceReport) {
+	return {
+		label,
+		gjc_version: gjcVersion,
+		candidate_failure_count: report.candidate_failure_count,
+		baseline_failure_count: report.baseline_failure_count,
+		parity_delta: report.parity_delta,
+		scenario_coverage: report.scenario_coverage,
+		l2_eligible: report.l2Eligible,
+		ladder_max_claim: report.ladderMaxClaim,
+		p1_passed: report.p1.passed,
+	};
+}
+
+async function main(): Promise<void> {
+	const aArg = process.argv.find((_, i, a) => a[i - 1] === "--arm-a");
+	const bArg = process.argv.find((_, i, a) => a[i - 1] === "--arm-b");
+	const aVer = process.argv.find((_, i, a) => a[i - 1] === "--arm-a-version") ?? "unknown";
+	const bVer = process.argv.find((_, i, a) => a[i - 1] === "--arm-b-version") ?? "unknown";
+	const outArg = process.argv.find((_, i, a) => a[i - 1] === "--out");
+
+	if (!aArg || !bArg) {
+		process.stderr.write(
+			"usage: composer-evidence-ab-compare.ts --arm-a <trace.json> --arm-a-version 0.5.3 --arm-b <trace.json> --arm-b-version 0.6.4 [--out report.json]\n",
+		);
+		process.exit(1);
+	}
+
+	const aRecords = await loadRecords(path.resolve(aArg));
+	const bRecords = await loadRecords(path.resolve(bArg));
+	const aReport = buildEvidenceReport(trialsFromRecords(aRecords), {
+		capture_mode: "ab-arm-a",
+		gjc_version: aVer,
+	});
+	const bReport = buildEvidenceReport(trialsFromRecords(bRecords), {
+		capture_mode: "ab-arm-b",
+		gjc_version: bVer,
+	});
+
+	const candidateDelta = aReport.candidate_failure_count - bReport.candidate_failure_count;
+	const baselineDelta = aReport.baseline_failure_count - bReport.baseline_failure_count;
+	const parityDeltaChange = aReport.parity_delta - bReport.parity_delta;
+
+	const payload = {
+		schemaVersion: 1,
+		disclaimer:
+			"Point estimate from paired harness failure counts on frozen trace corpora. Not a statistical hypothesis test. Live A/B requires separate captures with each gjc binary on the same composer-scenarios-v1 prompts.",
+		repo_commit: process.env.EVIDENCE_REPO_COMMIT ?? "dev-evidence",
+		arm_a: armSummary("v0.5.3-or-baseline-arm", aVer, aReport),
+		arm_b: armSummary("v0.6.4-or-candidate-arm", bVer, bReport),
+		comparison: {
+			candidate_failure_count_delta_a_minus_b: candidateDelta,
+			baseline_failure_count_delta_a_minus_b: baselineDelta,
+			parity_delta_change_a_minus_b: parityDeltaChange,
+			interpretation:
+				candidateDelta > 0
+					? "Arm B (typically 0.6.4) shows fewer candidate failures than arm A by count delta."
+					: candidateDelta < 0
+						? "Arm A shows fewer candidate failures than arm B."
+						: "Candidate failure counts tie on this corpus.",
+		},
+		per_scenario_a: aReport.per_scenario,
+		per_scenario_b: bReport.per_scenario,
+	};
+
+	const outPath = outArg ? path.resolve(outArg) : path.join(REPO_ROOT, "evidence-ab-compare.json");
+	await fs.writeFile(outPath, `${JSON.stringify(payload, null, 2)}\n`);
+	process.stdout.write(`${JSON.stringify({ ok: true, outPath, comparison: payload.comparison }, null, 2)}\n`);
+}
+
+if (import.meta.main) {
+	await main();
+}
