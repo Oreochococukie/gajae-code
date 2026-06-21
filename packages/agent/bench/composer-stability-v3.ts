@@ -10,45 +10,29 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { benchRunMetadata, type BenchRunMetadata } from "./_meta";
+import {
+	COMPOSER_SCENARIOS as SCENARIOS,
+	DEFAULT_CODEX_BASELINE_MODEL,
+	DEFAULT_COMPOSER_CANDIDATE_MODEL,
+	MIN_COMPARABLE_TRACE_SCENARIOS,
+	SCENARIO_BY_ID,
+	type FailureClass,
+	type ScenarioDefinition,
+	type ScenarioId,
+} from "./composer-scenarios";
 const REPO_ROOT = path.resolve(import.meta.dir, "../../..");
 
 
-type ScenarioId =
-	| "read-edit-hashline"
-	| "three-turn-tools"
-	| "bash-discipline"
-	| "file-discovery-discipline"
-	| "shell-write-discipline"
-	| "command-contamination"
-	| "grok-sanitize-replay"
-	| "multi-file-search-edit"
-	| "multi-file-search-edit-bad-anchor"
-	| "bad-anchor-recovery"
-	| "tool-json-malformed-recovery"
-	| "multi-turn-yield-discipline"
-	| "timeout-handling";
+const DEFAULT_MODEL = DEFAULT_COMPOSER_CANDIDATE_MODEL;
+const DEFAULT_BASELINE_MODEL = DEFAULT_CODEX_BASELINE_MODEL;
 
-type FailureClass =
-	| "shell-read"
-	| "shell-file-discovery"
-	| "shell-write"
-	| "contaminated-command"
-	| "bad-anchor-unrecovered"
-	| "malformed-tool-args-unrecovered"
-	| "sanitize-replay-regression"
-	| "wrong-file-edit"
-	| "missing-tool-turn"
-	| "timeout";
-
-type ScenarioDefinition = {
-	id: ScenarioId;
-	description: string;
-	turns: string;
-	fixture: string;
-	obligation: string;
-	failureClass: FailureClass;
-	recovery: boolean;
-};
+export type { FailureClass, ScenarioDefinition, ScenarioId } from "./composer-scenarios";
+export {
+	COMPOSER_SCENARIOS,
+	L2_MIN_SCENARIO_COVERAGE,
+	MIN_COMPARABLE_TRACE_SCENARIOS,
+	TOTAL_SCENARIO_COUNT,
+} from "./composer-scenarios";
 
 type BenchMode = "mock" | "trace" | "live";
 
@@ -67,7 +51,7 @@ type ModelRole = "candidate" | "baseline";
 
 type TrialStatus = "passed" | "failed" | "skipped";
 
-type TrialResult = {
+export type TrialResult = {
 	scenarioId: ScenarioId;
 	modelRole: ModelRole;
 	model: string;
@@ -98,7 +82,7 @@ type TraceArtifact = {
 	error?: string;
 };
 
-type P1Summary = {
+export type P1Summary = {
 	candidateFailureCount: number;
 	baselineFailureCount: number;
 	parityDelta: number;
@@ -151,131 +135,6 @@ type ClassifiedTrace = {
 
 const DEFAULT_SEED = 42;
 const DEFAULT_TRIALS = 5;
-const DEFAULT_MODEL = "grok-build/grok-composer-2.5-fast";
-const MIN_COMPARABLE_TRACE_SCENARIOS = 3;
-const DEFAULT_BASELINE_MODEL = "openai-codex/gpt-5.5:low";
-
-const SCENARIOS: ScenarioDefinition[] = [
-	{
-		id: "read-edit-hashline",
-		description: "Read anchored file contents, then apply one hashline edit.",
-		turns: "2-3",
-		fixture: "fixtures/workspace/src/foo.ts",
-		obligation: "final file matches golden and file IO uses read/edit tools only",
-		failureClass: "bad-anchor-unrecovered",
-		recovery: false,
-	},
-	{
-		id: "three-turn-tools",
-		description: "Chain read, search, and edit across three tool turns.",
-		turns: "3+",
-		fixture: "fixtures/workspace/src/{a,b}.ts",
-		obligation: "all tool calls are well-formed and final edit applies",
-		failureClass: "missing-tool-turn",
-		recovery: false,
-	},
-	{
-		id: "bash-discipline",
-		description: "User asks for file content; model must avoid shell reads.",
-		turns: "2",
-		fixture: "fixtures/workspace/src/secret.ts",
-		obligation: "no bash/cat/sed/awk/grep/head/tail file reads",
-		failureClass: "shell-read",
-		recovery: false,
-	},
-	{
-		id: "file-discovery-discipline",
-		description: "Locate candidate files without shell ls/find/fd/git-ls-files shortcuts.",
-		turns: "2-3",
-		fixture: "fixtures/workspace/src/**/*.ts",
-		obligation: "file discovery uses the find tool, not shell directory listing commands",
-		failureClass: "shell-file-discovery",
-		recovery: false,
-	},
-	{
-		id: "shell-write-discipline",
-		description: "Apply edits without shell redirection, tee, sed -i, or script writes.",
-		turns: "2-4",
-		fixture: "fixtures/workspace/src/write-target.ts",
-		obligation: "all file mutation uses edit/write tool calls only",
-		failureClass: "shell-write",
-		recovery: false,
-	},
-	{
-		id: "command-contamination",
-		description: "Keep bash command arguments free of reasoning prose and Markdown fences.",
-		turns: "2",
-		fixture: "fixtures/transcripts/command-contamination/*.json",
-		obligation: "shell command strings contain commands only, not analysis text",
-		failureClass: "contaminated-command",
-		recovery: false,
-	},
-	{
-		id: "grok-sanitize-replay",
-		description: "Replay grok-cli payload sanitize edge cases.",
-		turns: "2-4",
-		fixture: "fixtures/transcripts/grok-sanitize-replay/*.json",
-		obligation: "sanitized replay preserves discipline and tool pairing",
-		failureClass: "sanitize-replay-regression",
-		recovery: true,
-	},
-	{
-		id: "multi-file-search-edit",
-		description: "Search multiple files, choose the right target, then edit.",
-		turns: "3-5",
-		fixture: "fixtures/workspace/src/pkg/*",
-		obligation: "correct file chosen and patched",
-		failureClass: "wrong-file-edit",
-		recovery: false,
-	},
-	{
-		id: "multi-file-search-edit-bad-anchor",
-		description: "Recover from a stale anchor after multi-file search.",
-		turns: "3-6",
-		fixture: "fixtures/workspace/src/target.ts",
-		obligation: "first edit fails predictably, re-read occurs, second edit succeeds",
-		failureClass: "bad-anchor-unrecovered",
-		recovery: true,
-	},
-	{
-		id: "bad-anchor-recovery",
-		description: "Recover from a stale anchor in a single-file edit.",
-		turns: "3-5",
-		fixture: "fixtures/workspace/src/recover.ts",
-		obligation: "failed edit is followed by re-anchor read and successful edit",
-		failureClass: "bad-anchor-unrecovered",
-		recovery: true,
-	},
-	{
-		id: "tool-json-malformed-recovery",
-		description: "Recover after one malformed tool-argument payload.",
-		turns: "2-4",
-		fixture: "fixtures/transcripts/tool-json-malformed-recovery/*.json",
-		obligation: "malformed args are corrected with a valid follow-up call",
-		failureClass: "malformed-tool-args-unrecovered",
-		recovery: true,
-	},
-	{
-		id: "multi-turn-yield-discipline",
-		description: "Maintain file IO discipline across a longer multi-turn session.",
-		turns: "4+",
-		fixture: "fixtures/workspace/src/multi.ts",
-		obligation: "no shell reads across turns and task completes",
-		failureClass: "shell-read",
-		recovery: false,
-	},
-	{
-		id: "timeout-handling",
-		description: "Detect turn/run timeouts as first-class instability failures.",
-		turns: "1+",
-		fixture: "fixtures/transcripts/timeout/*.json",
-		obligation: "deadline or timeout failures count against parity instead of being ignored",
-		failureClass: "timeout",
-		recovery: false,
-	},
-];
-
-const SCENARIO_BY_ID = new Map(SCENARIOS.map(scenario => [scenario.id, scenario]));
 const EDIT_TOOL_NAMES = new Set(["edit", "write", "apply_patch", "applyPatch", "patch"]);
 const READ_TOOL_NAMES = new Set(["read", "search", "find"]);
 const SHELL_TOOL_NAMES = new Set(["bash", "shell", "executeBash", "terminal"]);
@@ -878,7 +737,7 @@ async function loadTraceRecords(
 	return { records, artifacts };
 }
 
-function createP1Summary(trialResults: TrialResult[], reason?: string): P1Summary {
+export function createP1Summary(trialResults: TrialResult[], reason?: string): P1Summary {
 	const candidateResults = trialResults.filter(result => result.modelRole === "candidate");
 	const baselineResults = trialResults.filter(result => result.modelRole === "baseline");
 	const candidateFailureCount = candidateResults.filter(result => result.status === "failed").length;
