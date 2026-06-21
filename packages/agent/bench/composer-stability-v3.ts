@@ -518,7 +518,7 @@ export function classifyTraceRecord(record: TraceRecord): ClassifiedTrace {
 		if (SANITIZE_PATTERN.test(text) && isEventError(event)) addFailure(failures, "sanitize-replay-regression");
 		if (ANCHOR_ERROR_PATTERN.test(text)) {
 			sawAnchorErrorAt = index;
-			anchorRecoveryTargetPath = eventPath(event) ?? record.expected.targetPath;
+			anchorRecoveryTargetPath = eventPath(event) ?? record.expected?.targetPath;
 			readAfterAnchorErrorAt = -1;
 			readAfterAnchorErrorPath = undefined;
 			sawRecoveredAnchorError = false;
@@ -526,7 +526,7 @@ export function classifyTraceRecord(record: TraceRecord): ClassifiedTrace {
 		if (MALFORMED_ARGS_PATTERN.test(text)) {
 			sawMalformedArgsAt = index;
 			malformedArgsToolName = toolName;
-			malformedArgsPath = eventPath(event) ?? record.expected.targetPath;
+			malformedArgsPath = eventPath(event) ?? record.expected?.targetPath;
 			sawSuccessAfterMalformedArgs = false;
 		}
 		if (sawAnchorErrorAt >= 0 && index > sawAnchorErrorAt && isReadEvent(event) && isSuccessfulToolEvent(event)) {
@@ -557,9 +557,9 @@ export function classifyTraceRecord(record: TraceRecord): ClassifiedTrace {
 		if (expectedPath && actualPath && path.normalize(expectedPath) !== path.normalize(actualPath)) {
 			addFailure(failures, "wrong-file-edit");
 		}
-		if (record.expected.targetPath && toolName && EDIT_TOOL_NAMES.has(toolName)) {
+		if (record.expected?.targetPath && toolName && EDIT_TOOL_NAMES.has(toolName)) {
 			const targetPath = eventPath(event);
-			if (targetPath && path.normalize(targetPath) !== path.normalize(record.expected.targetPath)) {
+			if (targetPath && path.normalize(targetPath) !== path.normalize(record.expected?.targetPath)) {
 				addFailure(failures, "wrong-file-edit");
 			}
 		}
@@ -576,10 +576,10 @@ export function classifyTraceRecord(record: TraceRecord): ClassifiedTrace {
 	if (sawMalformedArgsAt >= 0 && !sawSuccessAfterMalformedArgs) {
 		addFailure(failures, "malformed-tool-args-unrecovered");
 	}
-	for (const requiredTool of record.expected.requiredTools ?? []) {
+	for (const requiredTool of record.expected?.requiredTools ?? []) {
 		if (!calledTools.has(requiredTool)) addFailure(failures, "missing-tool-turn");
 	}
-	if (record.expected.requireSuccess === true && !sawSuccessfulTerminal) {
+	if (record.expected?.requireSuccess === true && !sawSuccessfulTerminal) {
 		addFailure(failures, "missing-tool-turn");
 	}
 
