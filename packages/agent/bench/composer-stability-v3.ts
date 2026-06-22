@@ -146,8 +146,10 @@ const FILE_WRITE_COMMAND_PATTERN = /(?:^|[;&|\s])(?:sed\s+-i|perl\s+-pi)\b|(?:^|
 const COMMAND_CONTAMINATION_PATTERN = /```|^\s*(?:I\s+(?:will|need|am going)|We\s+(?:need|will)|First[, ]|Now[, ]|Let's)\b/im;
 const ANCHOR_ERROR_PATTERN = /(?:anchor|hashline|stale).{0,80}(?:mismatch|do not match|rejected|invalid|bad)|(?:edit rejected).{0,80}(?:anchor|hashline)/i;
 const MALFORMED_ARGS_PATTERN = /(?:malformed|invalid|contaminated).{0,80}(?:json|argument|args|tool)|schema validation|failed to parse/i;
-const SANITIZE_PATTERN = /sanitize|harmony|protocol leak|to=functions|contaminated tool/i;
+const SANITIZE_PATTERN = /sanitize(?:d|r)?\s+(?:payload|replay|output)?\s*(?:failed|failure|error|regression)|harmony|protocol leak|to=functions|contaminated tool/i;
 const TIMEOUT_PATTERN = /timeout|timed out|deadline/i;
+const PATH_NOT_FOUND_PATTERN = /\bPath ['"].*['"] not found\b/i;
+const FRESH_ANCHOR_LINE_PATTERN = /^\*\d+[a-z]{2}\|/m;
 
 function parseArgs(argv: string[]): CliOptions {
 	const options: CliOptions = {
@@ -406,7 +408,11 @@ function eventCommand(event: JsonObject): string | undefined {
 function eventPath(event: JsonObject): string | undefined {
 	const args = eventArgs(event);
 	if (isJsonObject(args)) {
-		return asString(args.path) ?? asString(args.filePath) ?? asString(args.file_path) ?? asString(args.targetPath);
+		const direct = asString(args.path) ?? asString(args.filePath) ?? asString(args.file_path) ?? asString(args.targetPath);
+		if (direct) return direct;
+		const input = asString(args.input);
+		const sectionPath = input?.match(/^§(.+)$/m)?.[1]?.trim();
+		if (sectionPath) return sectionPath;
 	}
 	return asString(event.path) ?? asString(event.filePath) ?? asString(event.file_path) ?? asString(event.targetPath);
 }
@@ -419,6 +425,14 @@ function isEventError(event: JsonObject): boolean {
 	const status = asString(event.status)?.toLowerCase();
 	const type = asString(event.type)?.toLowerCase();
 	return status === "failed" || status === "error" || event.isError === true || type?.includes("error") === true;
+}
+
+function isTimeoutFailureEvent(event: JsonObject, text: string): boolean {
+	return isEventError(event) && TIMEOUT_PATTERN.test(text);
+}
+
+function isSanitizeReplayFailureEvent(event: JsonObject, text: string): boolean {
+	return isEventError(event) && SANITIZE_PATTERN.test(text) && !PATH_NOT_FOUND_PATTERN.test(text);
 }
 
 function isSuccessfulToolEvent(event: JsonObject): boolean {
@@ -499,6 +513,7 @@ export function classifyTraceRecord(record: TraceRecord): ClassifiedTrace {
 	let anchorRecoveryTargetPath: string | undefined;
 	let readAfterAnchorErrorPath: string | undefined;
 	let sawRecoveredAnchorError = false;
+	let anchorErrorProvidedFreshAnchors = false;
 	let sawMalformedArgsAt = -1;
 	let malformedArgsToolName: string | undefined;
 	let malformedArgsPath: string | undefined;
@@ -514,13 +529,14 @@ export function classifyTraceRecord(record: TraceRecord): ClassifiedTrace {
 		if (isShellFileDiscoveryEvent(event)) addFailure(failures, "shell-file-discovery");
 		if (isShellWriteEvent(event)) addFailure(failures, "shell-write");
 		if (isContaminatedCommandEvent(event)) addFailure(failures, "contaminated-command");
-		if (TIMEOUT_PATTERN.test(text)) addFailure(failures, "timeout");
-		if (SANITIZE_PATTERN.test(text) && isEventError(event)) addFailure(failures, "sanitize-replay-regression");
+		if (isTimeoutFailureEvent(event, text)) addFailure(failures, "timeout");
+		if (isSanitizeReplayFailureEvent(event, text)) addFailure(failures, "sanitize-replay-regression");
 		if (ANCHOR_ERROR_PATTERN.test(text)) {
 			sawAnchorErrorAt = index;
 			anchorRecoveryTargetPath = eventPath(event) ?? record.expected?.targetPath;
 			readAfterAnchorErrorAt = -1;
 			readAfterAnchorErrorPath = undefined;
+			anchorErrorProvidedFreshAnchors = FRESH_ANCHOR_LINE_PATTERN.test(text);
 			sawRecoveredAnchorError = false;
 		}
 		if (MALFORMED_ARGS_PATTERN.test(text)) {
@@ -536,7 +552,12 @@ export function classifyTraceRecord(record: TraceRecord): ClassifiedTrace {
 				readAfterAnchorErrorPath = readPath ?? anchorRecoveryTargetPath;
 			}
 		}
-		if (readAfterAnchorErrorAt >= 0 && index > readAfterAnchorErrorAt && isSuccessfulEditEvent(event)) {
+		if (
+			sawAnchorErrorAt >= 0 &&
+			index > sawAnchorErrorAt &&
+			isSuccessfulEditEvent(event) &&
+			(readAfterAnchorErrorAt >= 0 || anchorErrorProvidedFreshAnchors)
+		) {
 			const editPath = eventPath(event);
 			if (matchesNormalizedPath(anchorRecoveryTargetPath ?? readAfterAnchorErrorPath, editPath)) {
 				sawRecoveredAnchorError = true;

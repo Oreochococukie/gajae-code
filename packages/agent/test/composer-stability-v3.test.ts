@@ -257,6 +257,25 @@ describe("composer-stability-v3 trace classifier", () => {
 				],
 			}),
 		);
+		const rejectionOutputRecovery = classifyTraceRecord(
+			record({
+				scenarioId: "bad-anchor-recovery",
+				events: [
+					{
+						type: "tool_execution_end",
+						toolName: "edit",
+						status: "error",
+						message: "Edit rejected: anchors do not match\n*1pa|export const marker = 'pending';",
+					},
+					{
+						type: "tool_execution_end",
+						toolName: "edit",
+						status: "success",
+						arguments: { input: "§src/recover.ts\n≔1pa\nexport const marker = 'done';" },
+					},
+				],
+			}),
+		);
 		const wrongOrderRecovery = classifyTraceRecord(
 			record({
 				scenarioId: "bad-anchor-recovery",
@@ -300,6 +319,7 @@ describe("composer-stability-v3 trace classifier", () => {
 		);
 
 		expect(recovered.status).toBe("passed");
+		expect(rejectionOutputRecovery.status).toBe("passed");
 		expect(unrecovered.status).toBe("failed");
 		expect(unrecovered.failureClasses).toContain("bad-anchor-unrecovered");
 		expect(ambiguousRecovery.failureClasses).toContain("bad-anchor-unrecovered");
@@ -422,6 +442,38 @@ describe("composer-stability-v3 trace classifier", () => {
 		expect(missingTool.failureClasses).toContain("missing-tool-turn");
 		expect(genericTerminalFailure.failureClasses).toContain("missing-tool-turn");
 		expect(sanitize.failureClasses).toContain("sanitize-replay-regression");
+	});
+
+	it("does not classify scenario names or missing-path text as timeout/sanitize failures", () => {
+		const successfulTimeoutPath = classifyTraceRecord(
+			record({
+				scenarioId: "timeout-handling",
+				events: [
+					{
+						type: "tool_execution_end",
+						toolName: "read",
+						status: "success",
+						message: "fixtures/transcripts/timeout/sample.json",
+					},
+				],
+			}),
+		);
+		const missingSanitizePath = classifyTraceRecord(
+			record({
+				scenarioId: "grok-sanitize-replay",
+				events: [
+					{
+						type: "tool_execution_end",
+						toolName: "read",
+						status: "error",
+						message: "Path '/tmp/work/grok-sanitize-replay/parity.json' not found",
+					},
+				],
+			}),
+		);
+
+		expect(successfulTimeoutPath.failureClasses).not.toContain("timeout");
+		expect(missingSanitizePath.failureClasses).not.toContain("sanitize-replay-regression");
 	});
 
 	it("scores trace parity over candidate and baseline artifacts", async () => {
