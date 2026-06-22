@@ -9,6 +9,7 @@ import {
 	traceExpectationForScenario,
 } from "../bench/composer-print-trace";
 import { classifyTraceRecord } from "../bench/composer-stability-v3";
+import "../bench/capture-composer-v3-live";
 
 describe("composer-live-fixtures", () => {
 	it("seeds bash-discipline workdir", async () => {
@@ -16,6 +17,44 @@ describe("composer-live-fixtures", () => {
 		await seedScenarioWorkdir(dir, "bash-discipline");
 		const text = await fs.readFile(path.join(dir, "src", "secret.ts"), "utf8");
 		expect(text).toContain("LIVE_SECRET");
+	});
+});
+
+describe("capture-composer-v3-live dry-run", () => {
+	it("prints L3 planning metadata without running live sessions", async () => {
+		const proc = Bun.spawn(
+			[
+				process.execPath,
+				"packages/agent/bench/capture-composer-v3-live.ts",
+				"--dry-run",
+				"--k",
+				"3",
+				"--scenarios",
+				"bash-discipline",
+				"--model",
+				"grok-build/grok-composer-2.5-fast",
+				"--baseline-model",
+				"openai-codex/gpt-5.5:low",
+			],
+			{ cwd: path.resolve(import.meta.dir, "../../..") },
+		);
+		const stdout = await new Response(proc.stdout).text();
+		const stderr = await new Response(proc.stderr).text();
+		expect(await proc.exited).toBe(0);
+		expect(stderr).toBe("");
+
+		const payload = JSON.parse(stdout) as {
+			capture_mode: string;
+			k: number;
+			planned_records: number;
+			candidate_model: string;
+			baseline_model: string;
+		};
+		expect(payload.capture_mode).toBe("print");
+		expect(payload.k).toBe(3);
+		expect(payload.planned_records).toBe(6);
+		expect(payload.candidate_model).toBe("grok-build/grok-composer-2.5-fast");
+		expect(payload.baseline_model).toBe("openai-codex/gpt-5.5:low");
 	});
 });
 

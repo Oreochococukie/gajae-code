@@ -6,6 +6,7 @@ import { buildEvidenceReport, scanTextForPublishSecrets } from "../bench/compose
 import { COMPOSER_SCENARIOS, L2_MIN_SCENARIO_COVERAGE, TOTAL_SCENARIO_COUNT } from "../bench/composer-scenarios";
 import type { TraceRecord, TrialResult } from "../bench/composer-stability-v3";
 import "../bench/composer-evidence-ab-compare";
+import "../bench/composer-evidence-report";
 
 describe("composer-scenarios SoT", () => {
 	it("exports 13 scenarios with userPrompt", () => {
@@ -17,6 +18,32 @@ describe("composer-scenarios SoT", () => {
 });
 
 describe("composer-evidence report", () => {
+	function passingMatrixTrials(k: number): TrialResult[] {
+		const trials: TrialResult[] = [];
+		let trial = 0;
+		for (const scenario of COMPOSER_SCENARIOS) {
+			for (let i = 0; i < k; i++) {
+				trials.push({
+					scenarioId: scenario.id,
+					modelRole: "candidate",
+					model: "grok-build/grok-composer-2.5-fast",
+					trial: trial++,
+					status: "passed",
+					evidence: "ok",
+				});
+				trials.push({
+					scenarioId: scenario.id,
+					modelRole: "baseline",
+					model: "openai-codex/gpt-5.5:low",
+					trial: trial++,
+					status: "passed",
+					evidence: "ok",
+				});
+			}
+		}
+		return trials;
+	}
+
 	it("l2Eligible false below L2_MIN coverage", () => {
 		const trials: TrialResult[] = [
 			{
@@ -41,6 +68,92 @@ describe("composer-evidence report", () => {
 		expect(L2_MIN_SCENARIO_COVERAGE).toBe(10);
 		expect(report.l2Eligible).toBe(false);
 		expect(report.ladderMaxClaim).not.toBe("L2");
+	});
+
+	it("reports L3 refusal reasons for K=1 trace replay", () => {
+		const trials: TrialResult[] = [
+			{
+				scenarioId: "bash-discipline",
+				modelRole: "candidate",
+				model: "grok-build/grok-composer-2.5-fast",
+				trial: 0,
+				status: "passed",
+				evidence: "ok",
+			},
+			{
+				scenarioId: "bash-discipline",
+				modelRole: "baseline",
+				model: "openai-codex/gpt-5.5:low",
+				trial: 1,
+				status: "passed",
+				evidence: "ok",
+			},
+		];
+		const report = buildEvidenceReport(trials, {
+			capture_mode: "trace-replay",
+			comparison_kind: "historical-frozen-trace",
+			planned_records: 2,
+			captured_records: 2,
+			trace_sha256: "trace-hash",
+			manifest_sha256: "manifest-hash",
+		});
+
+		expect(report.l3Eligible).toBe(false);
+		expect(report.l3RefusalReasons).toEqual(
+			expect.arrayContaining(["k_lt_3", "missing_scenario", "trace_replay_not_l3", "p1_not_passed"]),
+		);
+		expect(report.planned_records).toBe(2);
+		expect(report.captured_records).toBe(2);
+		expect(report.min_k_per_scenario_role).toBe(0);
+		expect(report.model_ids.candidate).toEqual(["grok-build/grok-composer-2.5-fast"]);
+		expect(report.candidate_model).toBe("grok-build/grok-composer-2.5-fast");
+	});
+
+	it("marks full K>=3 live print evidence L3 eligible", () => {
+		const trials = passingMatrixTrials(3);
+		const report = buildEvidenceReport(
+			trials,
+			{
+				capture_mode: "print",
+				planned_records: trials.length,
+				captured_records: trials.length,
+				expected_k_per_scenario_role: 3,
+				trace_sha256: "trace-hash",
+				manifest_sha256: "manifest-hash",
+			},
+			'{"schemaVersion":1,"trace_sha256":"trace-hash"}',
+		);
+
+		expect(report.l3Eligible).toBe(true);
+		expect(report.ladderMaxClaim).toBe("L3");
+		expect(report.l3RefusalReasons).toEqual([]);
+		expect(report.min_k_per_scenario_role).toBe(3);
+		expect(report.role_counts).toEqual({ candidate: 39, baseline: 39 });
+		expect(report.planned_records).toBe(78);
+		expect(report.captured_records).toBe(78);
+		expect(report.trace_sha256).toBe("trace-hash");
+		expect(report.manifest_sha256).toBe("manifest-hash");
+	});
+
+	it("refuses L3 for mixed model ids and partial captures", () => {
+		const trials = passingMatrixTrials(3);
+		trials[0] = { ...trials[0]!, model: "grok-build/grok-composer-2.5-slow" };
+		const report = buildEvidenceReport(trials, {
+			capture_mode: "print",
+			planned_records: trials.length + 1,
+			captured_records: trials.length,
+			expected_k_per_scenario_role: 3,
+			trace_sha256: "trace-hash",
+			manifest_sha256: "manifest-hash",
+		});
+
+		expect(report.l3Eligible).toBe(false);
+		expect(report.l3RefusalReasons).toEqual(expect.arrayContaining(["mixed_model_ids", "partial_capture"]));
+		expect(report.candidate_model).toBe("mixed");
+		expect(report.model_ids.candidate).toEqual([
+			"grok-build/grok-composer-2.5-fast",
+			"grok-build/grok-composer-2.5-slow",
+		]);
 	});
 
 	it("manifest linter rejects home paths", () => {
@@ -111,9 +224,11 @@ describe("composer-evidence report", () => {
 
 		const payloadText = await fs.readFile(outPath, "utf8");
 		const payload = JSON.parse(payloadText) as {
+			comparison_kind: string;
 			comparison: { candidate_failure_count_delta_a_minus_b: number };
 		};
 		expect(payload.comparison.candidate_failure_count_delta_a_minus_b).toBe(1);
+		expect(payload.comparison_kind).toBe("historical-frozen-trace");
 		expect(payloadText).not.toContain("ab-arm-a");
 		expect(payloadText).not.toContain("ab-arm-b");
 	});

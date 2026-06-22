@@ -100,10 +100,12 @@ async function main(): Promise<void> {
 	const bRecords = await loadRecords(path.resolve(bArg));
 	const aReport = buildEvidenceReport(trialsFromRecords(aRecords), {
 		capture_mode: "trace-replay",
+		comparison_kind: "historical-frozen-trace",
 		gjc_version: aVer,
 	});
 	const bReport = buildEvidenceReport(trialsFromRecords(bRecords), {
 		capture_mode: "trace-replay",
+		comparison_kind: "historical-frozen-trace",
 		gjc_version: bVer,
 	});
 
@@ -113,6 +115,7 @@ async function main(): Promise<void> {
 
 	const payload = {
 		schemaVersion: 1,
+		comparison_kind: "historical-frozen-trace",
 		disclaimer:
 			"Point estimate from paired harness failure counts on frozen trace corpora. Not a statistical hypothesis test. Live A/B requires separate captures with each gjc binary on the same composer-scenarios-v1 prompts.",
 		repo_commit: process.env.EVIDENCE_REPO_COMMIT ?? "dev-evidence",
