@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
+import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { buildEvidenceReport } from "./composer-evidence";
+import { buildEvidenceReport, type CaptureMode, type EvidenceReportMeta } from "./composer-evidence";
 import { classifyTraceRecord, type TraceRecord } from "./composer-stability-v3";
 
 const REPO_ROOT = path.resolve(import.meta.dir, "../../..");
@@ -14,6 +15,88 @@ async function loadTraceFile(filePath: string): Promise<TraceRecord[]> {
 		return (parsed as { records: TraceRecord[] }).records;
 	}
 	return [parsed as TraceRecord];
+}
+
+type ProvenanceManifest = {
+	schemaVersion?: number;
+	composer_scenarios_version?: string;
+	capture_mode?: CaptureMode;
+	gjc_version?: string;
+	git_sha?: string;
+	tracePath?: string;
+	trace_sha256?: string;
+	manifest_sha256?: string;
+	planned_records?: number;
+	record_count?: number;
+	captured_records?: number;
+	k?: number;
+	candidate_model?: string;
+	baseline_model?: string;
+};
+
+function isCaptureMode(value: unknown): value is CaptureMode {
+	return value === "print" || value === "tmux" || value === "hermes-mcp" || value === "trace-replay";
+}
+
+function parseManifest(text: string): ProvenanceManifest | undefined {
+	if (!text.trim()) return undefined;
+	try {
+		const parsed = JSON.parse(text) as unknown;
+		return typeof parsed === "object" && parsed !== null ? (parsed as ProvenanceManifest) : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function sha256Text(text: string): string {
+	return crypto.createHash("sha256").update(text).digest("hex");
+}
+
+async function sha256File(filePath: string): Promise<string | undefined> {
+	try {
+		const data = await fs.readFile(filePath);
+		return crypto.createHash("sha256").update(data).digest("hex");
+	} catch {
+		return undefined;
+	}
+}
+
+function manifestPathForTraceFile(traceFileArg: string | undefined): string {
+	if (!traceFileArg) return "";
+	const resolved = path.resolve(traceFileArg);
+	return path.join(path.dirname(path.dirname(resolved)), "provenance-manifest.json");
+}
+
+function metaFromManifest(input: {
+	records: TraceRecord[];
+	traceFileArg?: string;
+	traceDirArg?: string;
+	manifest?: ProvenanceManifest;
+	manifestText: string;
+}): EvidenceReportMeta {
+	const tracePath = input.traceFileArg ? path.resolve(input.traceFileArg) : undefined;
+	const captureMode = isCaptureMode(input.manifest?.capture_mode) ? input.manifest.capture_mode : "trace-replay";
+	const traceArtifacts = [tracePath, input.traceDirArg ? path.resolve(input.traceDirArg) : undefined].filter(
+		(value): value is string => Boolean(value),
+	);
+	const actualModelIds = {
+		candidate: [...new Set(input.records.filter(record => record.modelRole === "candidate").map(record => record.model))].sort(),
+		baseline: [...new Set(input.records.filter(record => record.modelRole === "baseline").map(record => record.model))].sort(),
+	};
+
+	return {
+		capture_mode: captureMode,
+		composer_scenarios_version: input.manifest?.composer_scenarios_version,
+		gjc_version: input.manifest?.gjc_version,
+		git_sha: input.manifest?.git_sha,
+		trace_artifacts: traceArtifacts,
+		trace_sha256: input.manifest?.trace_sha256,
+		manifest_sha256: input.manifestText ? sha256Text(input.manifestText) : input.manifest?.manifest_sha256,
+		planned_records: input.manifest?.planned_records,
+		captured_records: input.manifest?.captured_records ?? input.manifest?.record_count ?? input.records.length,
+		expected_k_per_scenario_role: input.manifest?.k,
+		actual_model_ids: actualModelIds,
+	};
 }
 
 async function main(): Promise<void> {
@@ -49,15 +132,22 @@ async function main(): Promise<void> {
 		};
 	});
 
-	const manifestPath = traceDirArg ? path.join(path.resolve(traceDirArg), "..", "provenance-manifest.json") : "";
+	const manifestPath = traceDirArg
+		? path.join(path.resolve(traceDirArg), "..", "provenance-manifest.json")
+		: manifestPathForTraceFile(traceFileArg);
 	let manifestText = "";
 	try {
 		manifestText = await fs.readFile(manifestPath, "utf8");
 	} catch {
 		manifestText = "";
 	}
+	const manifest = parseManifest(manifestText);
+	const meta = metaFromManifest({ records, traceFileArg, traceDirArg, manifest, manifestText });
+	if (!meta.trace_sha256 && traceFileArg) {
+		meta.trace_sha256 = await sha256File(path.resolve(traceFileArg));
+	}
 
-	const report = buildEvidenceReport(trials, { capture_mode: "trace-replay" }, manifestText);
+	const report = buildEvidenceReport(trials, meta, manifestText);
 	const outPath = outArg ? path.resolve(outArg) : path.join(REPO_ROOT, "evidence-report.json");
 	await fs.writeFile(outPath, `${JSON.stringify(report, null, 2)}\n`);
 	process.stdout.write(`${JSON.stringify({ ok: true, outPath, ladderMaxClaim: report.ladderMaxClaim, l2Eligible: report.l2Eligible }, null, 2)}\n`);
