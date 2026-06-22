@@ -226,8 +226,10 @@ describe("composer-evidence report", () => {
 
 	it("A/B compare keeps arm labels out of capture_mode metadata", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "composer-ab-compare-"));
-		const armA = path.join(tempDir, "arm-a.json");
-		const armB = path.join(tempDir, "arm-b.json");
+		const traceDir = path.join(tempDir, "traces");
+		await fs.mkdir(traceDir, { recursive: true });
+		const armA = path.join(traceDir, "arm-a.json");
+		const armB = path.join(traceDir, "arm-b.json");
 		const outPath = path.join(tempDir, "ab-report.json");
 		const records = (candidateEvents: TraceRecord["events"]): TraceRecord[] => [
 			{
@@ -262,6 +264,10 @@ describe("composer-evidence report", () => {
 			),
 		);
 		await fs.writeFile(armB, JSON.stringify(records([])));
+		await fs.writeFile(
+			path.join(tempDir, "provenance-manifest.json"),
+			JSON.stringify({ schemaVersion: 1, composer_scenarios_version: "v1", record_count: 2 }),
+		);
 
 		const proc = Bun.spawn(
 			[
@@ -287,10 +293,18 @@ describe("composer-evidence report", () => {
 		const payloadText = await fs.readFile(outPath, "utf8");
 		const payload = JSON.parse(payloadText) as {
 			comparison_kind: string;
+			disclaimer: string;
+			arm_a: { scenario_coverage_ratio: string };
+			arm_b: { scenario_coverage_ratio: string };
 			comparison: { candidate_failure_count_delta_a_minus_b: number };
 		};
 		expect(payload.comparison.candidate_failure_count_delta_a_minus_b).toBe(1);
 		expect(payload.comparison_kind).toBe("historical-frozen-trace");
+		expect(payload.disclaimer).toContain("frozen trace corpora");
+		expect(payload.disclaimer).toContain("same versioned Composer scenario prompts");
+		expect(payload.disclaimer).not.toContain("composer-scenarios-v1");
+		expect(payload.arm_a.scenario_coverage_ratio).toBe("1/13");
+		expect(payload.arm_b.scenario_coverage_ratio).toBe("1/13");
 		expect(payloadText).not.toContain("ab-arm-a");
 		expect(payloadText).not.toContain("ab-arm-b");
 	});
