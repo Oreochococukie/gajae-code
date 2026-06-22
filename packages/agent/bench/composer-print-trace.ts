@@ -20,6 +20,16 @@ export function traceExpectationForScenario(scenarioId: ScenarioId): TraceExpect
 			return { targetPath: "src/a.ts", requireSuccess: true };
 		case "read-edit-hashline":
 			return { targetPath: "src/foo.ts", requireSuccess: true };
+		case "hard-guard-feedback":
+			return { requiredTools: ["bash", "read"], requireSuccess: true };
+		case "legitimate-bash-after-tools":
+			return { requiredTools: ["find", "read", "bash"], requireSuccess: true };
+		case "wrong-target-disambiguation":
+			return { targetPath: "fixtures/workspace/src/disambiguation/target.ts", requireSuccess: true };
+		case "malformed-edit-recovery":
+			return { targetPath: "fixtures/workspace/src/malformed-edit.ts", requireSuccess: true };
+		case "cost-safe-timeout":
+			return { requiredTools: ["find", "read"], requireSuccess: true };
 		default:
 			return { requireSuccess: true };
 	}

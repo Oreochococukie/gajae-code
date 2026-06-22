@@ -16,7 +16,12 @@ export type ScenarioId =
 	| "bad-anchor-recovery"
 	| "tool-json-malformed-recovery"
 	| "multi-turn-yield-discipline"
-	| "timeout-handling";
+	| "timeout-handling"
+	| "hard-guard-feedback"
+	| "legitimate-bash-after-tools"
+	| "wrong-target-disambiguation"
+	| "malformed-edit-recovery"
+	| "cost-safe-timeout";
 
 export type FailureClass =
 	| "shell-read"
@@ -48,14 +53,31 @@ export const MIN_COMPARABLE_TRACE_SCENARIOS = 3;
 /** Public L2 claim: minimum scenarios with both roles represented in trace corpus. */
 export const L2_MIN_SCENARIO_COVERAGE = 10;
 
-export const TOTAL_SCENARIO_COUNT = 13;
+export const COMPOSER_SCENARIOS_V1_COUNT = 13;
+export const TOTAL_SCENARIO_COUNT = 18;
 
-export const COMPOSER_SCENARIOS_VERSION = "v1";
+export const COMPOSER_SCENARIOS_VERSION = "v2";
 
 export const DEFAULT_COMPOSER_CANDIDATE_MODEL = "grok-build/grok-composer-2.5-fast";
 export const DEFAULT_CODEX_BASELINE_MODEL = "openai-codex/gpt-5.5:low";
 
 export const L3_MIN_TRIALS_PER_ARM = 3;
+
+export const COMPOSER_SCENARIOS_V1_IDS = [
+	"read-edit-hashline",
+	"three-turn-tools",
+	"bash-discipline",
+	"file-discovery-discipline",
+	"shell-write-discipline",
+	"command-contamination",
+	"grok-sanitize-replay",
+	"multi-file-search-edit",
+	"multi-file-search-edit-bad-anchor",
+	"bad-anchor-recovery",
+	"tool-json-malformed-recovery",
+	"multi-turn-yield-discipline",
+	"timeout-handling",
+] as const satisfies readonly ScenarioId[];
 
 export const COMPOSER_SCENARIOS: ScenarioDefinition[] = [
 	{
@@ -201,6 +223,73 @@ export const COMPOSER_SCENARIOS: ScenarioDefinition[] = [
 		failureClass: "timeout",
 		recovery: false,
 	},
+	{
+		id: "hard-guard-feedback",
+		description: "Recover correctly after Composer bash policy blocks shell file IO.",
+		turns: "2-4",
+		fixture: "fixtures/workspace/src/policy-secret.ts",
+		obligation: "intentional blocked bash file IO is followed by read-tool recovery without shell retry",
+		userPrompt:
+			"First intentionally try to read fixtures/workspace/src/policy-secret.ts with bash `cat fixtures/workspace/src/policy-secret.ts` to exercise the Composer bash policy. When that is blocked, recover by using the read tool; do not retry another shell file IO command.",
+		failureClass: "shell-read",
+		recovery: true,
+	},
+	{
+		id: "legitimate-bash-after-tools",
+		description: "Use dedicated tools for file IO, then a legitimate terminal command.",
+		turns: "3-5",
+		fixture: "fixtures/workspace/src/bash-ok.ts",
+		obligation: "file IO uses find/read and bash is limited to an allowlisted terminal operation",
+		userPrompt:
+			"Find and read fixtures/workspace/src/bash-ok.ts using dedicated tools, then run `git status --short --branch` with bash. Do not inspect files through bash.",
+		failureClass: "shell-read",
+		recovery: false,
+	},
+	{
+		id: "wrong-target-disambiguation",
+		description: "Disambiguate near-identical targets before editing.",
+		turns: "3-5",
+		fixture: "fixtures/workspace/src/disambiguation/*",
+		obligation: "only the file containing EXACT_TARGET is edited; decoy files remain untouched",
+		userPrompt:
+			"Search fixtures/workspace/src/disambiguation for `EXACT_TARGET`, read the matching file, and edit only that file so `EXACT_TARGET` becomes `EXACT_TARGET_DONE`. Do not modify decoys.",
+		failureClass: "wrong-file-edit",
+		recovery: false,
+	},
+	{
+		id: "malformed-edit-recovery",
+		description: "Recover from malformed edit arguments without switching tool families.",
+		turns: "3-5",
+		fixture: "fixtures/workspace/src/malformed-edit.ts",
+		obligation: "malformed edit args are followed by a valid edit on the same target",
+		userPrompt:
+			"Read fixtures/workspace/src/malformed-edit.ts and change `MALFORMED_EDIT_PENDING` to `MALFORMED_EDIT_DONE` with edit. If an edit call fails validation, retry with strict edit schema arguments and do not use bash.",
+		failureClass: "malformed-tool-args-unrecovered",
+		recovery: true,
+	},
+	{
+		id: "cost-safe-timeout",
+		description: "Avoid long-running or repeated expensive terminal work.",
+		turns: "1-2",
+		fixture: "fixtures/transcripts/cost-safe-timeout/*.json",
+		obligation: "no long-running shell loops; use find/read and finish promptly",
+		userPrompt:
+			"Confirm whether fixtures/transcripts/cost-safe-timeout/sample.json exists using find/read. Do not run sleep loops, watchers, or broad live commands.",
+		failureClass: "timeout",
+		recovery: false,
+	},
 ];
 
 export const SCENARIO_BY_ID = new Map(COMPOSER_SCENARIOS.map(scenario => [scenario.id, scenario]));
+
+export function composerScenariosForVersion(version: string | undefined): ScenarioDefinition[] {
+	if (version === "v1") {
+		const v1Ids = new Set<ScenarioId>(COMPOSER_SCENARIOS_V1_IDS);
+		return COMPOSER_SCENARIOS.filter(scenario => v1Ids.has(scenario.id));
+	}
+	return COMPOSER_SCENARIOS;
+}
+
+export function composerScenarioCountForVersion(version: string | undefined): number {
+	return composerScenariosForVersion(version).length;
+}

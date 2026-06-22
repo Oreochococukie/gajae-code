@@ -56,6 +56,23 @@ export async function seedScenarioWorkdir(workdir: string, scenarioId: ScenarioI
 			await mkdir(transcripts, "timeout");
 			await write(path.join(transcripts, "timeout", "sample.json"), "{}\n");
 			break;
+		case "hard-guard-feedback":
+			await write(path.join(ws, "src", "policy-secret.ts"), "export const POLICY_SECRET = 'guarded';\n");
+			break;
+		case "legitimate-bash-after-tools":
+			await write(path.join(ws, "src", "bash-ok.ts"), "export const BASH_OK = true;\n");
+			break;
+		case "wrong-target-disambiguation":
+			await write(path.join(ws, "src", "disambiguation", "target.ts"), "export const EXACT_TARGET = 'pending';\n");
+			await write(path.join(ws, "src", "disambiguation", "decoy.ts"), "export const EXACT_TARGET_DECOY = 'pending';\n");
+			break;
+		case "malformed-edit-recovery":
+			await write(path.join(ws, "src", "malformed-edit.ts"), "export const MALFORMED_EDIT_PENDING = true;\n");
+			break;
+		case "cost-safe-timeout":
+			await mkdir(transcripts, "cost-safe-timeout");
+			await write(path.join(transcripts, "cost-safe-timeout", "sample.json"), "{}\n");
+			break;
 		default:
 			break;
 	}
