@@ -95,6 +95,121 @@ describe("composer-stability-v3 trace classifier", () => {
 		expect(snakeCaseToolName.failureClasses).toContain("shell-read");
 	});
 
+	it("allows recovery after Composer bash policy blocks shell file IO", () => {
+		const recovered = classifyTraceRecord(
+			record({
+				scenarioId: "hard-guard-feedback",
+				expected: { requiredTools: ["bash", "read"], requireSuccess: true },
+				events: [
+					{
+						type: "tool_execution_end",
+						toolName: "bash",
+						status: "error",
+						arguments: { command: "cat fixtures/workspace/src/policy-secret.ts" },
+						message:
+							"Composer bash policy blocked repository file I/O. Use find, search, read, and edit tools for file discovery, file inspection, and file mutation.",
+					},
+					{
+						type: "tool_execution_end",
+						toolName: "read",
+						status: "success",
+						arguments: { path: "fixtures/workspace/src/policy-secret.ts" },
+					},
+					{ type: "scenario_result", status: "passed" },
+				],
+			}),
+		);
+		const policyOnly = classifyTraceRecord(
+			record({
+				scenarioId: "hard-guard-feedback",
+				expected: { requiredTools: ["bash", "read"], requireSuccess: true },
+				events: [
+					{
+						type: "tool_execution_end",
+						toolName: "bash",
+						status: "error",
+						arguments: { command: "cat fixtures/workspace/src/policy-secret.ts" },
+						message:
+							"Composer bash policy blocked repository file I/O. Use find, search, read, and edit tools for file discovery, file inspection, and file mutation.",
+					},
+					{ type: "scenario_result", status: "passed" },
+				],
+			}),
+		);
+		const retriedShellIo = classifyTraceRecord(
+			record({
+				scenarioId: "hard-guard-feedback",
+				expected: { requiredTools: ["bash", "read"], requireSuccess: true },
+				events: [
+					{
+						type: "tool_execution_end",
+						toolName: "bash",
+						status: "error",
+						arguments: { command: "cat fixtures/workspace/src/policy-secret.ts" },
+						message:
+							"Composer bash policy blocked repository file I/O. Use find, search, read, and edit tools for file discovery, file inspection, and file mutation.",
+					},
+					{
+						type: "tool_execution_end",
+						toolName: "bash",
+						status: "error",
+						arguments: { command: "cat fixtures/workspace/src/policy-secret.ts" },
+						message:
+							"Composer bash policy blocked repository file I/O. Use find, search, read, and edit tools for file discovery, file inspection, and file mutation.",
+					},
+					{
+						type: "tool_execution_end",
+						toolName: "read",
+						status: "success",
+						arguments: { path: "fixtures/workspace/src/policy-secret.ts" },
+					},
+					{ type: "scenario_result", status: "passed" },
+				],
+			}),
+		);
+		const nonHardGuardPolicyBlock = classifyTraceRecord(
+			record({
+				scenarioId: "bash-discipline",
+				expected: { requiredTools: ["read"], requireSuccess: true },
+				events: [
+					{
+						type: "tool_execution_end",
+						toolName: "bash",
+						status: "error",
+						arguments: { command: "cat fixtures/workspace/src/secret.ts" },
+						message:
+							"Composer bash policy blocked repository file I/O. Use find, search, read, and edit tools for file discovery, file inspection, and file mutation.",
+					},
+					{ type: "scenario_result", status: "passed" },
+				],
+			}),
+		);
+		const unrecovered = classifyTraceRecord(
+			record({
+				scenarioId: "hard-guard-feedback",
+				expected: { requiredTools: ["bash", "read"], requireSuccess: true },
+				events: [
+					{
+						type: "tool_execution_end",
+						toolName: "bash",
+						status: "error",
+						arguments: { command: "cat fixtures/workspace/src/policy-secret.ts" },
+						message: "Command exited with code 1",
+					},
+					{ type: "scenario_result", status: "passed" },
+				],
+			}),
+		);
+
+		expect(recovered.status).toBe("passed");
+		expect(policyOnly.failureClasses).toContain("shell-read");
+		expect(policyOnly.failureClasses).toContain("missing-tool-turn");
+		expect(retriedShellIo.failureClasses).toContain("shell-read");
+		expect(nonHardGuardPolicyBlock.failureClasses).toContain("shell-read");
+		expect(unrecovered.failureClasses).toContain("shell-read");
+		expect(unrecovered.failureClasses).toContain("missing-tool-turn");
+	});
+
 	it("counts shell file discovery, shell writes, and contaminated commands", () => {
 		const shellDiscovery = classifyTraceRecord(
 			record({

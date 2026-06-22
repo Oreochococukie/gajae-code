@@ -18,6 +18,22 @@ describe("composer-live-fixtures", () => {
 		const text = await fs.readFile(path.join(dir, "src", "secret.ts"), "utf8");
 		expect(text).toContain("LIVE_SECRET");
 	});
+
+	it("seeds composer-scenarios-v2 workdirs", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "composer-live-v2-"));
+		await seedScenarioWorkdir(dir, "wrong-target-disambiguation");
+		await seedScenarioWorkdir(dir, "cost-safe-timeout");
+		const target = await fs.readFile(
+			path.join(dir, "fixtures", "workspace", "src", "disambiguation", "target.ts"),
+			"utf8",
+		);
+		const timeoutFixture = await fs.readFile(
+			path.join(dir, "fixtures", "transcripts", "cost-safe-timeout", "sample.json"),
+			"utf8",
+		);
+		expect(target).toContain("EXACT_TARGET");
+		expect(timeoutFixture.trim()).toBe("{}");
+	});
 });
 
 describe("capture-composer-v3-live dry-run", () => {
@@ -44,12 +60,14 @@ describe("capture-composer-v3-live dry-run", () => {
 		expect(stderr).toBe("");
 
 		const payload = JSON.parse(stdout) as {
+			composer_scenarios_version: string;
 			capture_mode: string;
 			k: number;
 			planned_records: number;
 			candidate_model: string;
 			baseline_model: string;
 		};
+		expect(payload.composer_scenarios_version).toBe("v2");
 		expect(payload.capture_mode).toBe("print");
 		expect(payload.k).toBe(3);
 		expect(payload.planned_records).toBe(6);
