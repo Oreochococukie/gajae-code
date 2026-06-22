@@ -99,11 +99,11 @@ async function main(): Promise<void> {
 	const aRecords = await loadRecords(path.resolve(aArg));
 	const bRecords = await loadRecords(path.resolve(bArg));
 	const aReport = buildEvidenceReport(trialsFromRecords(aRecords), {
-		capture_mode: "ab-arm-a",
+		capture_mode: "trace-replay",
 		gjc_version: aVer,
 	});
 	const bReport = buildEvidenceReport(trialsFromRecords(bRecords), {
-		capture_mode: "ab-arm-b",
+		capture_mode: "trace-replay",
 		gjc_version: bVer,
 	});
 
