@@ -37,14 +37,45 @@ function trialsFromRecords(records: TraceRecord[]) {
 	});
 }
 
+function scenarioFailureMap(report: EvidenceReport): Map<string, { candidate: number; baseline: number; classes: string[] }> {
+	return new Map(
+		report.per_scenario.map(row => [
+			row.id,
+			{
+				candidate: row.candidate_failures,
+				baseline: row.baseline_failures,
+				classes: row.failure_classes,
+			},
+		]),
+	);
+}
+
+function perScenarioDelta(aReport: EvidenceReport, bReport: EvidenceReport) {
+	const a = scenarioFailureMap(aReport);
+	const b = scenarioFailureMap(bReport);
+	const ids = [...new Set([...a.keys(), ...b.keys()])].sort();
+	return ids.map(id => {
+		const aRow = a.get(id) ?? { candidate: 0, baseline: 0, classes: [] };
+		const bRow = b.get(id) ?? { candidate: 0, baseline: 0, classes: [] };
+		return {
+			id,
+			candidate_failure_delta_a_minus_b: aRow.candidate - bRow.candidate,
+			baseline_failure_delta_a_minus_b: aRow.baseline - bRow.baseline,
+			arm_a_failure_classes: aRow.classes,
+			arm_b_failure_classes: bRow.classes,
+		};
+	});
+}
+
 function armSummary(label: string, gjcVersion: string, report: EvidenceReport) {
 	return {
 		label,
 		gjc_version: gjcVersion,
-		candidate_failure_count: report.candidate_failure_count,
-		baseline_failure_count: report.baseline_failure_count,
-		parity_delta: report.parity_delta,
+		candidate_failure_count: report.p1.candidateFailureCount,
+		baseline_failure_count: report.p1.baselineFailureCount,
+		parity_delta: report.p1.parityDelta,
 		scenario_coverage: report.scenario_coverage,
+		scenario_coverage_ratio: report.scenario_coverage_ratio,
 		l2_eligible: report.l2Eligible,
 		ladder_max_claim: report.ladderMaxClaim,
 		p1_passed: report.p1.passed,
@@ -76,9 +107,9 @@ async function main(): Promise<void> {
 		gjc_version: bVer,
 	});
 
-	const candidateDelta = aReport.candidate_failure_count - bReport.candidate_failure_count;
-	const baselineDelta = aReport.baseline_failure_count - bReport.baseline_failure_count;
-	const parityDeltaChange = aReport.parity_delta - bReport.parity_delta;
+	const candidateDelta = aReport.p1.candidateFailureCount - bReport.p1.candidateFailureCount;
+	const baselineDelta = aReport.p1.baselineFailureCount - bReport.p1.baselineFailureCount;
+	const parityDeltaChange = aReport.p1.parityDelta - bReport.p1.parityDelta;
 
 	const payload = {
 		schemaVersion: 1,
@@ -98,6 +129,7 @@ async function main(): Promise<void> {
 						? "Arm A shows fewer candidate failures than arm B."
 						: "Candidate failure counts tie on this corpus.",
 		},
+		per_scenario_delta: perScenarioDelta(aReport, bReport),
 		per_scenario_a: aReport.per_scenario,
 		per_scenario_b: bReport.per_scenario,
 	};
