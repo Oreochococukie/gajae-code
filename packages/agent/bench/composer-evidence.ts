@@ -1,11 +1,12 @@
 import {
-	COMPOSER_SCENARIOS,
 	COMPOSER_SCENARIOS_VERSION,
 	DEFAULT_CODEX_BASELINE_MODEL,
 	DEFAULT_COMPOSER_CANDIDATE_MODEL,
 	L2_MIN_SCENARIO_COVERAGE,
-	TOTAL_SCENARIO_COUNT,
+	type ScenarioDefinition,
 	type ScenarioId,
+	composerScenarioCountForVersion,
+	composerScenariosForVersion,
 } from "./composer-scenarios";
 import type { P1Summary, TrialResult } from "./composer-stability-v3";
 import { createP1Summary } from "./composer-stability-v3";
@@ -105,12 +106,16 @@ export function scanTextForPublishSecrets(text: string): { ok: boolean; findings
 	return { ok: findings.length === 0, findings };
 }
 
-export function countScenarioCoverage(trialResults: TrialResult[]): number {
+export function countScenarioCoverage(
+	trialResults: TrialResult[],
+	scenarios: readonly ScenarioDefinition[] = composerScenariosForVersion(COMPOSER_SCENARIOS_VERSION),
+): number {
+	const scenarioIds = new Set(scenarios.map(scenario => scenario.id));
 	const candidateIds = new Set(
-		trialResults.filter(r => r.modelRole === "candidate").map(r => r.scenarioId),
+		trialResults.filter(r => scenarioIds.has(r.scenarioId) && r.modelRole === "candidate").map(r => r.scenarioId),
 	);
 	const baselineIds = new Set(
-		trialResults.filter(r => r.modelRole === "baseline").map(r => r.scenarioId),
+		trialResults.filter(r => scenarioIds.has(r.scenarioId) && r.modelRole === "baseline").map(r => r.scenarioId),
 	);
 	return Array.from(candidateIds).filter(id => baselineIds.has(id)).length;
 }
@@ -165,9 +170,12 @@ function modelLabel(models: string[], fallback: string): string {
 	return "mixed";
 }
 
-function buildKPerScenarioRole(trialResults: TrialResult[]): Record<ScenarioId, ModelRoleCounts> {
+function buildKPerScenarioRole(
+	trialResults: TrialResult[],
+	scenarios: readonly ScenarioDefinition[],
+): Record<ScenarioId, ModelRoleCounts> {
 	const counts = Object.fromEntries(
-		COMPOSER_SCENARIOS.map(scenario => [scenario.id, { candidate: 0, baseline: 0 }]),
+		scenarios.map(scenario => [scenario.id, { candidate: 0, baseline: 0 }]),
 	) as Record<ScenarioId, ModelRoleCounts>;
 	for (const result of trialResults) {
 		const existing = counts[result.scenarioId];
@@ -239,7 +247,10 @@ export function buildEvidenceReport(
 	manifestText = "",
 ): EvidenceReport {
 	const p1 = createP1Summary(trialResults);
-	const coverage = countScenarioCoverage(trialResults);
+	const reportScenarioVersion = meta.composer_scenarios_version ?? COMPOSER_SCENARIOS_VERSION;
+	const reportScenarios = composerScenariosForVersion(reportScenarioVersion);
+	const reportScenarioCount = composerScenarioCountForVersion(reportScenarioVersion);
+	const coverage = countScenarioCoverage(trialResults, reportScenarios);
 	const l2Eligible = coverage >= L2_MIN_SCENARIO_COVERAGE && p1.applicable && p1.passed && p1.parityDelta <= 0;
 	const roleCounts = buildRoleCounts(trialResults);
 	const modelIds = meta.actual_model_ids ?? buildModelIds(trialResults);
@@ -250,7 +261,7 @@ export function buildEvidenceReport(
 	const linter = scanTextForPublishSecrets(manifestText);
 	const plannedRecords = meta.planned_records ?? null;
 	const capturedRecords = meta.captured_records ?? trialResults.length;
-	const kPerScenarioRole = buildKPerScenarioRole(trialResults);
+	const kPerScenarioRole = buildKPerScenarioRole(trialResults, reportScenarios);
 	const minK = minKPerScenarioRole(kPerScenarioRole);
 	const l3RefusalReasons = computeL3RefusalReasons({
 		p1,
@@ -272,7 +283,7 @@ export function buildEvidenceReport(
 		l3Eligible: l3RefusalReasons.length === 0,
 		l3RefusalReasons,
 		scenario_coverage: coverage,
-		scenario_coverage_ratio: `${coverage}/${TOTAL_SCENARIO_COUNT}`,
+		scenario_coverage_ratio: `${coverage}/${reportScenarioCount}`,
 		planned_records: plannedRecords,
 		captured_records: capturedRecords,
 		role_counts: roleCounts,
@@ -283,7 +294,7 @@ export function buildEvidenceReport(
 		baseline_failure_rate: baselineCount > 0 ? baselineFailures / baselineCount : 0,
 		parityDelta: p1.parityDelta,
 		per_scenario: buildPerScenarioEvidence(trialResults),
-		composer_scenarios_version: meta.composer_scenarios_version ?? COMPOSER_SCENARIOS_VERSION,
+		composer_scenarios_version: reportScenarioVersion,
 		candidate_model: modelLabel(modelIds.candidate, DEFAULT_COMPOSER_CANDIDATE_MODEL),
 		baseline_model: modelLabel(modelIds.baseline, DEFAULT_CODEX_BASELINE_MODEL),
 		trace_sha256: meta.trace_sha256,
