@@ -20,6 +20,36 @@ async function loadRecords(filePath: string): Promise<TraceRecord[]> {
 	return [parsed as TraceRecord];
 }
 
+type ProvenanceManifest = {
+	composer_scenarios_version?: string;
+	record_count?: number;
+	captured_records?: number;
+	trace_sha256?: string;
+	manifest_sha256?: string;
+};
+
+function parseManifest(text: string): ProvenanceManifest | undefined {
+	try {
+		const parsed = JSON.parse(text) as unknown;
+		return typeof parsed === "object" && parsed !== null ? (parsed as ProvenanceManifest) : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function manifestPathForTraceFile(traceFile: string): string {
+	const resolved = path.resolve(traceFile);
+	return path.join(path.dirname(path.dirname(resolved)), "provenance-manifest.json");
+}
+
+async function loadManifest(traceFile: string): Promise<ProvenanceManifest | undefined> {
+	try {
+		return parseManifest(await fs.readFile(manifestPathForTraceFile(traceFile), "utf8"));
+	} catch {
+		return undefined;
+	}
+}
+
 function trialsFromRecords(records: TraceRecord[]) {
 	return records.map(record => {
 		const c = classifyTraceRecord(record);
@@ -96,17 +126,29 @@ async function main(): Promise<void> {
 		process.exit(1);
 	}
 
-	const aRecords = await loadRecords(path.resolve(aArg));
-	const bRecords = await loadRecords(path.resolve(bArg));
+	const aTracePath = path.resolve(aArg);
+	const bTracePath = path.resolve(bArg);
+	const aRecords = await loadRecords(aTracePath);
+	const bRecords = await loadRecords(bTracePath);
+	const aManifest = await loadManifest(aTracePath);
+	const bManifest = await loadManifest(bTracePath);
 	const aReport = buildEvidenceReport(trialsFromRecords(aRecords), {
 		capture_mode: "trace-replay",
 		comparison_kind: "historical-frozen-trace",
+		composer_scenarios_version: aManifest?.composer_scenarios_version,
 		gjc_version: aVer,
+		trace_sha256: aManifest?.trace_sha256,
+		manifest_sha256: aManifest?.manifest_sha256,
+		captured_records: aManifest?.captured_records ?? aManifest?.record_count ?? aRecords.length,
 	});
 	const bReport = buildEvidenceReport(trialsFromRecords(bRecords), {
 		capture_mode: "trace-replay",
 		comparison_kind: "historical-frozen-trace",
+		composer_scenarios_version: bManifest?.composer_scenarios_version,
 		gjc_version: bVer,
+		trace_sha256: bManifest?.trace_sha256,
+		manifest_sha256: bManifest?.manifest_sha256,
+		captured_records: bManifest?.captured_records ?? bManifest?.record_count ?? bRecords.length,
 	});
 
 	const candidateDelta = aReport.p1.candidateFailureCount - bReport.p1.candidateFailureCount;
@@ -117,7 +159,7 @@ async function main(): Promise<void> {
 		schemaVersion: 1,
 		comparison_kind: "historical-frozen-trace",
 		disclaimer:
-			"Point estimate from paired harness failure counts on frozen trace corpora. Not a statistical hypothesis test. Live A/B requires separate captures with each gjc binary on the same composer-scenarios-v1 prompts.",
+			"Point estimate from paired harness failure counts on frozen trace corpora. Not a statistical hypothesis test. Live A/B requires separate captures with each gjc binary on the same versioned Composer scenario prompts.",
 		repo_commit: process.env.EVIDENCE_REPO_COMMIT ?? "dev-evidence",
 		arm_a: armSummary("v0.5.3-or-baseline-arm", aVer, aReport),
 		arm_b: armSummary("v0.6.4-or-candidate-arm", bVer, bReport),
