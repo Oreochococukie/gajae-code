@@ -3,17 +3,79 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { buildEvidenceReport, scanTextForPublishSecrets } from "../bench/composer-evidence";
-import { COMPOSER_SCENARIOS, L2_MIN_SCENARIO_COVERAGE, TOTAL_SCENARIO_COUNT } from "../bench/composer-scenarios";
+import {
+	COMPOSER_SCENARIOS,
+	COMPOSER_SCENARIOS_V1_COUNT,
+	COMPOSER_SCENARIOS_VERSION,
+	composerScenariosForVersion,
+	L2_MIN_SCENARIO_COVERAGE,
+	TOTAL_SCENARIO_COUNT,
+} from "../bench/composer-scenarios";
 import type { TraceRecord, TrialResult } from "../bench/composer-stability-v3";
 import "../bench/composer-evidence-ab-compare";
 import "../bench/composer-evidence-report";
 
 describe("composer-scenarios SoT", () => {
-	it("exports 13 scenarios with userPrompt", () => {
+	it("exports versioned scenarios with userPrompt", () => {
 		expect(COMPOSER_SCENARIOS).toHaveLength(TOTAL_SCENARIO_COUNT);
 		for (const s of COMPOSER_SCENARIOS) {
 			expect(s.userPrompt.length).toBeGreaterThan(20);
 		}
+	});
+
+	it("bumps v2 with hard-guard and recovery scenarios", () => {
+		expect(COMPOSER_SCENARIOS_VERSION).toBe("v2");
+		expect(COMPOSER_SCENARIOS.map(scenario => scenario.id)).toEqual(
+			expect.arrayContaining([
+				"hard-guard-feedback",
+				"legitimate-bash-after-tools",
+				"wrong-target-disambiguation",
+				"malformed-edit-recovery",
+				"cost-safe-timeout",
+			]),
+		);
+	});
+
+	it("keeps v1 historical reports on the v1 scenario denominator", () => {
+		const v1Scenarios = composerScenariosForVersion("v1");
+		const trials: TrialResult[] = [];
+		for (const scenario of [
+			...v1Scenarios,
+			composerScenariosForVersion("v2").find(candidate => candidate.id === "hard-guard-feedback")!,
+		]) {
+			trials.push({
+				scenarioId: scenario.id,
+				modelRole: "candidate",
+				model: "grok-build/grok-composer-2.5-fast",
+				trial: trials.length,
+				status: "passed",
+				evidence: "ok",
+			});
+			trials.push({
+				scenarioId: scenario.id,
+				modelRole: "baseline",
+				model: "openai-codex/gpt-5.5:low",
+				trial: trials.length,
+				status: "passed",
+				evidence: "ok",
+			});
+		}
+
+		const report = buildEvidenceReport(trials, {
+			capture_mode: "trace-replay",
+			comparison_kind: "historical-frozen-trace",
+			composer_scenarios_version: "v1",
+			planned_records: trials.length,
+			captured_records: trials.length,
+			trace_sha256: "trace-hash",
+			manifest_sha256: "manifest-hash",
+		});
+
+		expect(v1Scenarios).toHaveLength(COMPOSER_SCENARIOS_V1_COUNT);
+		expect(report.composer_scenarios_version).toBe("v1");
+		expect(report.scenario_coverage).toBe(COMPOSER_SCENARIOS_V1_COUNT);
+		expect(report.scenario_coverage_ratio).toBe(`${COMPOSER_SCENARIOS_V1_COUNT}/${COMPOSER_SCENARIOS_V1_COUNT}`);
+		expect(report.k_per_scenario_role["hard-guard-feedback"]).toBeUndefined();
 	});
 });
 
@@ -128,9 +190,9 @@ describe("composer-evidence report", () => {
 		expect(report.ladderMaxClaim).toBe("L3");
 		expect(report.l3RefusalReasons).toEqual([]);
 		expect(report.min_k_per_scenario_role).toBe(3);
-		expect(report.role_counts).toEqual({ candidate: 39, baseline: 39 });
-		expect(report.planned_records).toBe(78);
-		expect(report.captured_records).toBe(78);
+		expect(report.role_counts).toEqual({ candidate: 54, baseline: 54 });
+		expect(report.planned_records).toBe(108);
+		expect(report.captured_records).toBe(108);
 		expect(report.trace_sha256).toBe("trace-hash");
 		expect(report.manifest_sha256).toBe("manifest-hash");
 	});

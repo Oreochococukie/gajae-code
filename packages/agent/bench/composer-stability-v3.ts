@@ -148,6 +148,7 @@ const ANCHOR_ERROR_PATTERN = /(?:anchor|hashline|stale).{0,80}(?:mismatch|do not
 const MALFORMED_ARGS_PATTERN = /(?:malformed|invalid|contaminated).{0,80}(?:json|argument|args|tool)|schema validation|failed to parse/i;
 const SANITIZE_PATTERN = /sanitize(?:d|r)?\s+(?:payload|replay|output)?\s*(?:failed|failure|error|regression)|harmony|protocol leak|to=functions|contaminated tool/i;
 const TIMEOUT_PATTERN = /timeout|timed out|deadline/i;
+const COMPOSER_BASH_POLICY_BLOCK_PATTERN = /Composer bash policy blocked repository file I\/O/i;
 const PATH_NOT_FOUND_PATTERN = /\bPath ['"].*['"] not found\b/i;
 const FRESH_ANCHOR_LINE_PATTERN = /^\*\d+[a-z]{2}\|/m;
 
@@ -483,6 +484,13 @@ function isShellWriteEvent(event: JsonObject): boolean {
 	return FILE_WRITE_COMMAND_PATTERN.test(command);
 }
 
+function isComposerBashPolicyBlockedEvent(event: JsonObject, text: string): boolean {
+	const toolName = eventToolName(event);
+	return Boolean(
+		toolName && SHELL_TOOL_NAMES.has(toolName) && isEventError(event) && COMPOSER_BASH_POLICY_BLOCK_PATTERN.test(text),
+	);
+}
+
 function isContaminatedCommandEvent(event: JsonObject): boolean {
 	const toolName = eventToolName(event);
 	if (!toolName || !SHELL_TOOL_NAMES.has(toolName)) return false;
@@ -519,15 +527,32 @@ export function classifyTraceRecord(record: TraceRecord): ClassifiedTrace {
 	let malformedArgsPath: string | undefined;
 	let sawSuccessAfterMalformedArgs = false;
 	let sawSuccessfulTerminal = false;
+	const isHardGuardFeedbackScenario = record.scenarioId === "hard-guard-feedback";
+	let sawComposerBashPolicyBlockedIo = false;
+	let sawComposerBashPolicyRecoveryTool = false;
+	let sawShellIoRetryAfterComposerBashPolicyBlock = false;
 
 	for (let index = 0; index < record.events.length; index++) {
 		const event = record.events[index]!;
 		const text = getTextBlob(event);
 		const toolName = eventToolName(event);
 		if (toolName) calledTools.add(toolName);
-		if (isShellReadEvent(event)) addFailure(failures, "shell-read");
-		if (isShellFileDiscoveryEvent(event)) addFailure(failures, "shell-file-discovery");
-		if (isShellWriteEvent(event)) addFailure(failures, "shell-write");
+		const shellIoFailureClasses = [
+			isShellReadEvent(event) ? "shell-read" : undefined,
+			isShellFileDiscoveryEvent(event) ? "shell-file-discovery" : undefined,
+			isShellWriteEvent(event) ? "shell-write" : undefined,
+		].filter((failureClass): failureClass is FailureClass => failureClass !== undefined);
+		const composerBashPolicyBlocked =
+			isHardGuardFeedbackScenario && shellIoFailureClasses.length > 0 && isComposerBashPolicyBlockedEvent(event, text);
+		if (composerBashPolicyBlocked) {
+			sawShellIoRetryAfterComposerBashPolicyBlock ||= sawComposerBashPolicyBlockedIo;
+			sawComposerBashPolicyBlockedIo = true;
+		} else {
+			if (sawComposerBashPolicyBlockedIo && shellIoFailureClasses.length > 0) {
+				sawShellIoRetryAfterComposerBashPolicyBlock = true;
+			}
+			for (const failureClass of shellIoFailureClasses) addFailure(failures, failureClass);
+		}
 		if (isContaminatedCommandEvent(event)) addFailure(failures, "contaminated-command");
 		if (isTimeoutFailureEvent(event, text)) addFailure(failures, "timeout");
 		if (isSanitizeReplayFailureEvent(event, text)) addFailure(failures, "sanitize-replay-regression");
@@ -544,6 +569,14 @@ export function classifyTraceRecord(record: TraceRecord): ClassifiedTrace {
 			malformedArgsToolName = toolName;
 			malformedArgsPath = eventPath(event) ?? record.expected?.targetPath;
 			sawSuccessAfterMalformedArgs = false;
+		}
+		if (
+			isHardGuardFeedbackScenario &&
+			sawComposerBashPolicyBlockedIo &&
+			isReadEvent(event) &&
+			isSuccessfulToolEvent(event)
+		) {
+			sawComposerBashPolicyRecoveryTool = true;
 		}
 		if (sawAnchorErrorAt >= 0 && index > sawAnchorErrorAt && isReadEvent(event) && isSuccessfulToolEvent(event)) {
 			const readPath = eventPath(event);
@@ -585,7 +618,7 @@ export function classifyTraceRecord(record: TraceRecord): ClassifiedTrace {
 			}
 		}
 		if (isTerminalSuccessEvent(event)) sawSuccessfulTerminal = true;
-		if (isTerminalFailureEvent(event) && scenario) addFailure(failures, scenario.failureClass);
+		if (isTerminalFailureEvent(event) && scenario && !composerBashPolicyBlocked) addFailure(failures, scenario.failureClass);
 		const status = asString(event.status)?.toLowerCase();
 		const directFailureClass = normalizeFailureClass(event.failureClass);
 		if (directFailureClass && (status === "failed" || isEventError(event))) addFailure(failures, directFailureClass);
@@ -596,6 +629,13 @@ export function classifyTraceRecord(record: TraceRecord): ClassifiedTrace {
 	}
 	if (sawMalformedArgsAt >= 0 && !sawSuccessAfterMalformedArgs) {
 		addFailure(failures, "malformed-tool-args-unrecovered");
+	}
+	if (
+		isHardGuardFeedbackScenario &&
+		sawComposerBashPolicyBlockedIo &&
+		(!sawComposerBashPolicyRecoveryTool || sawShellIoRetryAfterComposerBashPolicyBlock)
+	) {
+		addFailure(failures, "shell-read");
 	}
 	for (const requiredTool of record.expected?.requiredTools ?? []) {
 		if (!calledTools.has(requiredTool)) addFailure(failures, "missing-tool-turn");
