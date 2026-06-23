@@ -163,6 +163,72 @@ describe("composer-print-trace", () => {
 		expect(classified.status).toBe("passed");
 		expect(classified.failureClasses).toEqual([]);
 	});
+	it.each([
+		["read-edit-hashline", "fixtures/workspace/src/foo.ts"],
+		["multi-file-search-edit", "fixtures/workspace/src/pkg/alpha.ts"],
+	] as const)("classifies missing target-path edit as failure for %s", (scenarioId, targetPath) => {
+		const record = buildTraceRecord({
+			scenarioId,
+			modelRole: "candidate",
+			model: "grok-build/grok-composer-2.5-fast",
+			trial: 0,
+			events: [
+				{ type: "tool_execution_end", toolName: "read", status: "success", arguments: { path: targetPath } },
+				{ type: "scenario_result", status: "passed" },
+			],
+			tracePath: "/tmp/trace.json",
+			expected: traceExpectationForScenario(scenarioId),
+		});
+		const classified = classifyTraceRecord(record);
+		expect(classified.status).toBe("failed");
+		expect(classified.failureClasses).toEqual(["missing-tool-turn"]);
+	});
+	it.each([
+		["read-edit-hashline", "fixtures/workspace/src/foo.ts"],
+		["multi-file-search-edit", "fixtures/workspace/src/pkg/alpha.ts"],
+	] as const)("classifies wrong target-path edit as failure for %s", (scenarioId, targetPath) => {
+		const record = buildTraceRecord({
+			scenarioId,
+			modelRole: "candidate",
+			model: "grok-build/grok-composer-2.5-fast",
+			trial: 0,
+			events: [
+				{
+					type: "tool_execution_end",
+					toolName: "edit",
+					status: "success",
+					arguments: { path: `${targetPath}.wrong` },
+				},
+				{ type: "scenario_result", status: "passed" },
+			],
+			tracePath: "/tmp/trace.json",
+			expected: traceExpectationForScenario(scenarioId),
+		});
+		const classified = classifyTraceRecord(record);
+		expect(classified.status).toBe("failed");
+		expect(classified.failureClasses).toEqual(["missing-tool-turn", "wrong-file-edit"]);
+	});
+
+	it.each([
+		["read-edit-hashline", "fixtures/workspace/src/foo.ts"],
+		["multi-file-search-edit", "fixtures/workspace/src/pkg/alpha.ts"],
+	] as const)("classifies failed target-path edit as failure for %s", (scenarioId, targetPath) => {
+		const record = buildTraceRecord({
+			scenarioId,
+			modelRole: "candidate",
+			model: "grok-build/grok-composer-2.5-fast",
+			trial: 0,
+			events: [
+				{ type: "tool_execution_end", toolName: "edit", status: "error", arguments: { path: targetPath } },
+				{ type: "scenario_result", status: "passed" },
+			],
+			tracePath: "/tmp/trace.json",
+			expected: traceExpectationForScenario(scenarioId),
+		});
+		const classified = classifyTraceRecord(record);
+		expect(classified.status).toBe("failed");
+		expect(classified.failureClasses).toEqual(["missing-tool-turn"]);
+	});
 
 	it("classifies converted bash-discipline trace as pass", () => {
 		const record = buildTraceRecord({

@@ -532,6 +532,7 @@ export function classifyTraceRecord(record: TraceRecord): ClassifiedTrace {
 	let sawComposerBashPolicyRecoveryTool = false;
 	let sawShellIoRetryAfterComposerBashPolicyBlock = false;
 
+	let sawSuccessfulTargetPathEdit = false;
 	for (let index = 0; index < record.events.length; index++) {
 		const event = record.events[index]!;
 		const text = getTextBlob(event);
@@ -613,7 +614,10 @@ export function classifyTraceRecord(record: TraceRecord): ClassifiedTrace {
 		}
 		if (record.expected?.targetPath && toolName && EDIT_TOOL_NAMES.has(toolName)) {
 			const targetPath = eventPath(event);
-			if (targetPath && path.normalize(targetPath) !== path.normalize(record.expected?.targetPath)) {
+			if (isSuccessfulEditEvent(event) && matchesNormalizedPath(record.expected.targetPath, targetPath)) {
+				sawSuccessfulTargetPathEdit = true;
+			}
+			if (targetPath && !matchesNormalizedPath(record.expected.targetPath, targetPath)) {
 				addFailure(failures, "wrong-file-edit");
 			}
 		}
@@ -636,6 +640,9 @@ export function classifyTraceRecord(record: TraceRecord): ClassifiedTrace {
 		(!sawComposerBashPolicyRecoveryTool || sawShellIoRetryAfterComposerBashPolicyBlock)
 	) {
 		addFailure(failures, "shell-read");
+	}
+	if (record.expected?.targetPath && !sawSuccessfulTargetPathEdit) {
+		addFailure(failures, "missing-tool-turn");
 	}
 	for (const requiredTool of record.expected?.requiredTools ?? []) {
 		if (!calledTools.has(requiredTool)) addFailure(failures, "missing-tool-turn");
