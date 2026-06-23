@@ -94,7 +94,14 @@ const SECRET_PATTERNS: Array<{ id: string; pattern: RegExp }> = [
 	{ id: "bearer_token", pattern: /\bBearer\s+[A-Za-z0-9._-]{20,}/ },
 	{ id: "openai_sk", pattern: /\bsk-[A-Za-z0-9]{20,}/ },
 	{ id: "grok_env_value", pattern: /GROK_CLI_OAUTH_TOKEN\s*=\s*\S+/ },
-	{ id: "home_path", pattern: /\/Users\/[^/\s]+/ },
+	{
+		id: "oauth_env_value",
+		pattern: /\b(?:GROK_CLI_OAUTH_TOKEN|OPENAI(?:_CODEX)?_OAUTH_TOKEN|CODEX_OAUTH_TOKEN|OPENAI_API_KEY)["']?\s*[:=]\s*["']?[A-Za-z0-9._-]{12,}/i,
+	},
+	{ id: "home_path", pattern: /\/Users\/[^/\s"'`]+/ },
+	{ id: "linux_home_path", pattern: /\/home\/[^/\s"'`]+/ },
+	{ id: "windows_home_path", pattern: /[A-Za-z]:\\+Users\\+[^\\\s"'`]+/ },
+	{ id: "temp_path", pattern: /(?:\/private)?\/tmp\/[^\s"'`]+/ },
 	{ id: "tilde_home", pattern: /~\/\.[^\s'"]+/ },
 ];
 

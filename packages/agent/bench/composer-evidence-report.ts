@@ -2,7 +2,7 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { buildEvidenceReport, type CaptureMode, type EvidenceReportMeta } from "./composer-evidence";
+import { buildEvidenceReport, scanTextForPublishSecrets, type CaptureMode, type EvidenceReportMeta } from "./composer-evidence";
 import { classifyTraceRecord, type TraceRecord } from "./composer-stability-v3";
 
 const REPO_ROOT = path.resolve(import.meta.dir, "../../..");
@@ -67,6 +67,11 @@ function manifestPathForTraceFile(traceFileArg: string | undefined): string {
 	return path.join(path.dirname(path.dirname(resolved)), "provenance-manifest.json");
 }
 
+function publicArtifactLabel(filePath: string): string {
+	const resolved = path.resolve(filePath);
+	return `${path.basename(path.dirname(resolved))}/${path.basename(resolved)}`;
+}
+
 function metaFromManifest(input: {
 	records: TraceRecord[];
 	traceFileArg?: string;
@@ -74,11 +79,11 @@ function metaFromManifest(input: {
 	manifest?: ProvenanceManifest;
 	manifestText: string;
 }): EvidenceReportMeta {
-	const tracePath = input.traceFileArg ? path.resolve(input.traceFileArg) : undefined;
+	const traceArtifacts = [
+		input.traceFileArg ? publicArtifactLabel(input.traceFileArg) : undefined,
+		input.traceDirArg ? publicArtifactLabel(input.traceDirArg) : undefined,
+	].filter((value): value is string => Boolean(value));
 	const captureMode = isCaptureMode(input.manifest?.capture_mode) ? input.manifest.capture_mode : "trace-replay";
-	const traceArtifacts = [tracePath, input.traceDirArg ? path.resolve(input.traceDirArg) : undefined].filter(
-		(value): value is string => Boolean(value),
-	);
 	const actualModelIds = {
 		candidate: [...new Set(input.records.filter(record => record.modelRole === "candidate").map(record => record.model))].sort(),
 		baseline: [...new Set(input.records.filter(record => record.modelRole === "baseline").map(record => record.model))].sort(),
@@ -128,7 +133,7 @@ async function main(): Promise<void> {
 			failureClass: classified.failureClasses[0],
 			failureClasses: classified.failureClasses,
 			evidence: classified.evidence,
-			tracePath: record.tracePath,
+			tracePath: record.tracePath ? publicArtifactLabel(record.tracePath) : undefined,
 		};
 	});
 
@@ -148,9 +153,26 @@ async function main(): Promise<void> {
 	}
 
 	const report = buildEvidenceReport(trials, meta, manifestText);
+	const reportText = `${JSON.stringify(report, null, 2)}\n`;
+	const reportLint = scanTextForPublishSecrets(reportText);
+	if (!reportLint.ok) {
+		process.stderr.write(`composer-evidence-report: report linter failed: ${reportLint.findings.join(", ")}\n`);
+		process.exit(3);
+	}
 	const outPath = outArg ? path.resolve(outArg) : path.join(REPO_ROOT, "evidence-report.json");
-	await fs.writeFile(outPath, `${JSON.stringify(report, null, 2)}\n`);
-	process.stdout.write(`${JSON.stringify({ ok: true, outPath, ladderMaxClaim: report.ladderMaxClaim, l2Eligible: report.l2Eligible }, null, 2)}\n`);
+	await fs.writeFile(outPath, reportText);
+	process.stdout.write(
+		`${JSON.stringify(
+			{
+				ok: true,
+				reportArtifact: path.basename(outPath),
+				ladderMaxClaim: report.ladderMaxClaim,
+				l2Eligible: report.l2Eligible,
+			},
+			null,
+			2,
+		)}\n`,
+	);
 }
 
 if (import.meta.main) {

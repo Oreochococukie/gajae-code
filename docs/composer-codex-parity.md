@@ -89,6 +89,7 @@ Claim wording rules:
 - L3 wording is allowed only when `l3Eligible=true` and `l3RefusalReasons` is empty. Any `trace_replay_not_l3`, `k_lt_3`, `partial_capture`, `mixed_model_ids`, or `manifest_linter_failed` reason blocks an L3 claim.
 - `capture_mode="trace-replay"` and `comparison_kind="historical-frozen-trace"` must be called frozen replay evidence. They cannot be called live A/B, K>=3 live evidence, or Codex GPT-5.5-level parity proof.
 - Synthetic reports are schema/mechanics proofs only; they are not live Composer-vs-Codex evidence even when they are L3-eligible.
+- Changes that alter Composer prompt injection or live-provider behavior should be reported as `OWNER_CONFIRMATION_REQUIRED` after technical gates pass; do not call those PRs `MERGE_READY` without owner confirmation.
 
 ```sh
 bun packages/agent/bench/capture-composer-v3-live.ts --dry-run

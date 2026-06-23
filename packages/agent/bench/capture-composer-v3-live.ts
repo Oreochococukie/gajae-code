@@ -43,12 +43,13 @@ type RunResult = {
 	role: Role;
 	model: string;
 	scenarioId: ScenarioId;
-	workdir: string;
-	sessionDir: string;
-	sessionFile?: string;
+	artifactSlug: string;
+	hasSessionFile: boolean;
 	exitCode: number;
-	stderr: string;
-	finalText: string;
+	stderrByteLength: number;
+	stderrSha256?: string;
+	finalTextByteLength: number;
+	finalTextSha256?: string;
 	toolCount: number;
 	toolErrorCount: number;
 };
@@ -137,6 +138,17 @@ function slugModel(model: string): string {
 }
 
 const STDERR_CAPTURE_MAX = 64 * 1024;
+
+function sha256Text(text: string): string {
+	return crypto.createHash("sha256").update(text).digest("hex");
+}
+
+function assertPublishSafeArtifact(name: string, text: string): void {
+	const lint = scanTextForPublishSecrets(text);
+	if (!lint.ok) {
+		throw new Error(`${name} linter failed: ${lint.findings.join(", ")}`);
+	}
+}
 
 async function runGjcPrint(input: {
 	gjcBin: string;
@@ -261,7 +273,7 @@ async function executeRow(
 		model: row.model,
 		trial: row.trial,
 		events,
-		tracePath,
+		tracePath: path.relative(outDir, tracePath),
 		expected: traceExpectationForScenario(row.scenarioId),
 	});
 
@@ -270,22 +282,19 @@ async function executeRow(
 		role: row.role,
 		model: row.model,
 		scenarioId: row.scenarioId,
-		workdir,
-		sessionDir,
-		sessionFile,
+		artifactSlug: workSlug,
+		hasSessionFile: sessionFile !== undefined,
 		exitCode,
-		stderr,
-		finalText,
+		stderrByteLength: Buffer.byteLength(stderr, "utf8"),
+		stderrSha256: stderr.length > 0 ? sha256Text(stderr) : undefined,
+		finalTextByteLength: Buffer.byteLength(finalText, "utf8"),
+		finalTextSha256: finalText.length > 0 ? sha256Text(finalText) : undefined,
 		toolCount,
 		toolErrorCount,
 	};
 	return { run, record };
 }
 
-async function sha256File(filePath: string): Promise<string> {
-	const data = await fs.readFile(filePath);
-	return crypto.createHash("sha256").update(data).digest("hex");
-}
 
 async function main(): Promise<void> {
 	const args = parseArgs(process.argv.slice(2));
@@ -309,7 +318,7 @@ async function main(): Promise<void> {
 			grok: hasGrokCreds(),
 			baseline: hasBaselineCreds(),
 		},
-		repo_root: REPO_ROOT,
+		repoRootArtifact: path.basename(REPO_ROOT),
 		gjc_bin_basename: path.basename(args.gjcBin),
 		planned,
 	};
@@ -344,25 +353,24 @@ async function main(): Promise<void> {
 		generatedAt: new Date().toISOString(),
 		records,
 	};
-	await fs.writeFile(tracePath, `${JSON.stringify(traceArtifact, null, 2)}\n`, "utf8");
+	const traceText = `${JSON.stringify(traceArtifact, null, 2)}\n`;
+	assertPublishSafeArtifact("trace artifact", traceText);
 
 	const summary = {
 		schemaVersion: 1,
 		runId,
-		outDir,
-		tracePath,
+		traceArtifact: path.relative(outDir, tracePath),
 		results,
 	};
-	const summaryPath = path.join(outDir, "summary.json");
-	await fs.writeFile(summaryPath, `${JSON.stringify(summary, null, 2)}\n`, "utf8");
+	const summaryText = `${JSON.stringify(summary, null, 2)}\n`;
+	assertPublishSafeArtifact("summary artifact", summaryText);
 
-	const manifestText = JSON.stringify(
+	const manifestText = `${JSON.stringify(
 		{
 			schemaVersion: 1,
 			runId,
-			outDir,
-			tracePath,
-			summaryPath,
+			traceArtifact: path.relative(outDir, tracePath),
+			summaryArtifact: "summary.json",
 			composer_scenarios_version: COMPOSER_SCENARIOS_VERSION,
 			planned_records: planned.length,
 			captured_records: records.length,
@@ -372,27 +380,27 @@ async function main(): Promise<void> {
 			candidate_model: args.candidateModel,
 			baseline_model: args.baselineModel,
 			gjc_bin_basename: path.basename(args.gjcBin),
-			trace_sha256: await sha256File(tracePath),
+			trace_sha256: sha256Text(traceText),
 		},
 		null,
 		2,
-	);
-	const lint = scanTextForPublishSecrets(manifestText);
-	if (!lint.ok) {
-		process.stderr.write(`capture-composer-v3-live: manifest linter failed: ${lint.findings.join(", ")}\n`);
-		process.exit(3);
-	}
+	)}\n`;
+	assertPublishSafeArtifact("provenance manifest", manifestText);
+
+	await fs.writeFile(tracePath, traceText, "utf8");
+	const summaryPath = path.join(outDir, "summary.json");
+	await fs.writeFile(summaryPath, summaryText, "utf8");
 	const manifestPath = path.join(outDir, "provenance-manifest.json");
-	await fs.writeFile(manifestPath, `${manifestText}\n`, "utf8");
+	await fs.writeFile(manifestPath, manifestText, "utf8");
 
 	process.stdout.write(
 		`${JSON.stringify(
 			{
 				ok: true,
-				outDir,
-				tracePath,
-				summaryPath,
-				manifestPath,
+				outputArtifact: path.basename(outDir),
+				traceArtifact: path.relative(outDir, tracePath),
+				summaryArtifact: "summary.json",
+				manifestArtifact: "provenance-manifest.json",
 				planned_records: planned.length,
 				captured_records: records.length,
 			},

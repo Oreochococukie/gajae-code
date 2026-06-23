@@ -1,39 +1,10 @@
 import * as fs from "node:fs/promises";
-import type { ScenarioId } from "./composer-scenarios";
+import { traceExpectationForScenario, type ScenarioId, type TraceExpectation } from "./composer-scenarios";
 import type { TraceRecord } from "./composer-stability-v3";
 
 type JsonObject = Record<string, unknown>;
 
-export type TraceExpectation = {
-	targetPath?: string;
-	requiredTools?: string[];
-	requireSuccess?: boolean;
-};
-
-export function traceExpectationForScenario(scenarioId: ScenarioId): TraceExpectation {
-	switch (scenarioId) {
-		case "bash-discipline":
-			return { requiredTools: ["read"], requireSuccess: true };
-		case "three-turn-tools":
-			return { requiredTools: ["read", "search", "edit"], requireSuccess: true };
-		case "multi-file-search-edit":
-			return { targetPath: "fixtures/workspace/src/pkg/alpha.ts", requireSuccess: true };
-		case "read-edit-hashline":
-			return { targetPath: "fixtures/workspace/src/foo.ts", requireSuccess: true };
-		case "hard-guard-feedback":
-			return { requiredTools: ["bash", "read"], requireSuccess: true };
-		case "legitimate-bash-after-tools":
-			return { requiredTools: ["find", "read", "bash"], requireSuccess: true };
-		case "wrong-target-disambiguation":
-			return { targetPath: "fixtures/workspace/src/disambiguation/target.ts", requireSuccess: true };
-		case "malformed-edit-recovery":
-			return { targetPath: "fixtures/workspace/src/malformed-edit.ts", requireSuccess: true };
-		case "cost-safe-timeout":
-			return { requiredTools: ["find", "read"], requireSuccess: true };
-		default:
-			return { requireSuccess: true };
-	}
-}
+export { traceExpectationForScenario, type TraceExpectation } from "./composer-scenarios";
 
 export async function readSessionJsonl(sessionFile: string): Promise<JsonObject[]> {
 	const raw = await fs.readFile(sessionFile, "utf8");
@@ -110,7 +81,7 @@ export function buildTraceRecord(input: {
 	model: string;
 	trial: number;
 	events: JsonObject[];
-	tracePath: string;
+	tracePath?: string;
 	expected?: TraceExpectation;
 }): TraceRecord {
 	return {

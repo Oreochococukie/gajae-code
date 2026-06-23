@@ -16,9 +16,11 @@ import {
 	DEFAULT_COMPOSER_CANDIDATE_MODEL,
 	MIN_COMPARABLE_TRACE_SCENARIOS,
 	SCENARIO_BY_ID,
+	traceExpectationForScenario,
 	type FailureClass,
 	type ScenarioDefinition,
 	type ScenarioId,
+	type TraceExpectation,
 } from "./composer-scenarios";
 const REPO_ROOT = path.resolve(import.meta.dir, "../../..");
 
@@ -111,11 +113,6 @@ type BenchOutput = {
 
 type JsonObject = Record<string, unknown>;
 
-type TraceExpectation = {
-	targetPath?: string;
-	requiredTools?: string[];
-	requireSuccess?: boolean;
-};
 
 export type TraceRecord = {
 	scenarioId: ScenarioId;
@@ -353,8 +350,23 @@ function normalizeExpected(value: unknown): TraceExpectation {
 		? requiredToolsValue.filter((entry): entry is string => typeof entry === "string")
 		: undefined;
 	const targetPath = asString(value.targetPath) ?? asString(value.path);
+	const expectedEditText = asString(value.expectedEditText) ?? asString(value.expected_edit_text);
 	const requireSuccess = typeof value.requireSuccess === "boolean" ? value.requireSuccess : undefined;
-	return { targetPath, requiredTools, requireSuccess };
+	return { targetPath, requiredTools, expectedEditText, requireSuccess };
+}
+
+function mergeTraceExpectation(scenarioId: ScenarioId, override: TraceExpectation | undefined): TraceExpectation {
+	const base = traceExpectationForScenario(scenarioId);
+	if (!override) return base;
+	const overrideKeepsBaseTarget =
+		override.targetPath === undefined ||
+		(base.targetPath !== undefined && path.normalize(override.targetPath) === path.normalize(base.targetPath));
+	return {
+		targetPath: override.targetPath ?? base.targetPath,
+		requiredTools: override.requiredTools ?? base.requiredTools,
+		expectedEditText: override.expectedEditText ?? (overrideKeepsBaseTarget ? base.expectedEditText : undefined),
+		requireSuccess: override.requireSuccess ?? base.requireSuccess,
+	};
 }
 
 function eventToolName(event: JsonObject): string | undefined {
@@ -515,6 +527,7 @@ function addFailure(failures: Set<FailureClass>, failureClass: FailureClass): vo
 export function classifyTraceRecord(record: TraceRecord): ClassifiedTrace {
 	const failures = new Set<FailureClass>();
 	const scenario = SCENARIO_BY_ID.get(record.scenarioId);
+	const expected = mergeTraceExpectation(record.scenarioId, record.expected);
 	const calledTools = new Set<string>();
 	let sawAnchorErrorAt = -1;
 	let readAfterAnchorErrorAt = -1;
@@ -559,7 +572,7 @@ export function classifyTraceRecord(record: TraceRecord): ClassifiedTrace {
 		if (isSanitizeReplayFailureEvent(event, text)) addFailure(failures, "sanitize-replay-regression");
 		if (ANCHOR_ERROR_PATTERN.test(text)) {
 			sawAnchorErrorAt = index;
-			anchorRecoveryTargetPath = eventPath(event) ?? record.expected?.targetPath;
+			anchorRecoveryTargetPath = eventPath(event) ?? expected.targetPath;
 			readAfterAnchorErrorAt = -1;
 			readAfterAnchorErrorPath = undefined;
 			anchorErrorProvidedFreshAnchors = FRESH_ANCHOR_LINE_PATTERN.test(text);
@@ -568,7 +581,7 @@ export function classifyTraceRecord(record: TraceRecord): ClassifiedTrace {
 		if (MALFORMED_ARGS_PATTERN.test(text)) {
 			sawMalformedArgsAt = index;
 			malformedArgsToolName = toolName;
-			malformedArgsPath = eventPath(event) ?? record.expected?.targetPath;
+			malformedArgsPath = eventPath(event) ?? expected.targetPath;
 			sawSuccessAfterMalformedArgs = false;
 		}
 		if (
@@ -612,12 +625,14 @@ export function classifyTraceRecord(record: TraceRecord): ClassifiedTrace {
 		if (expectedPath && actualPath && path.normalize(expectedPath) !== path.normalize(actualPath)) {
 			addFailure(failures, "wrong-file-edit");
 		}
-		if (record.expected?.targetPath && toolName && EDIT_TOOL_NAMES.has(toolName)) {
+		if (expected.targetPath && toolName && EDIT_TOOL_NAMES.has(toolName)) {
 			const targetPath = eventPath(event);
-			if (isSuccessfulEditEvent(event) && matchesNormalizedPath(record.expected.targetPath, targetPath)) {
+			const editPayload = `${stringifyArgs(eventArgs(event))}\n${text}`;
+			const hasExpectedEditText = expected.expectedEditText === undefined || editPayload.includes(expected.expectedEditText);
+			if (isSuccessfulEditEvent(event) && matchesNormalizedPath(expected.targetPath, targetPath) && hasExpectedEditText) {
 				sawSuccessfulTargetPathEdit = true;
 			}
-			if (targetPath && !matchesNormalizedPath(record.expected.targetPath, targetPath)) {
+			if (targetPath && !matchesNormalizedPath(expected.targetPath, targetPath)) {
 				addFailure(failures, "wrong-file-edit");
 			}
 		}
@@ -641,13 +656,13 @@ export function classifyTraceRecord(record: TraceRecord): ClassifiedTrace {
 	) {
 		addFailure(failures, "shell-read");
 	}
-	if (record.expected?.targetPath && !sawSuccessfulTargetPathEdit) {
+	if (expected.targetPath && !sawSuccessfulTargetPathEdit) {
 		addFailure(failures, "missing-tool-turn");
 	}
-	for (const requiredTool of record.expected?.requiredTools ?? []) {
+	for (const requiredTool of expected.requiredTools ?? []) {
 		if (!calledTools.has(requiredTool)) addFailure(failures, "missing-tool-turn");
 	}
-	if (record.expected?.requireSuccess === true && !sawSuccessfulTerminal) {
+	if (expected.requireSuccess === true && !sawSuccessfulTerminal) {
 		addFailure(failures, "missing-tool-turn");
 	}
 

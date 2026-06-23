@@ -218,10 +218,21 @@ describe("composer-evidence report", () => {
 		]);
 	});
 
-	it("manifest linter rejects home paths", () => {
-		const r = scanTextForPublishSecrets('{"path":"/Users/mac/secret"}');
-		expect(r.ok).toBe(false);
-		expect(r.findings).toContain("home_path");
+	it("manifest linter rejects local paths and credential-shaped values", () => {
+		const mac = scanTextForPublishSecrets('{"path":"/Users/mac/secret"}');
+		const linux = scanTextForPublishSecrets('{"path":"/home/alice/project"}');
+		const windows = scanTextForPublishSecrets('{"path":"C:\\\\Users\\\\alice\\\\project"}');
+		const temp = scanTextForPublishSecrets('{"path":"/tmp/composer-artifact/summary.json"}');
+		const token = scanTextForPublishSecrets('{"auth":"Bearer abcdefghijklmnopqrstuvwxyz"}');
+		const oauthJson = scanTextForPublishSecrets('{"OPENAI_OAUTH_TOKEN":"oauth-token-value-12345"}');
+
+		expect(mac.findings).toContain("home_path");
+		expect(linux.findings).toContain("linux_home_path");
+		expect(windows.findings).toContain("windows_home_path");
+		expect(temp.findings).toContain("temp_path");
+		expect(token.findings).toContain("bearer_token");
+		expect(oauthJson.findings).toContain("oauth_env_value");
+		expect([mac, linux, windows, temp, token, oauthJson].every(result => !result.ok)).toBe(true);
 	});
 
 	it("A/B compare keeps arm labels out of capture_mode metadata", async () => {
@@ -287,8 +298,11 @@ describe("composer-evidence report", () => {
 			{ cwd: path.resolve(import.meta.dir, "../../..") },
 		);
 		const stderr = await new Response(proc.stderr).text();
+		const stdout = await new Response(proc.stdout).text();
 		expect(await proc.exited).toBe(0);
 		expect(stderr).toBe("");
+		expect(stdout).toContain('"reportArtifact": "ab-report.json"');
+		expect(stdout).not.toContain(tempDir);
 
 		const payloadText = await fs.readFile(outPath, "utf8");
 		const payload = JSON.parse(payloadText) as {
@@ -298,7 +312,7 @@ describe("composer-evidence report", () => {
 			arm_b: { scenario_coverage_ratio: string };
 			comparison: { candidate_failure_count_delta_a_minus_b: number };
 		};
-		expect(payload.comparison.candidate_failure_count_delta_a_minus_b).toBe(1);
+		expect(payload.comparison.candidate_failure_count_delta_a_minus_b).toBe(0);
 		expect(payload.comparison_kind).toBe("historical-frozen-trace");
 		expect(payload.disclaimer).toContain("frozen trace corpora");
 		expect(payload.disclaimer).toContain("same versioned Composer scenario prompts");

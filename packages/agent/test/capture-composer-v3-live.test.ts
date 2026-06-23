@@ -8,7 +8,7 @@ import {
 	sessionLinesToTraceEvents,
 	traceExpectationForScenario,
 } from "../bench/composer-print-trace";
-import { COMPOSER_SCENARIOS } from "../bench/composer-scenarios";
+import { COMPOSER_SCENARIOS, type ScenarioId } from "../bench/composer-scenarios";
 import { classifyTraceRecord } from "../bench/composer-stability-v3";
 import "../bench/capture-composer-v3-live";
 
@@ -17,6 +17,40 @@ const PROMPT_PATH_RE =
 
 function extractPromptFixturePaths(prompt: string): string[] {
 	return Array.from(prompt.matchAll(PROMPT_PATH_RE), match => match[0].replace(/[,).]+$/, ""));
+}
+
+const MUTATION_TARGET_SCENARIOS = [
+	{ id: "read-edit-hashline", targetPath: "fixtures/workspace/src/foo.ts" },
+	{ id: "three-turn-tools", targetPath: "fixtures/workspace/src/a.ts" },
+	{ id: "shell-write-discipline", targetPath: "fixtures/workspace/src/write-target.ts" },
+	{ id: "multi-file-search-edit", targetPath: "fixtures/workspace/src/pkg/alpha.ts" },
+	{ id: "multi-file-search-edit-bad-anchor", targetPath: "fixtures/workspace/src/target.ts" },
+	{ id: "bad-anchor-recovery", targetPath: "fixtures/workspace/src/recover.ts" },
+	{ id: "multi-turn-yield-discipline", targetPath: "fixtures/workspace/src/multi.ts" },
+	{ id: "wrong-target-disambiguation", targetPath: "fixtures/workspace/src/disambiguation/target.ts" },
+	{ id: "malformed-edit-recovery", targetPath: "fixtures/workspace/src/malformed-edit.ts" },
+] as const satisfies readonly { id: ScenarioId; targetPath: string }[];
+const MUTATION_TARGET_SCENARIO_CASES = MUTATION_TARGET_SCENARIOS.map(({ id, targetPath }) => [id, targetPath] as const);
+
+function successfulMutationEvents(scenarioId: ScenarioId, targetPath: string): Record<string, unknown>[] {
+	const expected = traceExpectationForScenario(scenarioId);
+	const events: Record<string, unknown>[] = (expected.requiredTools ?? [])
+		.filter(toolName => toolName !== "edit" && toolName !== "write" && toolName !== "apply_patch")
+		.map(toolName => ({
+			type: "tool_execution_end",
+			toolName,
+			status: "success",
+			arguments:
+				toolName === "read" ? { path: targetPath } : { query: expected.expectedEditText ?? "mutation-target" },
+		}));
+	events.push({
+		type: "tool_execution_end",
+		toolName: "edit",
+		status: "success",
+		arguments: { path: targetPath, input: expected.expectedEditText ?? "mutation-target" },
+	});
+	events.push({ type: "scenario_result", status: "passed" });
+	return events;
 }
 
 async function promptPathExists(workdir: string, promptPath: string): Promise<boolean> {
@@ -94,6 +128,7 @@ describe("capture-composer-v3-live dry-run", () => {
 		const stderr = await new Response(proc.stderr).text();
 		expect(await proc.exited).toBe(0);
 		expect(stderr).toBe("");
+		expect(stdout).not.toContain(path.resolve(import.meta.dir, "../../.."));
 
 		const payload = JSON.parse(stdout) as {
 			composer_scenarios_version: string;
@@ -136,39 +171,49 @@ describe("composer-print-trace", () => {
 		expect(events.some(e => e.type === "tool_execution_end" && e.toolName === "read")).toBe(true);
 		expect(events.at(-1)).toEqual({ type: "scenario_result", status: "passed" });
 	});
-	it("uses prompted target paths for edit trace expectations", () => {
-		expect(traceExpectationForScenario("read-edit-hashline").targetPath).toBe("fixtures/workspace/src/foo.ts");
-		expect(traceExpectationForScenario("multi-file-search-edit").targetPath).toBe(
-			"fixtures/workspace/src/pkg/alpha.ts",
-		);
+	it("uses prompted target paths for every mutation-obligation trace expectation", () => {
+		for (const { id, targetPath } of MUTATION_TARGET_SCENARIOS) {
+			const expected = traceExpectationForScenario(id);
+			expect(expected.targetPath).toBe(targetPath);
+			expect(expected).not.toEqual({ requireSuccess: true });
+		}
 	});
 
-	it.each([
-		["read-edit-hashline", "fixtures/workspace/src/foo.ts"],
-		["multi-file-search-edit", "fixtures/workspace/src/pkg/alpha.ts"],
-	] as const)("classifies prompted target-path edit as pass for %s", (scenarioId, targetPath) => {
+	it.each(MUTATION_TARGET_SCENARIO_CASES)("classifies prompted target-path edit as pass for %s", (id, targetPath) => {
 		const record = buildTraceRecord({
-			scenarioId,
+			scenarioId: id,
 			modelRole: "candidate",
 			model: "grok-build/grok-composer-2.5-fast",
 			trial: 0,
-			events: [
-				{ type: "tool_execution_end", toolName: "edit", status: "success", arguments: { path: targetPath } },
-				{ type: "scenario_result", status: "passed" },
-			],
+			events: successfulMutationEvents(id, targetPath),
 			tracePath: "/tmp/trace.json",
-			expected: traceExpectationForScenario(scenarioId),
+			expected: traceExpectationForScenario(id),
 		});
 		const classified = classifyTraceRecord(record);
 		expect(classified.status).toBe("passed");
 		expect(classified.failureClasses).toEqual([]);
 	});
-	it.each([
-		["read-edit-hashline", "fixtures/workspace/src/foo.ts"],
-		["multi-file-search-edit", "fixtures/workspace/src/pkg/alpha.ts"],
-	] as const)("classifies missing target-path edit as failure for %s", (scenarioId, targetPath) => {
+
+	it.each(MUTATION_TARGET_SCENARIO_CASES)("classifies terminal-only mutation trace as failure for %s", id => {
 		const record = buildTraceRecord({
-			scenarioId,
+			scenarioId: id,
+			modelRole: "candidate",
+			model: "grok-build/grok-composer-2.5-fast",
+			trial: 0,
+			events: [{ type: "scenario_result", status: "passed" }],
+			tracePath: "/tmp/trace.json",
+			expected: traceExpectationForScenario(id),
+		});
+		const classified = classifyTraceRecord(record);
+		expect(classified.status).toBe("failed");
+		expect(classified.failureClasses).toContain("missing-tool-turn");
+	});
+
+	it.each(
+		MUTATION_TARGET_SCENARIO_CASES,
+	)("classifies missing target-path edit as failure for %s", (id, targetPath) => {
+		const record = buildTraceRecord({
+			scenarioId: id,
 			modelRole: "candidate",
 			model: "grok-build/grok-composer-2.5-fast",
 			trial: 0,
@@ -177,22 +222,23 @@ describe("composer-print-trace", () => {
 				{ type: "scenario_result", status: "passed" },
 			],
 			tracePath: "/tmp/trace.json",
-			expected: traceExpectationForScenario(scenarioId),
+			expected: traceExpectationForScenario(id),
 		});
 		const classified = classifyTraceRecord(record);
 		expect(classified.status).toBe("failed");
-		expect(classified.failureClasses).toEqual(["missing-tool-turn"]);
+		expect(classified.failureClasses).toContain("missing-tool-turn");
 	});
-	it.each([
-		["read-edit-hashline", "fixtures/workspace/src/foo.ts"],
-		["multi-file-search-edit", "fixtures/workspace/src/pkg/alpha.ts"],
-	] as const)("classifies wrong target-path edit as failure for %s", (scenarioId, targetPath) => {
+
+	it.each(MUTATION_TARGET_SCENARIO_CASES)("classifies wrong target-path edit as failure for %s", (id, targetPath) => {
 		const record = buildTraceRecord({
-			scenarioId,
+			scenarioId: id,
 			modelRole: "candidate",
 			model: "grok-build/grok-composer-2.5-fast",
 			trial: 0,
 			events: [
+				...successfulMutationEvents(id, targetPath).filter(
+					event => event.type !== "scenario_result" && event.toolName !== "edit",
+				),
 				{
 					type: "tool_execution_end",
 					toolName: "edit",
@@ -202,28 +248,84 @@ describe("composer-print-trace", () => {
 				{ type: "scenario_result", status: "passed" },
 			],
 			tracePath: "/tmp/trace.json",
-			expected: traceExpectationForScenario(scenarioId),
+			expected: traceExpectationForScenario(id),
 		});
 		const classified = classifyTraceRecord(record);
 		expect(classified.status).toBe("failed");
 		expect(classified.failureClasses).toEqual(["missing-tool-turn", "wrong-file-edit"]);
 	});
 
-	it.each([
-		["read-edit-hashline", "fixtures/workspace/src/foo.ts"],
-		["multi-file-search-edit", "fixtures/workspace/src/pkg/alpha.ts"],
-	] as const)("classifies failed target-path edit as failure for %s", (scenarioId, targetPath) => {
+	it.each(
+		MUTATION_TARGET_SCENARIO_CASES,
+	)("classifies wrong-content target edit as failure for %s", (id, targetPath) => {
 		const record = buildTraceRecord({
-			scenarioId,
+			scenarioId: id,
 			modelRole: "candidate",
 			model: "grok-build/grok-composer-2.5-fast",
 			trial: 0,
 			events: [
+				...successfulMutationEvents(id, targetPath).filter(
+					event => event.type !== "scenario_result" && event.toolName !== "edit",
+				),
+				{
+					type: "tool_execution_end",
+					toolName: "edit",
+					status: "success",
+					arguments: { path: targetPath, input: "NO_OP_MUTATION" },
+				},
+				{ type: "scenario_result", status: "passed" },
+			],
+			tracePath: "/tmp/trace.json",
+			expected: traceExpectationForScenario(id),
+		});
+		const classified = classifyTraceRecord(record);
+		expect(classified.status).toBe("failed");
+		expect(classified.failureClasses).toEqual(["missing-tool-turn"]);
+	});
+
+	it.each(
+		MUTATION_TARGET_SCENARIO_CASES,
+	)("classifies target-only expectation wrong-content edit as failure for %s", (id, targetPath) => {
+		const record = buildTraceRecord({
+			scenarioId: id,
+			modelRole: "candidate",
+			model: "grok-build/grok-composer-2.5-fast",
+			trial: 0,
+			events: [
+				...successfulMutationEvents(id, targetPath).filter(
+					event => event.type !== "scenario_result" && event.toolName !== "edit",
+				),
+				{
+					type: "tool_execution_end",
+					toolName: "edit",
+					status: "success",
+					arguments: { path: targetPath, input: "NO_OP_MUTATION" },
+				},
+				{ type: "scenario_result", status: "passed" },
+			],
+			tracePath: "/tmp/trace.json",
+			expected: { targetPath, requireSuccess: true },
+		});
+		const classified = classifyTraceRecord(record);
+		expect(classified.status).toBe("failed");
+		expect(classified.failureClasses).toEqual(["missing-tool-turn"]);
+	});
+
+	it.each(MUTATION_TARGET_SCENARIO_CASES)("classifies failed target-path edit as failure for %s", (id, targetPath) => {
+		const record = buildTraceRecord({
+			scenarioId: id,
+			modelRole: "candidate",
+			model: "grok-build/grok-composer-2.5-fast",
+			trial: 0,
+			events: [
+				...successfulMutationEvents(id, targetPath).filter(
+					event => event.type !== "scenario_result" && event.toolName !== "edit",
+				),
 				{ type: "tool_execution_end", toolName: "edit", status: "error", arguments: { path: targetPath } },
 				{ type: "scenario_result", status: "passed" },
 			],
 			tracePath: "/tmp/trace.json",
-			expected: traceExpectationForScenario(scenarioId),
+			expected: traceExpectationForScenario(id),
 		});
 		const classified = classifyTraceRecord(record);
 		expect(classified.status).toBe("failed");

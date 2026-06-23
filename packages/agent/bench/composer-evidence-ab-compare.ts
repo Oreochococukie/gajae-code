@@ -181,7 +181,9 @@ async function main(): Promise<void> {
 
 	const outPath = outArg ? path.resolve(outArg) : path.join(REPO_ROOT, "evidence-ab-compare.json");
 	await fs.writeFile(outPath, `${JSON.stringify(payload, null, 2)}\n`);
-	process.stdout.write(`${JSON.stringify({ ok: true, outPath, comparison: payload.comparison }, null, 2)}\n`);
+	process.stdout.write(
+		`${JSON.stringify({ ok: true, reportArtifact: path.basename(outPath), comparison: payload.comparison }, null, 2)}\n`,
+	);
 }
 
 if (import.meta.main) {

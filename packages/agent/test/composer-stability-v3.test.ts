@@ -1,5 +1,18 @@
 import { describe, expect, it } from "bun:test";
+import type { ScenarioId } from "../bench/composer-scenarios";
 import { type CliOptions, classifyTraceRecord, run, type TraceRecord } from "../bench/composer-stability-v3";
+
+const MUTATION_SCENARIOS = [
+	"read-edit-hashline",
+	"three-turn-tools",
+	"shell-write-discipline",
+	"multi-file-search-edit",
+	"multi-file-search-edit-bad-anchor",
+	"bad-anchor-recovery",
+	"multi-turn-yield-discipline",
+	"wrong-target-disambiguation",
+	"malformed-edit-recovery",
+] as const satisfies readonly ScenarioId[];
 
 const baseOptions: CliOptions = {
 	mode: "trace",
@@ -22,6 +35,21 @@ function record(partial: Partial<TraceRecord>): TraceRecord {
 		...partial,
 	};
 }
+
+it("fails terminal-only successful results for every mutation-obligation scenario", () => {
+	for (const scenarioId of MUTATION_SCENARIOS) {
+		const result = classifyTraceRecord(
+			record({
+				scenarioId,
+				expected: {},
+				events: [{ type: "scenario_result", status: "passed" }],
+			}),
+		);
+
+		expect(result.status).toBe("failed");
+		expect(result.failureClasses).toContain("missing-tool-turn");
+	}
+});
 
 describe("composer-stability-v3 trace classifier", () => {
 	it("counts shell file reads as shell-read failures", () => {
@@ -322,6 +350,7 @@ describe("composer-stability-v3 trace classifier", () => {
 		const recovered = classifyTraceRecord(
 			record({
 				scenarioId: "bad-anchor-recovery",
+				expected: { targetPath: "src/recover.ts", requireSuccess: false },
 				events: [
 					{
 						type: "tool_execution_end",
@@ -347,6 +376,7 @@ describe("composer-stability-v3 trace classifier", () => {
 		const unrecovered = classifyTraceRecord(
 			record({
 				scenarioId: "bad-anchor-recovery",
+				expected: { targetPath: "src/recover.ts", requireSuccess: false },
 				events: [
 					{
 						type: "tool_execution_end",
@@ -360,6 +390,7 @@ describe("composer-stability-v3 trace classifier", () => {
 		const ambiguousRecovery = classifyTraceRecord(
 			record({
 				scenarioId: "bad-anchor-recovery",
+				expected: { targetPath: "src/recover.ts", requireSuccess: false },
 				events: [
 					{
 						type: "tool_execution_end",
@@ -375,6 +406,7 @@ describe("composer-stability-v3 trace classifier", () => {
 		const rejectionOutputRecovery = classifyTraceRecord(
 			record({
 				scenarioId: "bad-anchor-recovery",
+				expected: { targetPath: "src/recover.ts", requireSuccess: false },
 				events: [
 					{
 						type: "tool_execution_end",
@@ -394,6 +426,7 @@ describe("composer-stability-v3 trace classifier", () => {
 		const wrongOrderRecovery = classifyTraceRecord(
 			record({
 				scenarioId: "bad-anchor-recovery",
+				expected: { targetPath: "src/recover.ts", requireSuccess: false },
 				events: [
 					{
 						type: "tool_execution_end",
@@ -419,6 +452,7 @@ describe("composer-stability-v3 trace classifier", () => {
 		const mismatchedPathRecovery = classifyTraceRecord(
 			record({
 				scenarioId: "bad-anchor-recovery",
+				expected: { targetPath: "src/recover.ts", requireSuccess: false },
 				events: [
 					{
 						type: "tool_execution_end",
@@ -446,6 +480,7 @@ describe("composer-stability-v3 trace classifier", () => {
 		const recovered = classifyTraceRecord(
 			record({
 				scenarioId: "tool-json-malformed-recovery",
+				expected: { requireSuccess: false },
 				events: [
 					{
 						type: "tool_execution_end",
@@ -460,6 +495,7 @@ describe("composer-stability-v3 trace classifier", () => {
 		const unrecovered = classifyTraceRecord(
 			record({
 				scenarioId: "tool-json-malformed-recovery",
+				expected: { requireSuccess: false },
 				events: [
 					{
 						type: "tool_execution_end",
@@ -473,6 +509,7 @@ describe("composer-stability-v3 trace classifier", () => {
 		const ambiguousRecovery = classifyTraceRecord(
 			record({
 				scenarioId: "tool-json-malformed-recovery",
+				expected: { requireSuccess: false },
 				events: [
 					{
 						type: "tool_execution_end",
@@ -487,6 +524,7 @@ describe("composer-stability-v3 trace classifier", () => {
 		const unrelatedSuccess = classifyTraceRecord(
 			record({
 				scenarioId: "tool-json-malformed-recovery",
+				expected: { requireSuccess: false },
 				events: [
 					{
 						type: "tool_execution_end",
@@ -599,8 +637,8 @@ describe("composer-stability-v3 trace classifier", () => {
 
 		expect(output.mode).toBe("trace");
 		expect(output.p1.applicable).toBe(true);
-		expect(output.p1.candidateFailureCount).toBe(14);
-		expect(output.p1.baselineFailureCount).toBe(1);
+		expect(output.p1.candidateFailureCount).toBe(16);
+		expect(output.p1.baselineFailureCount).toBe(3);
 		expect(output.p1.parityDelta).toBe(13);
 		expect(output.p1.passed).toBe(false);
 		expect(output.traceArtifacts?.map(artifact => artifact.records).reduce((sum, count) => sum + count, 0)).toBe(26);

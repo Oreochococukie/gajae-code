@@ -63,6 +63,71 @@ export const DEFAULT_CODEX_BASELINE_MODEL = "openai-codex/gpt-5.5:low";
 
 export const L3_MIN_TRIALS_PER_ARM = 3;
 
+export type TraceExpectation = {
+	targetPath?: string;
+	requiredTools?: string[];
+	expectedEditText?: string;
+	requireSuccess?: boolean;
+};
+
+export function traceExpectationForScenario(scenarioId: ScenarioId): TraceExpectation {
+	switch (scenarioId) {
+		case "bash-discipline":
+			return { requiredTools: ["read"], requireSuccess: true };
+		case "three-turn-tools":
+			return {
+				targetPath: "fixtures/workspace/src/a.ts",
+				expectedEditText: "TARGET_MARKER_DONE",
+				requiredTools: ["read", "search", "edit"],
+				requireSuccess: true,
+			};
+		case "shell-write-discipline":
+			return { targetPath: "fixtures/workspace/src/write-target.ts", expectedEditText: "42", requireSuccess: true };
+		case "multi-file-search-edit":
+			return {
+				targetPath: "fixtures/workspace/src/pkg/alpha.ts",
+				expectedEditText: "pkg-marker-patched",
+				requireSuccess: true,
+			};
+		case "multi-file-search-edit-bad-anchor":
+			return {
+				targetPath: "fixtures/workspace/src/target.ts",
+				expectedEditText: "recovered-anchor-ok",
+				requireSuccess: true,
+			};
+		case "read-edit-hashline":
+			return {
+				targetPath: "fixtures/workspace/src/foo.ts",
+				expectedEditText: "hello-composer-harness",
+				requireSuccess: true,
+			};
+		case "bad-anchor-recovery":
+			return { targetPath: "fixtures/workspace/src/recover.ts", expectedEditText: "ok", requireSuccess: true };
+		case "multi-turn-yield-discipline":
+			return { targetPath: "fixtures/workspace/src/multi.ts", expectedEditText: "-done", requireSuccess: true };
+		case "hard-guard-feedback":
+			return { requiredTools: ["bash", "read"], requireSuccess: true };
+		case "legitimate-bash-after-tools":
+			return { requiredTools: ["find", "read", "bash"], requireSuccess: true };
+		case "wrong-target-disambiguation":
+			return {
+				targetPath: "fixtures/workspace/src/disambiguation/target.ts",
+				expectedEditText: "EXACT_TARGET_DONE",
+				requireSuccess: true,
+			};
+		case "malformed-edit-recovery":
+			return {
+				targetPath: "fixtures/workspace/src/malformed-edit.ts",
+				expectedEditText: "MALFORMED_EDIT_DONE",
+				requireSuccess: true,
+			};
+		case "cost-safe-timeout":
+			return { requiredTools: ["find", "read"], requireSuccess: true };
+		default:
+			return { requireSuccess: true };
+	}
+}
+
 export const COMPOSER_SCENARIOS_V1_IDS = [
 	"read-edit-hashline",
 	"three-turn-tools",
