@@ -136,6 +136,33 @@ describe("composer-print-trace", () => {
 		expect(events.some(e => e.type === "tool_execution_end" && e.toolName === "read")).toBe(true);
 		expect(events.at(-1)).toEqual({ type: "scenario_result", status: "passed" });
 	});
+	it("uses prompted target paths for edit trace expectations", () => {
+		expect(traceExpectationForScenario("read-edit-hashline").targetPath).toBe("fixtures/workspace/src/foo.ts");
+		expect(traceExpectationForScenario("multi-file-search-edit").targetPath).toBe(
+			"fixtures/workspace/src/pkg/alpha.ts",
+		);
+	});
+
+	it.each([
+		["read-edit-hashline", "fixtures/workspace/src/foo.ts"],
+		["multi-file-search-edit", "fixtures/workspace/src/pkg/alpha.ts"],
+	] as const)("classifies prompted target-path edit as pass for %s", (scenarioId, targetPath) => {
+		const record = buildTraceRecord({
+			scenarioId,
+			modelRole: "candidate",
+			model: "grok-build/grok-composer-2.5-fast",
+			trial: 0,
+			events: [
+				{ type: "tool_execution_end", toolName: "edit", status: "success", arguments: { path: targetPath } },
+				{ type: "scenario_result", status: "passed" },
+			],
+			tracePath: "/tmp/trace.json",
+			expected: traceExpectationForScenario(scenarioId),
+		});
+		const classified = classifyTraceRecord(record);
+		expect(classified.status).toBe("passed");
+		expect(classified.failureClasses).toEqual([]);
+	});
 
 	it("classifies converted bash-discipline trace as pass", () => {
 		const record = buildTraceRecord({

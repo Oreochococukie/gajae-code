@@ -17,9 +17,9 @@ export function traceExpectationForScenario(scenarioId: ScenarioId): TraceExpect
 		case "three-turn-tools":
 			return { requiredTools: ["read", "search", "edit"], requireSuccess: true };
 		case "multi-file-search-edit":
-			return { targetPath: "src/a.ts", requireSuccess: true };
+			return { targetPath: "fixtures/workspace/src/pkg/alpha.ts", requireSuccess: true };
 		case "read-edit-hashline":
-			return { targetPath: "src/foo.ts", requireSuccess: true };
+			return { targetPath: "fixtures/workspace/src/foo.ts", requireSuccess: true };
 		case "hard-guard-feedback":
 			return { requiredTools: ["bash", "read"], requireSuccess: true };
 		case "legitimate-bash-after-tools":
