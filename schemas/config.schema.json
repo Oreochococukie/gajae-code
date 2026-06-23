@@ -45,6 +45,30 @@
 					},
 					"additionalProperties": false
 				},
+				"discord": {
+					"type": "object",
+					"properties": {
+						"botToken": {
+							"type": "string"
+						},
+						"channelId": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				},
+				"slack": {
+					"type": "object",
+					"properties": {
+						"botToken": {
+							"type": "string"
+						},
+						"channelId": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				},
 				"redact": {
 					"type": "boolean",
 					"default": false
@@ -1629,6 +1653,17 @@
 					"type": "boolean",
 					"description": "Allow the read tool to fetch and process URLs",
 					"default": true
+				}
+			},
+			"additionalProperties": false
+		},
+		"web": {
+			"type": "object",
+			"properties": {
+				"insaneFallback": {
+					"type": "boolean",
+					"description": "Opt in to the vendored insane-search escalation for blocked public URL reads (403/WAF/JS-gated). Off by default. Requires preinstalled python3 + curl_cffi (and node + playwright/stealth for the browser phase); changes network posture by enabling TLS/browser impersonation for public pages.",
+					"default": false
 				}
 			},
 			"additionalProperties": false

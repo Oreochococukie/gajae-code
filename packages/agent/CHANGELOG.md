@@ -6,6 +6,10 @@
 
 - Composer harness evidence now tracks the v2 scenario matrix, versioned v1 replay denominators, L3 eligibility/refusal fields, and hard-guard recovery cases so reports distinguish frozen-trace L2 evidence from true K>=3 L3 captures.
 
+### Fixed
+
+- Reserved headroom when trimming OpenAI remote compaction input so `/responses/compact` requests stay below the model context window instead of filling the entire window.
+
 ## [0.6.2] - 2026-06-19
 
 ### Changed
