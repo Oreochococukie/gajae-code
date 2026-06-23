@@ -8,14 +8,36 @@ import {
 	sessionLinesToTraceEvents,
 	traceExpectationForScenario,
 } from "../bench/composer-print-trace";
+import { COMPOSER_SCENARIOS } from "../bench/composer-scenarios";
 import { classifyTraceRecord } from "../bench/composer-stability-v3";
 import "../bench/capture-composer-v3-live";
+
+const PROMPT_PATH_RE =
+	/\b(?:fixtures\/[A-Za-z0-9._{},*?/-]+|docs\/[A-Za-z0-9._{},*?/-]+|packages\/agent\/test\/fixtures\/[A-Za-z0-9._{},*?/-]+)/g;
+
+function extractPromptFixturePaths(prompt: string): string[] {
+	return Array.from(prompt.matchAll(PROMPT_PATH_RE), match => match[0].replace(/[,).]+$/, ""));
+}
+
+async function promptPathExists(workdir: string, promptPath: string): Promise<boolean> {
+	if (promptPath.includes("*") || promptPath.includes("{")) {
+		const wildcardIndex = promptPath.search(/[*{]/);
+		const prefix = promptPath.slice(0, wildcardIndex);
+		const dir = prefix.endsWith("/") ? prefix.slice(0, -1) : path.dirname(prefix);
+		const entries = await fs.readdir(path.join(workdir, dir)).catch(() => []);
+		return entries.length > 0;
+	}
+	return fs.stat(path.join(workdir, promptPath)).then(
+		stat => stat.isFile() || stat.isDirectory(),
+		() => false,
+	);
+}
 
 describe("composer-live-fixtures", () => {
 	it("seeds bash-discipline workdir", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "composer-live-"));
 		await seedScenarioWorkdir(dir, "bash-discipline");
-		const text = await fs.readFile(path.join(dir, "src", "secret.ts"), "utf8");
+		const text = await fs.readFile(path.join(dir, "fixtures", "workspace", "src", "secret.ts"), "utf8");
 		expect(text).toContain("LIVE_SECRET");
 	});
 
@@ -33,6 +55,20 @@ describe("composer-live-fixtures", () => {
 		);
 		expect(target).toContain("EXACT_TARGET");
 		expect(timeoutFixture.trim()).toBe("{}");
+	});
+	it("seeds every literal fixture path referenced by scenario prompts", async () => {
+		const missing: string[] = [];
+		for (const scenario of COMPOSER_SCENARIOS) {
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), `composer-live-${scenario.id}-`));
+			await seedScenarioWorkdir(dir, scenario.id);
+			for (const promptPath of extractPromptFixturePaths(scenario.userPrompt)) {
+				if (!(await promptPathExists(dir, promptPath))) {
+					missing.push(`${scenario.id}: ${promptPath}`);
+				}
+			}
+		}
+
+		expect(missing).toEqual([]);
 	});
 });
 

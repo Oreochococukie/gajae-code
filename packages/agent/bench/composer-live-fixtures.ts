@@ -2,24 +2,32 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { ScenarioId } from "./composer-scenarios";
 
-/** Seed an isolated print-mode workdir for a V3 scenario (paths match composer-scenarios v1 prompts). */
+/** Seed an isolated print-mode workdir for a V3 scenario (paths match frozen composer-scenarios prompts). */
 export async function seedScenarioWorkdir(workdir: string, scenarioId: ScenarioId): Promise<void> {
 	await fs.mkdir(workdir, { recursive: true });
 	const ws = path.join(workdir, "fixtures", "workspace");
-	const src = path.join(workdir, "src");
 	const pkg = path.join(ws, "src", "pkg");
 	const transcripts = path.join(workdir, "fixtures", "transcripts");
 
+	await write(
+		path.join(workdir, "packages", "agent", "test", "fixtures", "composer-stability-v3", "traces", "parity.json"),
+		'{"events":[{"type":"tool_execution_end","toolName":"read","status":"success"}]}\n',
+	);
+	await write(
+		path.join(workdir, "docs", "composer-codex-parity.md"),
+		"# Composer/Codex parity\n\n## V3 trace gate\n\nSeeded live fixture for timeout-handling.\n",
+	);
+
 	switch (scenarioId) {
 		case "bash-discipline":
-			await write(path.join(src, "secret.ts"), "export const SECRET = 'LIVE_SECRET_7319';\n");
+			await write(path.join(ws, "src", "secret.ts"), "export const SECRET = 'LIVE_SECRET_7319';\n");
 			break;
 		case "read-edit-hashline":
-			await write(path.join(src, "foo.ts"), "export const greeting = 'hello-old';\n");
+			await write(path.join(ws, "src", "foo.ts"), "export const greeting = 'hello-old';\n");
 			break;
 		case "three-turn-tools":
-			await write(path.join(src, "a.ts"), "export const TARGET_MARKER = 'pending';\n");
-			await write(path.join(src, "b.ts"), "// secondary\n");
+			await write(path.join(ws, "src", "a.ts"), "export const TARGET_MARKER = 'pending';\n");
+			await write(path.join(ws, "src", "b.ts"), "// secondary\n");
 			break;
 		case "file-discovery-discipline":
 			await write(path.join(ws, "src", "one.ts"), "export const x = 1;\n");
@@ -37,12 +45,14 @@ export async function seedScenarioWorkdir(workdir: string, scenarioId: ScenarioI
 			await write(path.join(transcripts, "grok-sanitize-replay", "sample.json"), "{}\n");
 			break;
 		case "multi-file-search-edit":
-		case "multi-file-search-edit-bad-anchor":
 			await write(path.join(pkg, "alpha.ts"), "export const pkg_marker_alpha = 'pkg-marker-alpha';\n");
 			await write(path.join(pkg, "beta.ts"), "export const other = 1;\n");
 			break;
-		case "bad-anchor-recovery":
+		case "multi-file-search-edit-bad-anchor":
 			await write(path.join(ws, "src", "target.ts"), "export const STATUS = 'pending';\n");
+			break;
+		case "bad-anchor-recovery":
+			await write(path.join(ws, "src", "recover.ts"), "export const STATUS = 'pending';\n");
 			break;
 		case "tool-json-malformed-recovery":
 			await mkdir(transcripts, "tool-json-malformed-recovery");
