@@ -67,6 +67,7 @@ export type TraceExpectation = {
 	targetPath?: string;
 	requiredTools?: string[];
 	expectedEditText?: string;
+	recoveryTargetPath?: string;
 	requireSuccess?: boolean;
 };
 
@@ -106,7 +107,11 @@ export function traceExpectationForScenario(scenarioId: ScenarioId): TraceExpect
 		case "multi-turn-yield-discipline":
 			return { targetPath: "fixtures/workspace/src/multi.ts", expectedEditText: "-done", requireSuccess: true };
 		case "hard-guard-feedback":
-			return { requiredTools: ["bash", "read"], requireSuccess: true };
+			return {
+				recoveryTargetPath: "fixtures/workspace/src/policy-secret.ts",
+				requiredTools: ["bash", "read"],
+				requireSuccess: true,
+			};
 		case "legitimate-bash-after-tools":
 			return { requiredTools: ["find", "read", "bash"], requireSuccess: true };
 		case "wrong-target-disambiguation":

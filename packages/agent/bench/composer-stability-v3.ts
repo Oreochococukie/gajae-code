@@ -351,8 +351,9 @@ function normalizeExpected(value: unknown): TraceExpectation {
 		: undefined;
 	const targetPath = asString(value.targetPath) ?? asString(value.path);
 	const expectedEditText = asString(value.expectedEditText) ?? asString(value.expected_edit_text);
+	const recoveryTargetPath = asString(value.recoveryTargetPath) ?? asString(value.recovery_target_path);
 	const requireSuccess = typeof value.requireSuccess === "boolean" ? value.requireSuccess : undefined;
-	return { targetPath, requiredTools, expectedEditText, requireSuccess };
+	return { targetPath, recoveryTargetPath, requiredTools, expectedEditText, requireSuccess };
 }
 
 function mergeTraceExpectation(scenarioId: ScenarioId, override: TraceExpectation | undefined): TraceExpectation {
@@ -365,6 +366,7 @@ function mergeTraceExpectation(scenarioId: ScenarioId, override: TraceExpectatio
 		targetPath: override.targetPath ?? base.targetPath,
 		requiredTools: override.requiredTools ?? base.requiredTools,
 		expectedEditText: override.expectedEditText ?? (overrideKeepsBaseTarget ? base.expectedEditText : undefined),
+		recoveryTargetPath: override.recoveryTargetPath ?? base.recoveryTargetPath,
 		requireSuccess: override.requireSuccess ?? base.requireSuccess,
 	};
 }
@@ -584,13 +586,11 @@ export function classifyTraceRecord(record: TraceRecord): ClassifiedTrace {
 			malformedArgsPath = eventPath(event) ?? expected.targetPath;
 			sawSuccessAfterMalformedArgs = false;
 		}
-		if (
-			isHardGuardFeedbackScenario &&
-			sawComposerBashPolicyBlockedIo &&
-			isReadEvent(event) &&
-			isSuccessfulToolEvent(event)
-		) {
-			sawComposerBashPolicyRecoveryTool = true;
+		if (isHardGuardFeedbackScenario && sawComposerBashPolicyBlockedIo && isReadEvent(event) && isSuccessfulToolEvent(event)) {
+			const recoveryPath = eventPath(event);
+			if (matchesNormalizedPath(expected.recoveryTargetPath, recoveryPath)) {
+				sawComposerBashPolicyRecoveryTool = true;
+			}
 		}
 		if (sawAnchorErrorAt >= 0 && index > sawAnchorErrorAt && isReadEvent(event) && isSuccessfulToolEvent(event)) {
 			const readPath = eventPath(event);
