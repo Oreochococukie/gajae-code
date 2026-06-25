@@ -54,7 +54,7 @@ type RunResult = {
 	toolErrorCount: number;
 };
 
-function parseArgs(argv: string[]): {
+type CaptureArgs = {
 	dryRun: boolean;
 	skipCredCheck: boolean;
 	k: number;
@@ -64,7 +64,12 @@ function parseArgs(argv: string[]): {
 	gjcBin: string;
 	scenarioFilter?: Set<ScenarioId>;
 	timeoutSec: number;
-} {
+};
+
+type SessionJsonLine = Record<string, unknown>;
+type TraceEvent = Record<string, unknown>;
+
+function parseArgs(argv: string[]): CaptureArgs {
 	let dryRun = true;
 	let skipCredCheck = false;
 	let k = 1;
@@ -106,7 +111,7 @@ function hasBaselineCreds(): boolean {
 	);
 }
 
-function buildMatrix(args: ReturnType<typeof parseArgs>): PlannedRow[] {
+function buildMatrix(args: CaptureArgs): PlannedRow[] {
 	const scenarios = args.scenarioFilter
 		? COMPOSER_SCENARIOS.filter(s => args.scenarioFilter!.has(s.id))
 		: COMPOSER_SCENARIOS;
@@ -158,40 +163,40 @@ async function runGjcPrint(input: {
 	sessionDir: string;
 	timeoutSec: number;
 }): Promise<{ exitCode: number; stderr: string }> {
-	return new Promise((resolve, reject) => {
-		const child = spawn(
-			input.gjcBin,
-			["-p", "--mode", "json", "--model", input.model, "--session-dir", input.sessionDir, input.prompt],
-			{
-				cwd: input.cwd,
-				env: process.env,
-				stdio: ["ignore", "pipe", "pipe"],
-			},
-		);
-		let stderr = "";
-		child.stdout?.on("data", () => {
-			// discard JSONL stream; session jsonl on disk is the source of truth
-		});
-		child.stderr?.on("data", (chunk: Buffer) => {
-			if (stderr.length < STDERR_CAPTURE_MAX) {
-				stderr += chunk.toString("utf8").slice(0, STDERR_CAPTURE_MAX - stderr.length);
-			}
-		});
-		const timer = setTimeout(() => {
-			child.kill("SIGTERM");
-		}, input.timeoutSec * 1000);
-		child.on("error", err => {
-			clearTimeout(timer);
-			reject(err);
-		});
-		child.on("close", code => {
-			clearTimeout(timer);
-			resolve({ exitCode: code ?? 1, stderr });
-		});
+	const { promise, resolve, reject } = Promise.withResolvers<{ exitCode: number; stderr: string }>();
+	const child = spawn(
+		input.gjcBin,
+		["-p", "--mode", "json", "--model", input.model, "--session-dir", input.sessionDir, input.prompt],
+		{
+			cwd: input.cwd,
+			env: process.env,
+			stdio: ["ignore", "pipe", "pipe"],
+		},
+	);
+	let stderr = "";
+	child.stdout?.on("data", () => {
+		// discard JSONL stream; session jsonl on disk is the source of truth
 	});
+	child.stderr?.on("data", (chunk: Buffer) => {
+		if (stderr.length < STDERR_CAPTURE_MAX) {
+			stderr += chunk.toString("utf8").slice(0, STDERR_CAPTURE_MAX - stderr.length);
+		}
+	});
+	const timer = setTimeout(() => {
+		child.kill("SIGTERM");
+	}, input.timeoutSec * 1000);
+	child.on("error", err => {
+		clearTimeout(timer);
+		reject(err);
+	});
+	child.on("close", code => {
+		clearTimeout(timer);
+		resolve({ exitCode: code ?? 1, stderr });
+	});
+	return promise;
 }
 
-function countToolsFromSession(lines: Awaited<ReturnType<typeof readSessionJsonl>>): {
+function countToolsFromSession(lines: SessionJsonLine[]): {
 	toolCount: number;
 	toolErrorCount: number;
 } {
@@ -229,7 +234,7 @@ async function extractFinalTextFromSession(sessionFile: string | undefined): Pro
 }
 
 async function executeRow(
-	args: ReturnType<typeof parseArgs>,
+	args: CaptureArgs,
 	row: PlannedRow,
 	outDir: string,
 	tracePath: string,
@@ -254,7 +259,7 @@ async function executeRow(
 	});
 
 	const sessionFile = await findLatestSessionFile(sessionDir);
-	let events: ReturnType<typeof sessionLinesToTraceEvents> = [];
+	let events: TraceEvent[] = [];
 	let toolCount = 0;
 	let toolErrorCount = 0;
 	if (sessionFile) {
