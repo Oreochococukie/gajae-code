@@ -5,7 +5,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { buildEvidenceReport, type EvidenceReport } from "./composer-evidence";
+import { buildEvidenceReport, scanTextForPublishSecrets, type EvidenceReport } from "./composer-evidence";
 import { classifyTraceRecord, type TraceRecord } from "./composer-stability-v3";
 
 const REPO_ROOT = path.resolve(import.meta.dir, "../../..");
@@ -101,6 +101,9 @@ function armSummary(label: string, gjcVersion: string, report: EvidenceReport) {
 	return {
 		label,
 		gjc_version: gjcVersion,
+		composer_scenarios_version: report.composer_scenarios_version,
+		trace_sha256: report.trace_sha256,
+		manifest_sha256: report.manifest_sha256,
 		candidate_failure_count: report.p1.candidateFailureCount,
 		baseline_failure_count: report.p1.baselineFailureCount,
 		parity_delta: report.p1.parityDelta,
@@ -179,8 +182,15 @@ async function main(): Promise<void> {
 		per_scenario_b: bReport.per_scenario,
 	};
 
+	const payloadText = `${JSON.stringify(payload, null, 2)}\n`;
+	const payloadLint = scanTextForPublishSecrets(payloadText);
+	if (!payloadLint.ok) {
+		process.stderr.write(`composer-evidence-ab-compare: report linter failed: ${payloadLint.findings.join(", ")}\n`);
+		process.exit(3);
+	}
+
 	const outPath = outArg ? path.resolve(outArg) : path.join(REPO_ROOT, "evidence-ab-compare.json");
-	await fs.writeFile(outPath, `${JSON.stringify(payload, null, 2)}\n`);
+	await fs.writeFile(outPath, payloadText);
 	process.stdout.write(
 		`${JSON.stringify({ ok: true, reportArtifact: path.basename(outPath), comparison: payload.comparison }, null, 2)}\n`,
 	);

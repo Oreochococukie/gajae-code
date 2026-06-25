@@ -308,8 +308,8 @@ describe("composer-evidence report", () => {
 		const payload = JSON.parse(payloadText) as {
 			comparison_kind: string;
 			disclaimer: string;
-			arm_a: { scenario_coverage_ratio: string };
-			arm_b: { scenario_coverage_ratio: string };
+			arm_a: { composer_scenarios_version: string; scenario_coverage_ratio: string; trace_sha256?: string };
+			arm_b: { composer_scenarios_version: string; scenario_coverage_ratio: string; trace_sha256?: string };
 			comparison: { candidate_failure_count_delta_a_minus_b: number };
 		};
 		expect(payload.comparison.candidate_failure_count_delta_a_minus_b).toBe(0);
@@ -318,8 +318,85 @@ describe("composer-evidence report", () => {
 		expect(payload.disclaimer).toContain("same versioned Composer scenario prompts");
 		expect(payload.disclaimer).not.toContain("composer-scenarios-v1");
 		expect(payload.arm_a.scenario_coverage_ratio).toBe("1/13");
+		expect(payload.arm_a.composer_scenarios_version).toBe("v1");
+		expect(payload.arm_b.composer_scenarios_version).toBe("v1");
 		expect(payload.arm_b.scenario_coverage_ratio).toBe("1/13");
 		expect(payloadText).not.toContain("ab-arm-a");
 		expect(payloadText).not.toContain("ab-arm-b");
+	});
+	it("A/B compare rejects publish-secret values in public payload fields", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "composer-ab-compare-lint-"));
+		const traceDir = path.join(tempDir, "traces");
+		await fs.mkdir(traceDir, { recursive: true });
+		const armA = path.join(traceDir, "arm-a.json");
+		const armB = path.join(traceDir, "arm-b.json");
+		const outPath = path.join(tempDir, "ab-report.json");
+		const records: TraceRecord[] = [
+			{
+				scenarioId: "bash-discipline",
+				modelRole: "candidate",
+				model: "grok-build/grok-composer-2.5-fast",
+				trial: 0,
+				events: [],
+				expected: {},
+			},
+			{
+				scenarioId: "bash-discipline",
+				modelRole: "baseline",
+				model: "openai-codex/gpt-5.5:low",
+				trial: 0,
+				events: [],
+				expected: {},
+			},
+		];
+
+		await fs.writeFile(armA, JSON.stringify(records));
+		await fs.writeFile(armB, JSON.stringify(records));
+		await fs.writeFile(
+			path.join(tempDir, "provenance-manifest.json"),
+			JSON.stringify({
+				schemaVersion: 1,
+				composer_scenarios_version: "/home/alice/scenarios",
+				trace_sha256: "trace-hash",
+				manifest_sha256: "manifest-hash",
+				record_count: 2,
+			}),
+		);
+
+		const proc = Bun.spawn(
+			[
+				process.execPath,
+				"packages/agent/bench/composer-evidence-ab-compare.ts",
+				"--arm-a",
+				armA,
+				"--arm-a-version",
+				"Bearer abcdefghijklmnopqrstuvwxyz",
+				"--arm-b",
+				armB,
+				"--arm-b-version",
+				"0.6.4",
+				"--out",
+				outPath,
+			],
+			{
+				cwd: path.resolve(import.meta.dir, "../../.."),
+				env: { ...Bun.env, EVIDENCE_REPO_COMMIT: "/home/alice/worktree" },
+				stdout: "pipe",
+				stderr: "pipe",
+			},
+		);
+		const stderr = await new Response(proc.stderr).text();
+		const stdout = await new Response(proc.stdout).text();
+		expect(await proc.exited).toBe(3);
+		expect(stdout).toBe("");
+		expect(stderr).toContain("composer-evidence-ab-compare: report linter failed");
+		expect(stderr).toContain("linux_home_path");
+		expect(stderr).toContain("bearer_token");
+		expect(
+			await fs.stat(outPath).then(
+				() => true,
+				() => false,
+			),
+		).toBe(false);
 	});
 });
