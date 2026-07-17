@@ -699,6 +699,8 @@ export interface ClaudePluginRoot {
 	path: string;
 	/** Whether this is a user or project scope plugin */
 	scope: "user" | "project";
+	/** In-memory provenance set only for roots injected by an explicit --plugin-dir flag. */
+	origin?: "plugin-dir";
 }
 
 /**

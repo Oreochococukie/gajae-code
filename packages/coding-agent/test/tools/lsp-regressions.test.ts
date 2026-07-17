@@ -373,24 +373,20 @@ describe("lsp regressions", () => {
 		}
 	});
 
-	it("detects Windows local .exe LSP shims in node_modules/.bin", async () => {
-		if (process.platform !== "win32") {
-			return;
-		}
-
-		const tempDir = TempDir.createSync("@gjc-lsp-win32-bin-");
-		const whichSpy = vi.spyOn(Bun, "which").mockReturnValue(null);
+	it("does not auto-launch LSP binaries from project node_modules/.bin", async () => {
+		const tempDir = TempDir.createSync("@gjc-lsp-project-bin-");
+		const whichSpy = vi.spyOn(piUtils, "$which").mockReturnValue(null);
 
 		try {
 			await Bun.write(path.join(tempDir.path(), "package.json"), "{}");
 			const binDir = path.join(tempDir.path(), "node_modules", ".bin");
 			await fs.promises.mkdir(binDir, { recursive: true });
-			const localTsServer = path.join(binDir, "typescript-language-server.exe");
+			const localTsServer = path.join(binDir, "typescript-language-server");
 			await Bun.write(localTsServer, "");
 
 			const config = loadConfig(tempDir.path());
-			expect(config.servers["typescript-language-server"]?.resolvedCommand).toBe(localTsServer);
-			expect(whichSpy).not.toHaveBeenCalledWith("typescript-language-server");
+			expect(config.servers["typescript-language-server"]).toBeUndefined();
+			expect(whichSpy).toHaveBeenCalledWith("typescript-language-server");
 		} finally {
 			vi.restoreAllMocks();
 			tempDir.removeSync();
