@@ -415,6 +415,37 @@ describe("LSP repository command trust", () => {
 		expect((await detectLspmux(cwd)).available).toBe(true);
 	});
 
+	it("does not treat lexical or canonical home cwd as project authority", async () => {
+		if (process.platform === "win32") return;
+
+		using tempDir = TempDir.createSync("@gjc-lsp-home-cwd-guard-");
+		const canonicalHome = path.join(tempDir.path(), "home");
+		const lexicalHome = path.join(tempDir.path(), "home-link");
+		const userBinDir = path.join(lexicalHome, ".gjc", "bin");
+		const userServer = path.join(userBinDir, "typescript-language-server");
+		await fs.promises.mkdir(path.join(canonicalHome, ".git"), { recursive: true });
+		await fs.promises.mkdir(path.join(canonicalHome, ".gjc", "bin"), { recursive: true });
+		await fs.promises.symlink(canonicalHome, lexicalHome);
+		await Bun.write(userServer, "");
+		const userLspmux = await writeLspmuxBinary(userBinDir);
+		await Bun.write(path.join(lexicalHome, "package.json"), "{}\n");
+		vi.spyOn(os, "homedir").mockReturnValue(lexicalHome);
+		const which = vi
+			.spyOn(piUtils, "$which")
+			.mockImplementation(command => (command === "typescript-language-server" ? userServer : null));
+
+		for (const cwd of [lexicalHome, canonicalHome]) {
+			expect(isProjectControlledPath(userServer, cwd)).toBe(false);
+			const server = loadConfig(cwd).servers["typescript-language-server"];
+			expect(server?.resolvedCommand).toBe(fs.realpathSync(userServer));
+
+			resetLspmuxStateForTesting();
+			which.mockImplementation(command => (command === "lspmux" ? userLspmux : null));
+			expect((await detectLspmux(cwd)).available).toBe(true);
+			which.mockImplementation(command => (command === "typescript-language-server" ? userServer : null));
+		}
+	});
+
 	it("treats a repository ..bin child as contained while preserving external executables", async () => {
 		if (process.platform === "win32") return;
 

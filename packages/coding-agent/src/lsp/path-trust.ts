@@ -41,12 +41,14 @@ function pathMatchesStop(candidate: string, stopPaths: ReadonlySet<string>): boo
 	);
 }
 
-function findProjectTrustRoot(start: string, stopPaths: ReadonlySet<string>): string {
+function findProjectTrustRoot(start: string, stopPaths: ReadonlySet<string>): string | undefined {
 	const fallback = path.resolve(start);
 	let nearestConfigRoot: string | undefined;
 	let current = fallback;
 	for (;;) {
-		if (pathMatchesStop(current, stopPaths)) return nearestConfigRoot ?? fallback;
+		if (pathMatchesStop(current, stopPaths)) {
+			return current === fallback ? undefined : (nearestConfigRoot ?? fallback);
+		}
 		if (fs.existsSync(path.join(current, ".git"))) return current;
 		if (nearestConfigRoot === undefined && isDirectory(path.join(current, CONFIG_DIR_NAME))) {
 			nearestConfigRoot = current;
@@ -61,12 +63,12 @@ export function isProjectControlledPath(candidate: string, cwd: string): boolean
 	const home = os.homedir();
 	const stopPaths = new Set([path.resolve(home), canonicalPath(home)].map(normalizePathForComparison));
 	const lexicalTrustRoot = findProjectTrustRoot(cwd, stopPaths);
-	if (pathIsLexicallyWithin(lexicalTrustRoot, candidate)) return true;
+	if (lexicalTrustRoot !== undefined && pathIsLexicallyWithin(lexicalTrustRoot, candidate)) return true;
 
-	const canonicalTrustRoots = new Set([
-		canonicalPath(lexicalTrustRoot),
-		findProjectTrustRoot(canonicalPath(cwd), stopPaths),
-	]);
+	const canonicalTrustRoots = new Set<string>();
+	if (lexicalTrustRoot !== undefined) canonicalTrustRoots.add(canonicalPath(lexicalTrustRoot));
+	const canonicalTrustRoot = findProjectTrustRoot(canonicalPath(cwd), stopPaths);
+	if (canonicalTrustRoot !== undefined) canonicalTrustRoots.add(canonicalTrustRoot);
 	for (const trustRoot of canonicalTrustRoots) {
 		if (
 			pathIsLexicallyWithin(trustRoot, canonicalParentPath(candidate)) ||
