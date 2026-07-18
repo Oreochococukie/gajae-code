@@ -71,7 +71,9 @@ describe("SDK operation inventory", () => {
 			sourceId: string;
 			decision: string;
 			rationale?: string;
+			exclusionMetadata?: { adapterMappings: string; testIds: string };
 		}>;
+
 		const expected = new Map([
 			[
 				"agent_session:runMidRunMaintenanceForTests",
@@ -84,7 +86,14 @@ describe("SDK operation inventory", () => {
 		]);
 		for (const [sourceId, rationale] of expected) {
 			const record = records.find(candidate => candidate.sourceId === sourceId);
-			expect(record).toEqual(expect.objectContaining({ sourceId, decision: "exclude", rationale }));
+			expect(record).toEqual(
+				expect.objectContaining({
+					sourceId,
+					decision: "exclude",
+					rationale,
+					exclusionMetadata: { adapterMappings: "not_applicable", testIds: "not_applicable" },
+				}),
+			);
 		}
 	});
 
@@ -124,6 +133,27 @@ describe("SDK operation inventory", () => {
 			);
 		});
 	}
+
+	it("fails closed when the slash-command scanner anchor is absent", () => {
+		expect(() => scanSlashCommands('const COMMANDS = [{ name: "goal" }];')).toThrow(
+			"SDK operation inventory scanner: required anchor const BUILTIN_SLASH_COMMAND_REGISTRY was not found.",
+		);
+	});
+
+	it("fails closed when the AgentSession scanner anchor is absent", () => {
+		expect(() => scanAgentSessionMethods("class OtherSession {} ")).toThrow(
+			"SDK operation inventory scanner: required AgentSession class declaration was not found.",
+		);
+	});
+
+	it("fails closed when the AgentSession class body is malformed", () => {
+		expect(() => scanAgentSessionMethods("class AgentSession extends Base")).toThrow(
+			"SDK operation inventory scanner: AgentSession class is missing its opening body delimiter.",
+		);
+		expect(() => scanAgentSessionMethods("class AgentSession { action() {} ")).toThrow(
+			"SDK operation inventory scanner: AgentSession class body is unbalanced.",
+		);
+	});
 
 	it("classifies explicit AgentSession test seams as non-public authority", async () => {
 		const source = await Bun.file(path.join(repoRoot, "packages/coding-agent/src/session/agent-session.ts")).text();

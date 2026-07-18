@@ -62,6 +62,8 @@ const LOCKED_EXCLUSIONS: Readonly<Record<string, string>> = {
 	"agent_session:closeWriterStrict": "internal ACP lifecycle teardown plumbing, not a user-facing control seam",
 	"agent_session:disposeChildSubprocesses": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:waitForIdle": "internal accessor/plumbing, not a user-facing control seam",
+	"agent_session:awaitPendingContextTransformations":
+		"internal context-transformation lifecycle barrier, not a user-facing SDK control seam",
 	"agent_session:drainAsyncJobDeliveriesForAcp": "internal accessor/plumbing, not a user-facing control seam",
 	"agent_session:getAsyncDeliveryStateForAcp":
 		"internal ACP lifecycle quiescence plumbing, not a user-facing control seam",
@@ -274,16 +276,29 @@ export interface SourceSeam {
 	sourceFile: string;
 	sourceKind: SourceKind;
 }
-interface InventoryRecord {
+interface IncludedInventoryRecord {
 	sourceId: string;
 	sourceFile: string;
 	sourceKind: SourceKind;
-	decision: "include" | "exclude";
-	rationale?: string;
-	sdkId?: string;
+	decision: "include";
+	sdkId: string;
 	adapterMappings: Operation["adapterDispositions"];
 	testIds: string[];
 }
+
+interface ExcludedInventoryRecord {
+	sourceId: string;
+	sourceFile: string;
+	sourceKind: SourceKind;
+	decision: "exclude";
+	rationale: string;
+	exclusionMetadata: {
+		adapterMappings: "not_applicable";
+		testIds: "not_applicable";
+	};
+}
+
+type InventoryRecord = IncludedInventoryRecord | ExcludedInventoryRecord;
 
 function repoPath(file: string): string {
 	return path.relative(repoRoot, file).split(path.sep).join("/");
@@ -295,7 +310,10 @@ function collectCaseSeams(source: string, prefix: string): string[] {
 }
 
 export function scanSlashCommands(sourceText: string): string[] {
-	const builtinRegistry = sourceText.slice(sourceText.indexOf("const BUILTIN_SLASH_COMMAND_REGISTRY"));
+	const anchor = "const BUILTIN_SLASH_COMMAND_REGISTRY";
+	const anchorIndex = sourceText.indexOf(anchor);
+	if (anchorIndex === -1) throw new Error(`SDK operation inventory scanner: required anchor ${anchor} was not found.`);
+	const builtinRegistry = sourceText.slice(anchorIndex);
 	return [...builtinRegistry.matchAll(/^\t\tname:\s*["']([^"']+)["']/gm)].map(match => `slash_command:${match[1]}`);
 }
 
@@ -668,14 +686,17 @@ export function scanAgentSessionMethods(sourceText: string): string[] {
 		for (let bodyIndex = index + 2; bodyIndex < tokens.length; bodyIndex++) {
 			if (tokens[bodyIndex]!.text === "<") angleDepth++;
 			else if (tokens[bodyIndex]!.text === ">" && angleDepth > 0) angleDepth--;
+			else if (tokens[bodyIndex]!.text === ";" && angleDepth === 0) break;
 			else if (tokens[bodyIndex]!.text === "{" && angleDepth === 0) {
 				bodyStart = bodyIndex;
 				break;
 			}
 		}
-		if (bodyStart === undefined) return [];
+		if (bodyStart === undefined)
+			throw new Error("SDK operation inventory scanner: AgentSession class is missing its opening body delimiter.");
 		const bodyEnd = matchingToken(tokens, bodyStart, "{", "}");
-		if (bodyEnd === undefined) return [];
+		if (bodyEnd === undefined)
+			throw new Error("SDK operation inventory scanner: AgentSession class body is unbalanced.");
 
 		const methods: string[] = [];
 		for (let memberStart = bodyStart + 1; memberStart < bodyEnd; ) {
@@ -689,7 +710,7 @@ export function scanAgentSessionMethods(sourceText: string): string[] {
 		}
 		return methods;
 	}
-	return [];
+	throw new Error("SDK operation inventory scanner: required AgentSession class declaration was not found.");
 }
 
 export function scanAcpMethods(sourceText: string): string[] {
@@ -780,14 +801,24 @@ function generatedRecords(seams: Awaited<ReturnType<typeof scanSeams>>): Invento
 		const sdkId = SEAM_TO_SDK[seam.sourceId];
 		const rationale = lockedExclusion(seam.sourceId);
 		if (!sdkId && !rationale) continue;
-		const operation = sdkId ? OPERATIONS.find(candidate => candidate.sdkId === sdkId) : undefined;
-		if (sdkId && !operation) throw new Error(`SEAM_TO_SDK maps ${seam.sourceId} to unknown SDK ID: ${sdkId}`);
+		if (!sdkId) {
+			if (!rationale) continue;
+			records.push({
+				...seam,
+				decision: "exclude",
+				rationale,
+				exclusionMetadata: { adapterMappings: "not_applicable", testIds: "not_applicable" },
+			});
+			continue;
+		}
+		const operation = OPERATIONS.find(candidate => candidate.sdkId === sdkId);
+		if (!operation) throw new Error(`SEAM_TO_SDK maps ${seam.sourceId} to unknown SDK ID: ${sdkId}`);
 		records.push({
 			...seam,
-			decision: (sdkId ? "include" : "exclude") as "include" | "exclude",
-			...(sdkId ? { sdkId } : { rationale }),
-			adapterMappings: operation?.adapterDispositions ?? OPERATIONS[0]!.adapterDispositions,
-			testIds: operation?.testIds ?? ["packages/coding-agent/test/sdk-operation-inventory.test.ts"],
+			decision: "include",
+			sdkId,
+			adapterMappings: operation.adapterDispositions,
+			testIds: operation.testIds,
 		});
 	}
 	return records;
@@ -808,8 +839,17 @@ function validateRegistry(records: InventoryRecord[]): string[] {
 		if (operation.testIds.length === 0) errors.push(`${operation.id} is missing test IDs.`);
 	}
 	for (const record of records) {
-		if (record.decision === "exclude" && !record.rationale)
-			errors.push(`${record.sourceId} exclusion lacks a locked rationale.`);
+		if (record.decision === "exclude") {
+			if (!record.rationale) errors.push(`${record.sourceId} exclusion lacks a locked rationale.`);
+			if (
+				record.exclusionMetadata.adapterMappings !== "not_applicable" ||
+				record.exclusionMetadata.testIds !== "not_applicable"
+			)
+				errors.push(
+					`${record.sourceId} exclusion metadata must mark adapter mappings and test IDs as not applicable.`,
+				);
+			continue;
+		}
 		if (ADAPTERS.some(adapter => !record.adapterMappings[adapter]))
 			errors.push(`${record.sourceId} is missing adapter mappings.`);
 		if (record.testIds.length === 0) errors.push(`${record.sourceId} is missing test IDs.`);

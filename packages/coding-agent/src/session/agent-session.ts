@@ -9099,7 +9099,14 @@ export class AgentSession {
 					{ path: "modelRoles.default" as SettingPath, op: "set", value: selector },
 				]);
 			} catch (error) {
-				await this.sessionManager.discardDefaultModelSelectionStage(stage);
+				try {
+					await this.sessionManager.discardDefaultModelSelectionStage(stage);
+				} catch (cleanupError) {
+					throw new AggregateError(
+						[error, cleanupError],
+						"Default model selection persistence and staged session cleanup both failed.",
+					);
+				}
 				throw error;
 			}
 			if (this.#defaultModelSelectionMutationRevision !== expectedMutationRevision) {

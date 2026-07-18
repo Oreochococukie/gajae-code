@@ -948,6 +948,36 @@ describe("AgentSession durable default model selection", () => {
 		expect(session.model).toBe(INITIAL_MODEL);
 	});
 
+	it("preserves durable and staged cleanup failures without publishing a selection", async () => {
+		// Given
+		const durableError = new Error("durable write failed");
+		const cleanupError = new Error("stage discard failed");
+		const priorModelRoles = { default: "initial-provider/initial:low", planner: "planner/model:medium" };
+		settings.set("modelRoles", priorModelRoles);
+		const entriesBeforeSelection = sessionManager.getEntries();
+		const contextBeforeSelection = sessionManager.buildSessionContext();
+		const setModel = vi.spyOn(session.agent, "setModel");
+		vi.spyOn(settings, "commitAtomicBatchWithCurrent").mockRejectedValue(durableError);
+		vi.spyOn(sessionManager, "discardDefaultModelSelectionStage").mockRejectedValue(cleanupError);
+
+		// When
+		let selectionError: unknown;
+		try {
+			await session.setDefaultModelSelection(targetModel(), Effort.High);
+		} catch (error) {
+			selectionError = error;
+		}
+
+		// Then
+		expect(selectionError).toBeInstanceOf(AggregateError);
+		expect((selectionError as AggregateError).errors).toEqual([durableError, cleanupError]);
+		expect(setModel).not.toHaveBeenCalled();
+		expect(settings.getGlobal("modelRoles")).toEqual(priorModelRoles);
+		expect(session.model).toBe(INITIAL_MODEL);
+		expect(sessionManager.getEntries()).toEqual(entriesBeforeSelection);
+		expect(sessionManager.buildSessionContext()).toEqual(contextBeforeSelection);
+	});
+
 	it("does not route a durably committed default through the temporary mutation path", async () => {
 		// Given
 		const temporaryMutation = vi.spyOn(session, "setModelTemporary");

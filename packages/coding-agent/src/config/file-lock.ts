@@ -63,23 +63,26 @@ function writeLockInfo(lockPath: string): Promise<LockInfo> {
 }
 
 async function readLockInfo(lockPath: string): Promise<LockInfo | null> {
+	let parsed: unknown;
 	try {
-		const content = await fs.readFile(`${lockPath}/info`, "utf-8");
-		const info = JSON.parse(content) as Partial<LockInfo>;
-		if (
-			typeof info.pid !== "number" ||
-			!Number.isInteger(info.pid) ||
-			info.pid <= 0 ||
-			typeof info.timestamp !== "number" ||
-			!Number.isFinite(info.timestamp) ||
-			(info.start_time !== undefined && (typeof info.start_time !== "string" || !info.start_time))
-		) {
-			return null;
-		}
-		return info as LockInfo;
-	} catch {
-		return null;
+		parsed = JSON.parse(await fs.readFile(`${lockPath}/info`, "utf-8"));
+	} catch (error) {
+		if (isEnoent(error) || error instanceof SyntaxError) return null;
+		throw error;
 	}
+
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+	const { pid, start_time, timestamp } = parsed as Partial<LockInfo>;
+	if (
+		typeof pid !== "number" ||
+		!Number.isInteger(pid) ||
+		pid <= 0 ||
+		typeof timestamp !== "number" ||
+		!Number.isFinite(timestamp) ||
+		(start_time !== undefined && (typeof start_time !== "string" || !start_time))
+	)
+		return null;
+	return { pid, start_time, timestamp };
 }
 
 /** @internal */
@@ -237,11 +240,8 @@ async function tryAcquireLock(lockPath: string): Promise<LockInfo | null> {
 }
 
 async function releaseLock(lockPath: string, owner: FileLockOwnerToken): Promise<void> {
-	try {
-		await removeFileLockDirForGc(lockPath, owner);
-	} catch {
-		// Ignore errors on release
-	}
+	const outcome = await removeFileLockDirForGc(lockPath, owner);
+	if (outcome !== "removed") throw new Error(`Failed to release file lock: ${outcome}.`);
 }
 async function acquireLock(filePath: string, options: FileLockOptions = {}): Promise<() => Promise<void>> {
 	const opts = { ...DEFAULT_OPTIONS, ...options };
@@ -270,9 +270,17 @@ export async function withFileLock<T>(
 	options: FileLockOptions = {},
 ): Promise<T> {
 	const release = await acquireLock(filePath, options);
+	let result: T;
 	try {
-		return await fn();
-	} finally {
-		await release();
+		result = await fn();
+	} catch (operationError) {
+		try {
+			await release();
+		} catch (releaseError) {
+			throw new AggregateError([operationError, releaseError], "File lock operation and release both failed.");
+		}
+		throw operationError;
 	}
+	await release();
+	return result;
 }

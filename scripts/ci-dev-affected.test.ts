@@ -89,6 +89,20 @@ describe("dev-ci canonical-plan workflow contract", () => {
 		const aggregateWorkflow = workflow.slice(workflow.indexOf("  affected:\n"));
 		expect(aggregateWorkflow).toContain("name: Validate canonical affected plan");
 		expect(aggregateWorkflow).toContain("run: bun scripts/ci-dev-affected.ts --validate-plan");
+		const receiptConsumerCondition = "if: ${{ needs.affected-plan.result == 'success' && needs.affected-plan.outputs.has_tasks == 'true' && needs.affected-shards.result == 'success' }}";
+		expect(workflow.match(new RegExp(receiptConsumerCondition.replace(/[.$|?*+(){}[\]\\]/g, "\\$&"), "g"))).toHaveLength(2);
+		for (const name of ["Download shard completion receipts", "Validate canonical shard completion"]) {
+			const step = workflow.slice(workflow.indexOf(`name: ${name}`), workflow.indexOf("\n      - name:", workflow.indexOf(`name: ${name}`) + 1));
+			expect(step).toContain(receiptConsumerCondition);
+		}
+		expect(aggregateWorkflow).toContain("if: ${{ always() }}");
+		const aggregateValidationStart = aggregateWorkflow.indexOf("name: Aggregate affected path validation shards");
+		const aggregateValidationEnd = aggregateWorkflow.indexOf("\n      - name:", aggregateValidationStart + 1);
+		const aggregateValidationStep = aggregateWorkflow.slice(
+			aggregateValidationStart,
+			aggregateValidationEnd === -1 ? undefined : aggregateValidationEnd,
+		);
+		expect(aggregateValidationStep).not.toContain("\n        if:");
 	});
 
 	test("aggregate result truth table rejects every missing, failed, cancelled, and unplanned dependency", () => {
@@ -107,6 +121,7 @@ describe("dev-ci canonical-plan workflow contract", () => {
 			{ ...valid[0]!, native: "cancelled" },
 			{ ...valid[0]!, shards: "failure" },
 			{ ...valid[0]!, shards: "cancelled" },
+			{ ...valid[0]!, shards: "skipped" },
 			{ ...valid[0]!, windowsDoctor: "failure" },
 			{ ...valid[0]!, windowsDoctor: "cancelled" },
 			{ ...valid[0]!, windowsDoctor: "skipped" },

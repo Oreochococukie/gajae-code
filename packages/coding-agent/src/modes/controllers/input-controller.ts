@@ -1735,6 +1735,26 @@ export class InputController {
 		}
 	}
 
+	async #dispatchPaletteSlashCommand(name: string, restoreComposer: () => void): Promise<void> {
+		if (this.#paletteCommandInFlight) {
+			this.ctx.showStatus("A palette command is still running.");
+			return;
+		}
+
+		if (this.ctx.editor.getText() || this.ctx.pendingImages.length > 0) {
+			this.ctx.showStatus("Send or clear the draft before running a palette command.");
+			return;
+		}
+
+		restoreComposer();
+		this.#paletteCommandInFlight = true;
+		try {
+			await this.ctx.editor.onSubmit?.(`/${name}`);
+		} finally {
+			this.#paletteCommandInFlight = false;
+		}
+	}
+
 	openCommandPalette(): void {
 		if (this.ctx.isTranscriptViewerOpen?.()) return;
 		if (this.#paletteCommandInFlight) {
@@ -1743,6 +1763,7 @@ export class InputController {
 		}
 
 		const actions = [...this.#commandPaletteActions.values()];
+		const slashCommands = [...(this.ctx.getSlashCommands?.() ?? this.#slashCommands)];
 		if (!this.ctx.showCommandPalette) {
 			let overlayHandle: ReturnType<typeof this.ctx.ui.showOverlay> | undefined;
 			const close = () => {
@@ -1763,7 +1784,7 @@ export class InputController {
 							: undefined,
 						handler: () => this.actionRegistry.execute(action.id),
 					})),
-				...(this.ctx.getSlashCommands?.() ?? this.#slashCommands).map(command => ({
+				...slashCommands.map(command => ({
 					id: `slash:/${command.name}`,
 					label: `/${command.name}`,
 					description: command.description,
@@ -1772,12 +1793,12 @@ export class InputController {
 			const palette = new CommandPalette(
 				entries,
 				entry => {
-					close();
-					if (entry.handler) void entry.handler();
-					else {
+					if (entry.handler) {
+						close();
+						void entry.handler();
+					} else {
 						const command = entry.id.slice("slash:/".length);
-						this.ctx.editor.setText(`/${command}`);
-						void this.ctx.editor.onSubmit?.(`/${command}`);
+						void this.#dispatchPaletteSlashCommand(command, close);
 					}
 				},
 				close,
@@ -1792,24 +1813,12 @@ export class InputController {
 			this.ctx.ui.requestRender();
 			return;
 		}
-		this.ctx.showCommandPalette(this.#slashCommands, actions, async name => {
-			if (this.#paletteCommandInFlight) {
-				this.ctx.showStatus("A palette command is still running.");
-				return;
-			}
-
-			if (this.ctx.editor.getText() || this.ctx.pendingImages.length > 0) {
-				this.ctx.showStatus("Send or clear the draft before running a palette command.");
-				return;
-			}
-
-			this.#paletteCommandInFlight = true;
-			try {
-				await this.submitText(`/${name}`, { ownsComposer: false, editor: this.ctx.editor });
-			} finally {
-				this.#paletteCommandInFlight = false;
-			}
-		});
+		this.ctx.showCommandPalette(slashCommands, actions, name =>
+			this.#dispatchPaletteSlashCommand(name, () => {
+				this.ctx.ui.setFocus(this.ctx.editor);
+				this.ctx.ui.requestRender(true);
+			}),
+		);
 	}
 
 	cycleThinkingLevel(): void {

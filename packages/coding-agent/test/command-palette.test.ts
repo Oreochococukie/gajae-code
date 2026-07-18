@@ -12,6 +12,68 @@ const entries: CommandPaletteEntry[] = [
 
 beforeAll(() => initTheme());
 
+function createInputControllerContext(options: {
+	draft?: string;
+	pendingImages?: InteractiveModeContext["pendingImages"];
+	onSubmit?: (text: string) => Promise<void>;
+	delegated?: boolean;
+}) {
+	let text = options.draft ?? "";
+	let overlay: CommandPalette | undefined;
+	let executeDelegated: ((name: string) => Promise<void>) | undefined;
+	const statuses: string[] = [];
+	const editor = {
+		getText: () => text,
+		setText: (value: string) => {
+			text = value;
+		},
+		onSubmit: options.onSubmit ?? (async () => {}),
+	};
+	const ctx = {
+		editor,
+		ui: {
+			showOverlay(component: CommandPalette) {
+				overlay = component;
+				return { hide: () => {} };
+			},
+			setFocus: () => {},
+			requestRender: () => {},
+		},
+		keybindings: { getKeys: () => [] },
+		settings: { get: (key: string) => key === "plan.enabled" },
+		session: {
+			model: undefined,
+			messages: [],
+			queuedMessageCount: 0,
+			isStreaming: false,
+			getRoleModelCycleCandidateCount: () => 0,
+			hasForegroundBashBackgroundRequestHandler: () => false,
+		},
+		chatContainer: { children: [] },
+		goalModeController: { enabled: false, paused: false, handleCommand: async () => {} },
+		planModeController: { enabled: false, handleCommand: async () => {} },
+		showError: () => {},
+		showStatus: (status: string) => statuses.push(status),
+		historyStorage: { getRecent: () => [] },
+		skillCommands: new Map(),
+		pendingImages: options.pendingImages ?? [],
+		getSlashCommands: () => [{ name: "clear", description: "Clear the session" }],
+	} as unknown as InteractiveModeContext;
+	if (options.delegated) {
+		ctx.showCommandPalette = (_commands, _actions, execute) => {
+			executeDelegated = execute;
+		};
+	}
+	const controller = new InputController(ctx);
+	return {
+		controller,
+		getText: () => text,
+		getOverlay: () => overlay,
+		getExecuteDelegated: () => executeDelegated,
+		statuses,
+	};
+}
+
 describe("CommandPalette", () => {
 	it("fuzzy filters actions, commands, and skills", () => {
 		const palette = new CommandPalette(
@@ -106,8 +168,14 @@ describe("CommandPalette", () => {
 		expect(output).not.toContain("Command 0");
 	});
 
-	it("uses the resolved slash command catalog for palette entries", () => {
+	it("uses the live slash command registry for both palette routes", () => {
 		let overlay: CommandPalette | undefined;
+		const liveCommands = [
+			{ name: "clear", description: "Built-in command" },
+			{ name: "extension:demo", description: "Extension command" },
+			{ name: "custom:demo", description: "Custom command" },
+			{ name: "skill:demo", description: "Demo skill" },
+		];
 		const ctx = {
 			editor: { getText: () => "", setText: () => {}, onSubmit: async () => {} },
 			ui: {
@@ -136,17 +204,19 @@ describe("CommandPalette", () => {
 			showStatus: () => {},
 			historyStorage: { getRecent: () => [] },
 			skillCommands: new Map([["skill:demo", { description: "Demo skill" }]]),
-			getSlashCommands: () => [
-				{ name: "clear", description: "Built-in command" },
-				{ name: "extension:demo", description: "Extension command" },
-				{ name: "custom:demo", description: "Custom command" },
-				{ name: "skill:demo", description: "Demo skill" },
-			],
+			getSlashCommands: () => liveCommands,
 		} as unknown as InteractiveModeContext;
 		new InputController(ctx).openCommandPalette();
 		expect(overlay?.getEntries().map(entry => entry.label)).toEqual(
 			expect.arrayContaining(["/clear", "/extension:demo", "/custom:demo", "/skill:demo"]),
 		);
+		let forwardedCommands: unknown;
+		ctx.showCommandPalette = commands => {
+			forwardedCommands = commands;
+		};
+		new InputController(ctx).openCommandPalette();
+		expect(forwardedCommands).toEqual(liveCommands);
+		expect(forwardedCommands).not.toBe(liveCommands);
 	});
 
 	it("restores composer focus before executing a selected registry action", async () => {
@@ -176,8 +246,8 @@ describe("CommandPalette", () => {
 				hasForegroundBashBackgroundRequestHandler: () => false,
 			},
 			chatContainer: { children: [] },
-			goalModeEnabled: false,
-			handlePlanModeCommand: () => order.push("execute"),
+			goalModeController: { enabled: false, paused: false, handleCommand: async () => {} },
+			planModeController: { enabled: false, handleCommand: async () => order.push("execute") },
 			showError: () => {},
 			showStatus: () => {},
 			historyStorage: { getRecent: () => [] },
@@ -194,15 +264,25 @@ describe("CommandPalette", () => {
 	it("dispatches a selected skill slash command through the composer submit handler", async () => {
 		let overlay: CommandPalette | undefined;
 		const submitted: string[] = [];
-		const editor = { getText: () => "", setText: () => {}, onSubmit: async (text: string) => submitted.push(text) };
+		const order: string[] = [];
+		const editor = {
+			getText: () => "",
+			setText: () => {},
+			onSubmit: async (text: string) => {
+				submitted.push(text);
+				order.push("execute");
+			},
+		};
 		const ctx = {
 			editor,
 			ui: {
 				showOverlay(component: CommandPalette) {
 					overlay = component;
-					return { hide: () => {} };
+					return { hide: () => order.push("hide") };
 				},
-				setFocus: () => {},
+				setFocus: (target: unknown) => {
+					if (target === editor) order.push("focus");
+				},
 				requestRender: () => {},
 			},
 			keybindings: { getKeys: () => [] },
@@ -215,8 +295,10 @@ describe("CommandPalette", () => {
 				getRoleModelCycleCandidateCount: () => 0,
 			},
 			chatContainer: { children: [] },
-			goalModeEnabled: false,
-			handlePlanModeCommand: () => {},
+			pendingImages: [],
+			goalModeController: { enabled: false, paused: false, handleCommand: async () => {} },
+			planModeController: { enabled: false, handleCommand: async () => {} },
+
 			showError: () => {},
 			showStatus: () => {},
 			historyStorage: { getRecent: () => [] },
@@ -228,5 +310,50 @@ describe("CommandPalette", () => {
 		overlay?.handleInput("\n");
 		await Promise.resolve();
 		expect(submitted).toEqual(["/skill:demo"]);
+		expect(order).toEqual(["hide", "focus", "execute"]);
+	});
+	it("preserves drafts when slash commands are selected through either palette route", async () => {
+		const local = createInputControllerContext({ draft: "keep this draft" });
+		local.controller.openCommandPalette();
+		for (const key of "/clear") local.getOverlay()?.handleInput(key);
+		local.getOverlay()?.handleInput("\n");
+		await Promise.resolve();
+		expect(local.getText()).toBe("keep this draft");
+		expect(local.statuses).toEqual(["Send or clear the draft before running a palette command."]);
+
+		const delegated = createInputControllerContext({ draft: "keep this draft", delegated: true });
+		delegated.controller.openCommandPalette();
+		await delegated.getExecuteDelegated()?.("clear");
+		expect(delegated.getText()).toBe("keep this draft");
+		expect(delegated.statuses).toEqual(["Send or clear the draft before running a palette command."]);
+	});
+
+	it("rejects overlapping slash command execution through either palette route", async () => {
+		let releaseLocal!: () => void;
+		const local = createInputControllerContext({
+			onSubmit: () => new Promise<void>(resolve => (releaseLocal = resolve)),
+		});
+		local.controller.openCommandPalette();
+		for (const key of "/clear") local.getOverlay()?.handleInput(key);
+		local.getOverlay()?.handleInput("\n");
+		local.getOverlay()?.handleInput("\n");
+		await Promise.resolve();
+		expect(local.statuses).toEqual(["A palette command is still running."]);
+		releaseLocal();
+		await Promise.resolve();
+
+		let releaseDelegated!: () => void;
+		const delegated = createInputControllerContext({
+			delegated: true,
+			onSubmit: () => new Promise<void>(resolve => (releaseDelegated = resolve)),
+		});
+		delegated.controller.openCommandPalette();
+		const execute = delegated.getExecuteDelegated();
+		const first = execute?.("clear");
+		const second = execute?.("clear");
+		await Promise.resolve();
+		expect(delegated.statuses).toEqual(["A palette command is still running."]);
+		releaseDelegated();
+		await Promise.all([first, second]);
 	});
 });
