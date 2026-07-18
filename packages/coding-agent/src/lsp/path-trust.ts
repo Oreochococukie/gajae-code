@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { pathIsWithin } from "@gajae-code/utils";
+import { pathIsWithin, relativePathEscapesRoot } from "@gajae-code/utils";
 
 function pathIsLexicallyWithin(root: string, candidate: string): boolean {
 	const resolvedRoot = path.resolve(root);
@@ -8,7 +8,7 @@ function pathIsLexicallyWithin(root: string, candidate: string): boolean {
 	const comparisonRoot = process.platform === "win32" ? resolvedRoot.toLowerCase() : resolvedRoot;
 	const comparisonCandidate = process.platform === "win32" ? resolvedCandidate.toLowerCase() : resolvedCandidate;
 	const relative = path.relative(comparisonRoot, comparisonCandidate);
-	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+	return !relativePathEscapesRoot(relative);
 }
 
 function canonicalPath(candidate: string): string {

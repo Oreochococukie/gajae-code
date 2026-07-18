@@ -330,6 +330,44 @@ describe("LSP repository command trust", () => {
 		expect(fs.existsSync(lspmuxCanary)).toBe(false);
 	});
 
+	it("treats a repository ..bin child as contained while preserving external executables", async () => {
+		if (process.platform === "win32") return;
+
+		using tempDir = TempDir.createSync("@gjc-lsp-dotdot-child-trust-");
+		const repositoryRoot = path.join(tempDir.path(), "repo");
+		const repositoryBinDir = path.join(repositoryRoot, "..bin");
+		const externalBinDir = path.join(tempDir.path(), "external-bin");
+		const repositoryServer = path.join(repositoryBinDir, "typescript-language-server");
+		const externalServer = path.join(externalBinDir, "typescript-language-server");
+		const lspmuxCanary = path.join(repositoryRoot, "dotdot-lspmux-status-ran");
+		await fs.promises.mkdir(path.join(repositoryRoot, ".git"), { recursive: true });
+		await fs.promises.mkdir(repositoryBinDir, { recursive: true });
+		await fs.promises.mkdir(externalBinDir, { recursive: true });
+		await Bun.write(path.join(repositoryRoot, "package.json"), "{}\n");
+		await Bun.write(repositoryServer, "");
+		await Bun.write(externalServer, "");
+		const repositoryLspmux = await writeLspmuxBinary(repositoryBinDir, lspmuxCanary);
+		const externalLspmux = await writeLspmuxBinary(externalBinDir);
+		const which = vi
+			.spyOn(piUtils, "$which")
+			.mockImplementation(command => (command === "typescript-language-server" ? repositoryServer : null));
+
+		expect(loadConfig(repositoryRoot).servers["typescript-language-server"]).toBeUndefined();
+		which.mockImplementation(command => (command === "typescript-language-server" ? externalServer : null));
+		expect(loadConfig(repositoryRoot).servers["typescript-language-server"]?.resolvedCommand).toBe(
+			fs.realpathSync(externalServer),
+		);
+
+		resetLspmuxStateForTesting();
+		which.mockImplementation(command => (command === "lspmux" ? repositoryLspmux : null));
+		expect((await detectLspmux(repositoryRoot)).available).toBe(false);
+		expect(fs.existsSync(lspmuxCanary)).toBe(false);
+
+		resetLspmuxStateForTesting();
+		which.mockImplementation(command => (command === "lspmux" ? externalLspmux : null));
+		expect((await detectLspmux(repositoryRoot)).available).toBe(true);
+	});
+
 	it("does not trust a user config symlink that resolves into the repository", async () => {
 		if (process.platform === "win32") return;
 
