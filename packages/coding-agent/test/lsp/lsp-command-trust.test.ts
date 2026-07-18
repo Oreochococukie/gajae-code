@@ -235,11 +235,11 @@ describe("LSP repository command trust", () => {
 		expect(await getLspmuxCommand("rust-analyzer", [], cwd)).toEqual({ command: externalBinary, args: [] });
 
 		Bun.env.GJC_DISABLE_LSPMUX = "1";
-		resetLspmuxStateForTesting();
 		expect((await detectLspmux(cwd)).available).toBe(false);
 		delete Bun.env.GJC_DISABLE_LSPMUX;
-		Bun.env.PI_DISABLE_LSPMUX = "1";
 		resetLspmuxStateForTesting();
+		expect((await detectLspmux(cwd)).available).toBe(true);
+		Bun.env.PI_DISABLE_LSPMUX = "1";
 		expect((await detectLspmux(cwd)).available).toBe(false);
 	});
 
