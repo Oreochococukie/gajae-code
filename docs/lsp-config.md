@@ -24,13 +24,14 @@ GJC merges LSP config from multiple files, lowest to highest priority:
 | Priority | Location |
 |----------|----------|
 | 5 (lowest) | `~/lsp.json`, `~/.lsp.json`, `~/lsp.yaml`, `~/.lsp.yaml` |
+| 4 | Preloaded trusted user/marketplace plugin LSP config outside the project (internal loader support; no current CLI/startup producer) |
 | 3 | `~/.gjc/agent/lsp.json`, `~/.gjc/agent/lsp.yaml`, `~/.gemini/lsp.*` |
 | 2 | `<project>/.gjc/lsp.json`, `<project>/.gjc/lsp.yaml`, `<project>/.gemini/lsp.*` |
 | 1 (highest) | `<project>/lsp.json`, `<project>/.lsp.json`, `<project>/lsp.yaml` |
 
 Each location accepts both `.json` and `.yaml` / `.yml` variants, as well as hidden-file versions (`.lsp.json`, `.lsp.yaml`). Configuration is merged in order, but project-controlled files can only control server matching, activation, capabilities, and editor metadata. They cannot define or override a server's `command`, `args`, executable, or client factory.
 
-The canonical trusted user configuration is `~/.gjc/agent/lsp.json` (or YAML equivalent). It is outside the project and may define launch settings, including custom servers. Project files may refine the non-launch fields of built-in or user-defined servers.
+The recommended trusted user configuration is `~/.gjc/agent/lsp.json` (or YAML equivalent). Legacy user-wide `~/.gemini/lsp.*` and home-root `~/lsp.*` / `~/.lsp.*` files are also outside the project and may define launch settings, including custom servers. Project files may refine the non-launch fields of built-in or user-defined servers.
 
 **Recommended locations:**
 
