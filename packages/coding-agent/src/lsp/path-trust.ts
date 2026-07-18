@@ -2,6 +2,15 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { pathIsWithin } from "@gajae-code/utils";
 
+function pathIsLexicallyWithin(root: string, candidate: string): boolean {
+	const resolvedRoot = path.resolve(root);
+	const resolvedCandidate = path.resolve(candidate);
+	const comparisonRoot = process.platform === "win32" ? resolvedRoot.toLowerCase() : resolvedRoot;
+	const comparisonCandidate = process.platform === "win32" ? resolvedCandidate.toLowerCase() : resolvedCandidate;
+	const relative = path.relative(comparisonRoot, comparisonCandidate);
+	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
 function canonicalPath(candidate: string): string {
 	try {
 		return fs.realpathSync(candidate);
@@ -10,16 +19,27 @@ function canonicalPath(candidate: string): string {
 	}
 }
 
+function canonicalParentPath(candidate: string): string {
+	const resolved = path.resolve(candidate);
+	return path.join(canonicalPath(path.dirname(resolved)), path.basename(resolved));
+}
+
 function findProjectTrustRoot(cwd: string): string {
-	let current = canonicalPath(cwd);
+	let current = path.resolve(cwd);
 	for (;;) {
 		if (fs.existsSync(path.join(current, ".git"))) return current;
 		const parent = path.dirname(current);
-		if (parent === current) return canonicalPath(cwd);
+		if (parent === current) return path.resolve(cwd);
 		current = parent;
 	}
 }
 
 export function isProjectControlledPath(candidate: string, cwd: string): boolean {
-	return pathIsWithin(findProjectTrustRoot(cwd), canonicalPath(candidate));
+	const lexicalTrustRoot = findProjectTrustRoot(cwd);
+	const canonicalTrustRoot = canonicalPath(lexicalTrustRoot);
+	return (
+		pathIsLexicallyWithin(lexicalTrustRoot, candidate) ||
+		pathIsLexicallyWithin(canonicalTrustRoot, canonicalParentPath(candidate)) ||
+		pathIsWithin(canonicalTrustRoot, canonicalPath(candidate))
+	);
 }

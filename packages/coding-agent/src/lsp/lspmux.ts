@@ -153,10 +153,10 @@ function drainStream(stream: ReadableStream<Uint8Array> | null | undefined): voi
 function resolveTrustedLspmuxBinary(cwd: string): string | null {
 	const discoveredPath = $which("lspmux");
 	if (!discoveredPath) return null;
+	if (isProjectControlledPath(discoveredPath, cwd)) return null;
 
 	try {
-		const binaryPath = fs.realpathSync(discoveredPath);
-		return isProjectControlledPath(binaryPath, cwd) ? null : binaryPath;
+		return fs.realpathSync(discoveredPath);
 	} catch {
 		return null;
 	}

@@ -442,7 +442,7 @@ describe("lsp regressions", () => {
 
 			const config = loadConfig(cwd);
 
-			expect(config.servers["csharp-ls"]?.resolvedCommand).toBe(csharpLs);
+			expect(config.servers["csharp-ls"]?.resolvedCommand).toBe(fs.realpathSync(csharpLs));
 			expect(config.servers.omnisharp).toBeUndefined();
 			expect(getServersForFile(config, path.join(cwd, "Program.cs")).map(([name]) => name)).toEqual(["csharp-ls"]);
 			expect(whichSpy).toHaveBeenCalledWith("csharp-ls");
@@ -468,7 +468,7 @@ describe("lsp regressions", () => {
 			const config = loadConfig(cwd);
 
 			expect(config.servers["csharp-ls"]).toBeUndefined();
-			expect(config.servers.omnisharp?.resolvedCommand).toBe(omnisharp);
+			expect(config.servers.omnisharp?.resolvedCommand).toBe(fs.realpathSync(omnisharp));
 			expect(getServersForFile(config, path.join(cwd, "Program.cs")).map(([name]) => name)).toEqual(["omnisharp"]);
 		} finally {
 			tempDir.removeSync();

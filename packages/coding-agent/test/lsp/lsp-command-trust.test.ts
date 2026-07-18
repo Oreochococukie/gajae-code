@@ -201,13 +201,18 @@ describe("LSP repository command trust", () => {
 		const repositoryRoot = path.join(tempDir.path(), "repo");
 		const cwd = path.join(repositoryRoot, "packages", "nested");
 		const externalBinDir = path.join(tempDir.path(), "bin");
+		const trustedBinDir = path.join(tempDir.path(), "trusted-bin");
 		const canaryPath = path.join(repositoryRoot, "lspmux-status-ran");
 		await fs.promises.mkdir(path.join(repositoryRoot, ".git"), { recursive: true });
 		await fs.promises.mkdir(cwd, { recursive: true });
 		await fs.promises.mkdir(externalBinDir, { recursive: true });
+		await fs.promises.mkdir(trustedBinDir, { recursive: true });
 		const repositoryBinary = await writeLspmuxBinary(repositoryRoot, canaryPath);
 		const pathSymlink = path.join(externalBinDir, "lspmux");
 		await fs.promises.symlink(repositoryBinary, pathSymlink);
+		const trustedBinary = await writeLspmuxBinary(trustedBinDir);
+		const repositorySymlink = path.join(repositoryRoot, "external-lspmux");
+		await fs.promises.symlink(trustedBinary, repositorySymlink);
 		const which = vi.spyOn(piUtils, "$which");
 		which.mockReturnValue(repositoryBinary);
 		expect((await detectLspmux(cwd)).available).toBe(false);
@@ -219,6 +224,10 @@ describe("LSP repository command trust", () => {
 		expect(state.available).toBe(false);
 		expect(await getLspmuxCommand("rust-analyzer", [], cwd)).toEqual({ command: "rust-analyzer", args: [] });
 		expect(fs.existsSync(canaryPath)).toBe(false);
+
+		resetLspmuxStateForTesting();
+		which.mockReturnValue(repositorySymlink);
+		expect((await detectLspmux(cwd)).available).toBe(false);
 	});
 
 	it("uses the session cwd when the LSP status action probes lspmux", async () => {
@@ -251,7 +260,10 @@ describe("LSP repository command trust", () => {
 		const state = await detectLspmux(cwd);
 		expect(state.available).toBe(true);
 		expect(state.running).toBe(true);
-		expect(await getLspmuxCommand("rust-analyzer", [], cwd)).toEqual({ command: externalBinary, args: [] });
+		expect(await getLspmuxCommand("rust-analyzer", [], cwd)).toEqual({
+			command: fs.realpathSync(externalBinary),
+			args: [],
+		});
 
 		Bun.env.GJC_DISABLE_LSPMUX = "1";
 		expect((await detectLspmux(cwd)).available).toBe(false);
@@ -262,25 +274,33 @@ describe("LSP repository command trust", () => {
 		expect((await detectLspmux(cwd)).available).toBe(false);
 	});
 
-	it("canonicalizes a repository PATH symlink before selecting an external server", async () => {
+	it("rejects a repository-owned executable symlink while preserving an external symlink", async () => {
 		if (process.platform === "win32") return;
 
 		using tempDir = TempDir.createSync("@gjc-lsp-server-symlink-trust-");
 		const repositoryRoot = path.join(tempDir.path(), "repo");
 		const externalBinDir = path.join(tempDir.path(), "bin");
+		const userBinDir = path.join(tempDir.path(), "user-bin");
 		const externalServer = path.join(externalBinDir, "typescript-language-server");
 		const repositorySymlink = path.join(repositoryRoot, "typescript-language-server");
+		const externalSymlink = path.join(userBinDir, "typescript-language-server");
 		await fs.promises.mkdir(path.join(repositoryRoot, ".git"), { recursive: true });
 		await fs.promises.mkdir(externalBinDir, { recursive: true });
+		await fs.promises.mkdir(userBinDir, { recursive: true });
 		await Bun.write(path.join(repositoryRoot, "package.json"), "{}\n");
 		await Bun.write(externalServer, "");
 		await fs.promises.symlink(externalServer, repositorySymlink);
-		vi.spyOn(piUtils, "$which").mockImplementation(command =>
-			command === "typescript-language-server" ? repositorySymlink : null,
-		);
+		await fs.promises.symlink(externalServer, externalSymlink);
+		const which = vi
+			.spyOn(piUtils, "$which")
+			.mockImplementation(command => (command === "typescript-language-server" ? repositorySymlink : null));
 
-		const server = loadConfig(repositoryRoot).servers["typescript-language-server"];
-		expect(server?.resolvedCommand).toBe(externalServer);
+		expect(loadConfig(repositoryRoot).servers["typescript-language-server"]).toBeUndefined();
+
+		which.mockImplementation(command => (command === "typescript-language-server" ? externalSymlink : null));
+		expect(loadConfig(repositoryRoot).servers["typescript-language-server"]?.resolvedCommand).toBe(
+			fs.realpathSync(externalServer),
+		);
 	});
 	it("does not trust a user config symlink that resolves into the repository", async () => {
 		if (process.platform === "win32") return;
@@ -332,6 +352,8 @@ describe("LSP repository command trust", () => {
 					"typescript-language-server": {
 						command: trustedServer,
 						args: ["--trusted-user-argument"],
+						initOptions: { trustedInitialization: true },
+						settings: { trustedSettings: true },
 					},
 				},
 			}),
@@ -346,6 +368,8 @@ describe("LSP repository command trust", () => {
 						args: ["malicious-script.ts"],
 						resolvedCommand: process.execPath,
 						fileTypes: [".secure-ts"],
+						initializationOptions: { executeRepositoryCommand: true },
+						settings: { executeRepositoryCommand: true },
 					},
 				},
 			}),
@@ -357,6 +381,8 @@ describe("LSP repository command trust", () => {
 			expect(server?.args).toEqual(["--trusted-user-argument"]);
 			expect(server?.resolvedCommand).toBe(trustedServer);
 			expect(server?.fileTypes).toEqual([".secure-ts"]);
+			expect(server?.initOptions).toEqual({ trustedInitialization: true });
+			expect(server?.settings).toEqual({ trustedSettings: true });
 		} finally {
 			fs.rmSync(userConfigDir, { recursive: true, force: true });
 		}

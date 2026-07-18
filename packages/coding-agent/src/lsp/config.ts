@@ -70,14 +70,14 @@ function normalizeExtensionToFileTypes(value: unknown): string[] | null {
 	return extensions.length > 0 ? extensions : null;
 }
 
-function sanitizeServerConfig(config: unknown, allowLaunchOverrides: boolean): RawServerConfig | null {
+function sanitizeServerConfig(config: unknown, allowProcessOverrides: boolean): RawServerConfig | null {
 	if (!isRecord(config)) return null;
 
 	const sanitized: RawServerConfig = {};
-	if (allowLaunchOverrides && typeof config.command === "string" && config.command.length > 0) {
+	if (allowProcessOverrides && typeof config.command === "string" && config.command.length > 0) {
 		sanitized.command = config.command;
 	}
-	if (allowLaunchOverrides && Array.isArray(config.args)) {
+	if (allowProcessOverrides && Array.isArray(config.args)) {
 		sanitized.args = config.args.filter((entry): entry is string => typeof entry === "string");
 	}
 
@@ -87,9 +87,11 @@ function sanitizeServerConfig(config: unknown, allowLaunchOverrides: boolean): R
 
 	const rootMarkers = normalizeStringArray(config.rootMarkers);
 	if (rootMarkers) sanitized.rootMarkers = rootMarkers;
-	if (isRecord(config.initOptions)) sanitized.initOptions = config.initOptions;
-	if (isRecord(config.initializationOptions)) sanitized.initializationOptions = config.initializationOptions;
-	if (isRecord(config.settings)) sanitized.settings = config.settings;
+	if (allowProcessOverrides && isRecord(config.initOptions)) sanitized.initOptions = config.initOptions;
+	if (allowProcessOverrides && isRecord(config.initializationOptions)) {
+		sanitized.initializationOptions = config.initializationOptions;
+	}
+	if (allowProcessOverrides && isRecord(config.settings)) sanitized.settings = config.settings;
 	if (typeof config.disabled === "boolean") sanitized.disabled = config.disabled;
 	if (typeof config.warmupTimeoutMs === "number" && Number.isFinite(config.warmupTimeoutMs)) {
 		sanitized.warmupTimeoutMs = config.warmupTimeoutMs;
@@ -163,18 +165,24 @@ function coerceServerConfigs(servers: Record<string, RawServerConfig>): Record<s
 function mergeServers(
 	base: Record<string, ServerConfig>,
 	overrides: Record<string, RawServerConfig>,
-	allowLaunchOverrides: boolean,
+	allowProcessOverrides: boolean,
 ): Record<string, ServerConfig> {
 	const merged: Record<string, ServerConfig> = { ...base };
 	for (const [name, config] of Object.entries(overrides)) {
 		if (
-			!allowLaunchOverrides &&
+			!allowProcessOverrides &&
 			isRecord(config) &&
-			("command" in config || "args" in config || "resolvedCommand" in config || "createClient" in config)
+			("command" in config ||
+				"args" in config ||
+				"resolvedCommand" in config ||
+				"createClient" in config ||
+				"initOptions" in config ||
+				"initializationOptions" in config ||
+				"settings" in config)
 		) {
-			logger.warn("Ignoring project-controlled LSP launch overrides.", { name });
+			logger.warn("Ignoring project-controlled LSP process-affecting overrides.", { name });
 		}
-		const sanitized = sanitizeServerConfig(config, allowLaunchOverrides);
+		const sanitized = sanitizeServerConfig(config, allowProcessOverrides);
 		if (!sanitized) {
 			logger.warn("Ignoring invalid LSP server config.", { name });
 			continue;
@@ -332,12 +340,13 @@ function resolveTrustedLspCommand(command: string, cwd: string): string | null {
 	if (!path.isAbsolute(command) && (command.includes("/") || command.includes("\\"))) return null;
 	const discovered = path.isAbsolute(command) ? command : $which(command);
 	if (!discovered) return null;
+	if (isProjectControlledPath(discovered, cwd)) return null;
 	const canonical = canonicalExistingPath(discovered);
-	return canonical && !isProjectControlledPath(canonical, cwd) ? canonical : null;
+	return canonical;
 }
 
 interface ConfigSource {
-	allowLaunchOverrides: boolean;
+	allowProcessOverrides: boolean;
 	read(): LoadedConfigSource | null;
 }
 
@@ -361,9 +370,9 @@ function readCanonicalConfigFile(filePath: string, cwd: string): LoadedConfigSou
 	return config ? { config, projectControlled: isProjectControlledPath(canonicalPath, cwd) } : null;
 }
 
-function fileConfigSource(filePath: string, cwd: string, allowLaunchOverrides: boolean): ConfigSource {
+function fileConfigSource(filePath: string, cwd: string, allowProcessOverrides: boolean): ConfigSource {
 	return {
-		allowLaunchOverrides,
+		allowProcessOverrides,
 		read: () => readCanonicalConfigFile(filePath, cwd),
 	};
 }
@@ -419,14 +428,14 @@ function readMarketplaceLspConfig(root: ClaudePluginRoot, cwd: string): LoadedCo
 	return null;
 }
 
-function marketplaceConfigSource(root: ClaudePluginRoot, cwd: string, allowLaunchOverrides: boolean): ConfigSource {
+function marketplaceConfigSource(root: ClaudePluginRoot, cwd: string, allowProcessOverrides: boolean): ConfigSource {
 	return {
-		allowLaunchOverrides,
+		allowProcessOverrides,
 		read: () => readMarketplaceLspConfig(root, cwd),
 	};
 }
 
-function pluginCanOverrideLaunch(root: ClaudePluginRoot, cwd: string): boolean {
+function pluginCanOverrideProcess(root: ClaudePluginRoot, cwd: string): boolean {
 	return root.scope !== "project" && !isProjectControlledPath(root.path, cwd);
 }
 
@@ -462,11 +471,11 @@ function getConfigSources(cwd: string): ConfigSource[] {
 	// Plugin LSP configs
 	const pluginRoots = getPreloadedPluginRoots();
 	for (const root of pluginRoots) {
-		const allowLaunchOverrides = pluginCanOverrideLaunch(root, cwd);
+		const allowProcessOverrides = pluginCanOverrideProcess(root, cwd);
 		for (const filename of filenames) {
-			sources.push(fileConfigSource(path.join(root.path, filename), cwd, allowLaunchOverrides));
+			sources.push(fileConfigSource(path.join(root.path, filename), cwd, allowProcessOverrides));
 		}
-		sources.push(marketplaceConfigSource(root, cwd, allowLaunchOverrides));
+		sources.push(marketplaceConfigSource(root, cwd, allowProcessOverrides));
 	}
 
 	// User home root files (lowest priority fallback)
@@ -519,11 +528,11 @@ export function loadConfig(cwd: string): LspConfig {
 		const loaded = source.read();
 		if (!loaded) continue;
 		const parsed = loaded.config;
-		const allowLaunchOverrides = source.allowLaunchOverrides && !loaded.projectControlled;
+		const allowProcessOverrides = source.allowProcessOverrides && !loaded.projectControlled;
 		const hasServerOverrides = Object.keys(parsed.servers).length > 0;
 		if (hasServerOverrides) {
 			hasOverrides = true;
-			mergedServers = mergeServers(mergedServers, parsed.servers, allowLaunchOverrides);
+			mergedServers = mergeServers(mergedServers, parsed.servers, allowProcessOverrides);
 		}
 		if (parsed.idleTimeoutMs !== undefined) {
 			idleTimeoutMs = parsed.idleTimeoutMs;

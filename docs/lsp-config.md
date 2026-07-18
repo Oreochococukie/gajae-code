@@ -29,14 +29,14 @@ GJC merges LSP config from multiple files, lowest to highest priority:
 | 2 | `<project>/.gjc/lsp.json`, `<project>/.gjc/lsp.yaml`, `<project>/.gemini/lsp.*` |
 | 1 (highest) | `<project>/lsp.json`, `<project>/.lsp.json`, `<project>/lsp.yaml` |
 
-Each location accepts both `.json` and `.yaml` / `.yml` variants, as well as hidden-file versions (`.lsp.json`, `.lsp.yaml`). Configuration is merged in order, but project-controlled files can only control server matching, activation, capabilities, and editor metadata. They cannot define or override a server's `command`, `args`, executable, or client factory.
+Each location accepts both `.json` and `.yaml` / `.yml` variants, as well as hidden-file versions (`.lsp.json`, `.lsp.yaml`). Configuration is merged in order, but project-controlled files can only control declarative server matching, activation, and capabilities. They cannot define or override a server's `command`, `args`, executable, client factory, `initOptions` / `initializationOptions`, or `settings`; opaque options that can instruct a trusted server belong to trusted user configuration.
 
-The recommended trusted user configuration is `~/.gjc/agent/lsp.json` (or YAML equivalent). Legacy user-wide `~/.gemini/lsp.*` and home-root `~/lsp.*` / `~/.lsp.*` files are also outside the project and may define launch settings, including custom servers. Project files may refine the non-launch fields of built-in or user-defined servers.
+The recommended trusted user configuration is `~/.gjc/agent/lsp.json` (or YAML equivalent). Legacy user-wide `~/.gemini/lsp.*` and home-root `~/lsp.*` / `~/.lsp.*` files are also outside the project and may define launch settings and opaque server options, including custom servers. Project files may refine declarative matching and activation fields of built-in or user-defined servers.
 
 **Recommended locations:**
 
-- Trusted user launch settings and user-wide preferences → `~/.gjc/agent/lsp.json`
-- Project-specific matching, activation, and editor metadata → `<project>/.gjc/lsp.json`
+- Trusted user launch settings, `initOptions`, and `settings` → `~/.gjc/agent/lsp.json`
+- Project-specific matching and activation → `<project>/.gjc/lsp.json`
 
 > **Note:** The presence of any LSP config file disables auto-detection. When at least one file is found, GJC skips the binary-scan phase and loads matching, available, non-disabled servers using trusted launch definitions.
 
@@ -75,8 +75,8 @@ Top-level keys:
 | `args` | `string[]` | no | Launch arguments; trusted user config only |
 | `fileTypes` | `string[]` | yes | File extensions this server handles, e.g. `[".ts", ".tsx"]` |
 | `rootMarkers` | `string[]` | yes | Files/dirs that indicate a project root; glob patterns (e.g. `*.cabal`) are supported |
-| `initOptions` | `object` | no | Sent as `initializationOptions` during LSP handshake |
-| `settings` | `object` | no | Workspace settings pushed via `workspace/didChangeConfiguration` |
+| `initOptions` | `object` | trusted user config only | Sent as `initializationOptions` during LSP handshake |
+| `settings` | `object` | trusted user config only | Workspace settings pushed via `workspace/didChangeConfiguration` |
 | `disabled` | `boolean` | no | Set to `true` to disable this server entirely |
 | `warmupTimeoutMs` | `number` | no | Startup timeout in ms for this server (overrides the global default) |
 | `isLinter` | `boolean` | no | Mark server as linter/formatter only; excluded from type-intelligence operations (hover, go-to-definition, etc.) |
@@ -104,9 +104,9 @@ All fields are boolean and optional. They are currently used by `rust-analyzer`.
 
 ## Common recipes
 
-### Override a built-in server's settings
+### Override a built-in server's settings from trusted user configuration
 
-Partial overrides are merged onto the built-in defaults. Project configuration may only specify non-launch fields, such as settings:
+Opaque server settings may contain process-affecting instructions, so place these partial overrides in trusted user configuration such as `~/.gjc/agent/lsp.json`:
 
 ```json
 {

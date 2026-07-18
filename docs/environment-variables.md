@@ -459,7 +459,7 @@ Extra conditional behavior:
 | `GJC_ALLOW_SIXEL_PASSTHROUGH` | Allows SIXEL passthrough when `GJC_FORCE_IMAGE_PROTOCOL=sixel`                                      |
 | `GJC_NO_PTY`                  | If `1`, disables interactive PTY path for bash tool                                                |
 
-LSP project configuration may control matching, activation, capabilities, and editor metadata, but it cannot define a command, arguments, executable, or client factory. Trusted user-wide configuration outside the project—including the recommended `~/.gjc/agent/lsp.*` files and supported legacy user locations—can override LSP launches; automatic discovery uses trusted external executables and rejects project-local or symlink-resolved binaries.
+LSP project configuration may control declarative matching, activation, and capabilities, but it cannot define a command, arguments, executable, client factory, initialization options, or opaque server settings. Trusted user-wide configuration outside the project—including the recommended `~/.gjc/agent/lsp.*` files and supported legacy user locations—can override LSP launches and server options; automatic discovery uses trusted external executables and rejects project-owned lexical paths as well as symlink-resolved project binaries.
 
 `GJC_NO_PTY` is also set internally when CLI `--no-pty` is used.
 
