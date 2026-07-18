@@ -8,6 +8,7 @@ import { type ClaudePluginRoot, getPreloadedPluginRoots } from "../discovery/hel
 import { BiomeClient } from "./clients/biome-client";
 import { SwiftLintClient } from "./clients/swiftlint-client";
 import DEFAULTS from "./defaults.json" with { type: "json" };
+import { isProjectControlledPath } from "./path-trust";
 import type { ServerConfig } from "./types";
 
 export interface LspConfig {
@@ -424,14 +425,6 @@ function marketplaceConfigSource(root: ClaudePluginRoot, cwd: string, allowLaunc
 		allowLaunchOverrides,
 		read: () => readMarketplaceLspConfig(root, cwd),
 	};
-}
-
-function isProjectControlledPath(candidate: string, cwd: string): boolean {
-	try {
-		return pathIsWithin(fs.realpathSync(cwd), fs.realpathSync(candidate));
-	} catch {
-		return pathIsWithin(path.resolve(cwd), path.resolve(candidate));
-	}
 }
 
 function pluginCanOverrideLaunch(root: ClaudePluginRoot, cwd: string): boolean {

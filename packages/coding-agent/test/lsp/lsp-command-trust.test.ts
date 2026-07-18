@@ -197,12 +197,14 @@ describe("LSP repository command trust", () => {
 		if (process.platform === "win32") return;
 
 		using tempDir = TempDir.createSync("@gjc-lspmux-command-trust-");
-		const cwd = path.join(tempDir.path(), "repo");
+		const repositoryRoot = path.join(tempDir.path(), "repo");
+		const cwd = path.join(repositoryRoot, "packages", "nested");
 		const externalBinDir = path.join(tempDir.path(), "bin");
-		const canaryPath = path.join(cwd, "lspmux-status-ran");
+		const canaryPath = path.join(repositoryRoot, "lspmux-status-ran");
+		await fs.promises.mkdir(path.join(repositoryRoot, ".git"), { recursive: true });
 		await fs.promises.mkdir(cwd, { recursive: true });
 		await fs.promises.mkdir(externalBinDir, { recursive: true });
-		const repositoryBinary = await writeLspmuxBinary(cwd, canaryPath);
+		const repositoryBinary = await writeLspmuxBinary(repositoryRoot, canaryPath);
 		const pathSymlink = path.join(externalBinDir, "lspmux");
 		await fs.promises.symlink(repositoryBinary, pathSymlink);
 		const which = vi.spyOn(piUtils, "$which");

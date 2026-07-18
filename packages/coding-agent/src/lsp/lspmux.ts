@@ -1,9 +1,10 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $flag, $which, logger, pathIsWithin } from "@gajae-code/utils";
+import { $flag, $which, logger } from "@gajae-code/utils";
 import { TOML } from "bun";
 import { spawnOwnedProcess } from "../runtime/process-lifecycle";
+import { isProjectControlledPath } from "./path-trust";
 
 /**
  * lspmux integration for LSP server multiplexing.
@@ -155,8 +156,7 @@ function resolveTrustedLspmuxBinary(cwd: string): string | null {
 
 	try {
 		const binaryPath = fs.realpathSync(discoveredPath);
-		const canonicalCwd = fs.realpathSync(cwd);
-		return pathIsWithin(canonicalCwd, binaryPath) ? null : binaryPath;
+		return isProjectControlledPath(binaryPath, cwd) ? null : binaryPath;
 	} catch {
 		return null;
 	}
