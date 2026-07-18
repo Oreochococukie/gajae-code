@@ -24,22 +24,29 @@ function canonicalParentPath(candidate: string): string {
 	return path.join(canonicalPath(path.dirname(resolved)), path.basename(resolved));
 }
 
-function findProjectTrustRoot(cwd: string): string {
-	let current = path.resolve(cwd);
+function findProjectTrustRoot(start: string): string {
+	const fallback = path.resolve(start);
+	let current = fallback;
 	for (;;) {
 		if (fs.existsSync(path.join(current, ".git"))) return current;
 		const parent = path.dirname(current);
-		if (parent === current) return path.resolve(cwd);
+		if (parent === current) return fallback;
 		current = parent;
 	}
 }
 
 export function isProjectControlledPath(candidate: string, cwd: string): boolean {
 	const lexicalTrustRoot = findProjectTrustRoot(cwd);
-	const canonicalTrustRoot = canonicalPath(lexicalTrustRoot);
-	return (
-		pathIsLexicallyWithin(lexicalTrustRoot, candidate) ||
-		pathIsLexicallyWithin(canonicalTrustRoot, canonicalParentPath(candidate)) ||
-		pathIsWithin(canonicalTrustRoot, canonicalPath(candidate))
-	);
+	if (pathIsLexicallyWithin(lexicalTrustRoot, candidate)) return true;
+
+	const canonicalTrustRoots = new Set([canonicalPath(lexicalTrustRoot), findProjectTrustRoot(canonicalPath(cwd))]);
+	for (const trustRoot of canonicalTrustRoots) {
+		if (
+			pathIsLexicallyWithin(trustRoot, canonicalParentPath(candidate)) ||
+			pathIsWithin(trustRoot, canonicalPath(candidate))
+		) {
+			return true;
+		}
+	}
+	return false;
 }

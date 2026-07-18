@@ -302,6 +302,34 @@ describe("LSP repository command trust", () => {
 			fs.realpathSync(externalServer),
 		);
 	});
+
+	it("finds repository-root executables through a symlinked nested session cwd", async () => {
+		if (process.platform === "win32") return;
+
+		using tempDir = TempDir.createSync("@gjc-lsp-symlinked-cwd-trust-");
+		const repositoryRoot = path.join(tempDir.path(), "repo");
+		const nestedCwd = path.join(repositoryRoot, "packages", "nested");
+		const sessionCwd = path.join(tempDir.path(), "session-cwd");
+		const serverBinary = path.join(repositoryRoot, "typescript-language-server");
+		const lspmuxCanary = path.join(repositoryRoot, "lspmux-status-ran");
+		await fs.promises.mkdir(path.join(repositoryRoot, ".git"), { recursive: true });
+		await fs.promises.mkdir(nestedCwd, { recursive: true });
+		await fs.promises.symlink(nestedCwd, sessionCwd);
+		await Bun.write(path.join(nestedCwd, "package.json"), "{}\n");
+		await Bun.write(serverBinary, "");
+		const repositoryLspmux = await writeLspmuxBinary(repositoryRoot, lspmuxCanary);
+		const which = vi
+			.spyOn(piUtils, "$which")
+			.mockImplementation(command => (command === "typescript-language-server" ? serverBinary : null));
+
+		expect(loadConfig(sessionCwd).servers["typescript-language-server"]).toBeUndefined();
+
+		resetLspmuxStateForTesting();
+		which.mockImplementation(command => (command === "lspmux" ? repositoryLspmux : null));
+		expect((await detectLspmux(sessionCwd)).available).toBe(false);
+		expect(fs.existsSync(lspmuxCanary)).toBe(false);
+	});
+
 	it("does not trust a user config symlink that resolves into the repository", async () => {
 		if (process.platform === "win32") return;
 
