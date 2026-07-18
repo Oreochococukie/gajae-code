@@ -446,7 +446,8 @@ Extra conditional behavior:
 | `GJC_TASK_MAX_OUTPUT_LINES`   | Max captured output lines per subagent (default `5000`)                                            |
 | `GJC_TIMING`                  | If set (any non-empty value), prints a hierarchical timing-span tree to **stderr** via `logger.printTimings()`. In interactive mode the tree prints once the agent is ready (before the TUI starts); in print mode it prints after the whole prompt batch completes. Print-mode prompts are wrapped in `print:prompt:initial` / `print:prompt:next` spans so each user message shows up as its own row. `GJC_TIMING=x` exits the process with code 0 right after printing in interactive mode (use to measure cold startup only). `GJC_TIMING=full` lists every module-load entry instead of just the top N. |
 | `GJC_PACKAGE_DIR`             | Overrides package asset base dir resolution (docs/examples/changelog path lookup)                  |
-| `GJC_DISABLE_LSPMUX`          | If `1`, disables lspmux detection/integration and forces direct LSP server spawning                |
+| `GJC_DISABLE_LSPMUX`          | Canonical lspmux opt-out. A truthy value disables lspmux probing and wrapping; `PI_DISABLE_LSPMUX` is a supported compatibility alias with the same effect. |
+| `PI_DISABLE_LSPMUX`           | Supported compatibility alias for `GJC_DISABLE_LSPMUX`; a truthy value also disables lspmux probing and wrapping. |
 | `SMITHERY_URL`               | Smithery web URL override (default `https://smithery.ai`)                                          |
 | `SMITHERY_API_URL`           | Smithery API base URL override (default `https://api.smithery.ai`)                                 |
 | `PUPPETEER_EXECUTABLE_PATH`  | Browser tool Chromium executable override                                                          |
@@ -457,6 +458,8 @@ Extra conditional behavior:
 | `GJC_FORCE_IMAGE_PROTOCOL`    | Forces supported image protocol (`kitty`, `iterm2`/`iterm`, `sixel`, `none`) where used            |
 | `GJC_ALLOW_SIXEL_PASSTHROUGH` | Allows SIXEL passthrough when `GJC_FORCE_IMAGE_PROTOCOL=sixel`                                      |
 | `GJC_NO_PTY`                  | If `1`, disables interactive PTY path for bash tool                                                |
+
+LSP project configuration may control matching, activation, capabilities, and editor metadata, but it cannot define a command, arguments, executable, or client factory. Only canonical trusted user configuration outside the project can override LSP launches; automatic discovery uses trusted external executables and rejects project-local or symlink-resolved binaries.
 
 `GJC_NO_PTY` is also set internally when CLI `--no-pty` is used.
 

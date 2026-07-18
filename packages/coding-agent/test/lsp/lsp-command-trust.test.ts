@@ -8,8 +8,10 @@ import * as discoveryHelpers from "../../src/discovery/helpers";
 import { createLspWritethrough } from "../../src/lsp";
 import { shutdownAll } from "../../src/lsp/client";
 import { loadConfig } from "../../src/lsp/config";
+import { detectLspmux, getLspmuxCommand, resetLspmuxStateForTesting } from "../../src/lsp/lspmux";
 
 const ORIGINAL_DISABLE_LSPMUX = Bun.env.PI_DISABLE_LSPMUX;
+const ORIGINAL_GJC_DISABLE_LSPMUX = Bun.env.GJC_DISABLE_LSPMUX;
 const ORIGINAL_CONFIG_DIR = process.env.GJC_CONFIG_DIR;
 
 async function writeCanaryLspServer(directory: string): Promise<string> {
@@ -70,13 +72,27 @@ setInterval(() => {}, 1_000);
 	return scriptPath;
 }
 
+async function writeLspmuxBinary(directory: string, canaryPath?: string): Promise<string> {
+	const binaryPath = path.join(directory, "lspmux");
+	const canaryWrite = canaryPath ? `echo lspmux-status-ran > ${JSON.stringify(canaryPath)}\n` : "";
+	await Bun.write(binaryPath, `#!/bin/sh\n${canaryWrite}exit 0\n`);
+	await fs.promises.chmod(binaryPath, 0o755);
+	return binaryPath;
+}
+
 afterEach(async () => {
 	await shutdownAll();
 	vi.restoreAllMocks();
+	resetLspmuxStateForTesting();
 	if (ORIGINAL_DISABLE_LSPMUX === undefined) {
 		delete Bun.env.PI_DISABLE_LSPMUX;
 	} else {
 		Bun.env.PI_DISABLE_LSPMUX = ORIGINAL_DISABLE_LSPMUX;
+	}
+	if (ORIGINAL_GJC_DISABLE_LSPMUX === undefined) {
+		delete Bun.env.GJC_DISABLE_LSPMUX;
+	} else {
+		Bun.env.GJC_DISABLE_LSPMUX = ORIGINAL_GJC_DISABLE_LSPMUX;
 	}
 	if (ORIGINAL_CONFIG_DIR === undefined) {
 		delete process.env.GJC_CONFIG_DIR;
@@ -143,58 +159,86 @@ describe("LSP repository command trust", () => {
 		expect(loadConfig(cwd).servers["repository-custom-server"]).toBeUndefined();
 	});
 
-	it("trusts explicit plugin directories but not project-scoped plugin launch fields", async () => {
+	it("does not trust project-scoped plugin launch fields even when the root claims user scope", async () => {
 		using tempDir = TempDir.createSync("@gjc-lsp-plugin-command-trust-");
 		const cwd = path.join(tempDir.path(), "repo");
 		const projectPlugin = path.join(cwd, "project-plugin");
-		const explicitPlugin = path.join(cwd, "explicit-plugin");
 		await fs.promises.mkdir(projectPlugin, { recursive: true });
-		await fs.promises.mkdir(explicitPlugin, { recursive: true });
 		await Bun.write(path.join(cwd, "package.json"), "{}\n");
-
-		const lspConfig = (name: string) =>
+		await Bun.write(
+			path.join(projectPlugin, "lsp.json"),
 			JSON.stringify({
 				servers: {
-					[name]: {
+					"project-plugin-server": {
 						command: process.execPath,
-						args: ["--trusted-plugin-argument"],
+						args: ["--untrusted-plugin-argument"],
 						fileTypes: [".plugin"],
 						rootMarkers: ["package.json"],
 					},
 				},
-			});
-		await Bun.write(path.join(projectPlugin, "lsp.json"), lspConfig("project-plugin-server"));
-		await Bun.write(path.join(explicitPlugin, "lsp.json"), lspConfig("explicit-plugin-server"));
-
-		let roots: discoveryHelpers.ClaudePluginRoot[] = [
+			}),
+		);
+		const roots: discoveryHelpers.ClaudePluginRoot[] = [
 			{
-				id: "project-plugin@__local__",
+				id: "forged-project-plugin@__local__",
 				marketplace: "__local__",
 				plugin: "project-plugin",
-				version: "1.0.0",
+				version: "local",
 				path: projectPlugin,
-				scope: "project",
+				scope: "user",
 			},
 		];
 		vi.spyOn(discoveryHelpers, "getPreloadedPluginRoots").mockImplementation(() => roots);
 
 		expect(loadConfig(cwd).servers["project-plugin-server"]).toBeUndefined();
+	});
 
-		roots = [
-			{
-				id: "explicit-plugin@__local__",
-				marketplace: "__local__",
-				plugin: "explicit-plugin",
-				version: "local",
-				path: explicitPlugin,
-				scope: "user",
-				origin: "plugin-dir",
-			},
-		];
-		const explicitServer = loadConfig(cwd).servers["explicit-plugin-server"];
-		expect(explicitServer?.command).toBe(process.execPath);
-		expect(explicitServer?.args).toEqual(["--trusted-plugin-argument"]);
-		expect(explicitServer?.resolvedCommand).toBe(process.execPath);
+	it("does not execute repository-contained lspmux binaries discovered directly or through a PATH symlink", async () => {
+		if (process.platform === "win32") return;
+
+		using tempDir = TempDir.createSync("@gjc-lspmux-command-trust-");
+		const cwd = path.join(tempDir.path(), "repo");
+		const externalBinDir = path.join(tempDir.path(), "bin");
+		const canaryPath = path.join(cwd, "lspmux-status-ran");
+		await fs.promises.mkdir(cwd, { recursive: true });
+		await fs.promises.mkdir(externalBinDir, { recursive: true });
+		const repositoryBinary = await writeLspmuxBinary(cwd, canaryPath);
+		const pathSymlink = path.join(externalBinDir, "lspmux");
+		await fs.promises.symlink(repositoryBinary, pathSymlink);
+		const which = vi.spyOn(piUtils, "$which");
+		which.mockReturnValue(repositoryBinary);
+		expect((await detectLspmux(cwd)).available).toBe(false);
+		expect(fs.existsSync(canaryPath)).toBe(false);
+
+		resetLspmuxStateForTesting();
+		which.mockReturnValue(pathSymlink);
+		const state = await detectLspmux(cwd);
+		expect(state.available).toBe(false);
+		expect(await getLspmuxCommand("rust-analyzer", [], cwd)).toEqual({ command: "rust-analyzer", args: [] });
+		expect(fs.existsSync(canaryPath)).toBe(false);
+	});
+
+	it("wraps supported servers with an external lspmux and honors both disable variables", async () => {
+		using tempDir = TempDir.createSync("@gjc-lspmux-external-");
+		const cwd = path.join(tempDir.path(), "repo");
+		const externalBinDir = path.join(tempDir.path(), "bin");
+		await fs.promises.mkdir(cwd, { recursive: true });
+		await fs.promises.mkdir(externalBinDir, { recursive: true });
+		const externalBinary = await writeLspmuxBinary(externalBinDir);
+		vi.spyOn(piUtils, "$which").mockReturnValue(externalBinary);
+
+		const state = await detectLspmux(cwd);
+		expect(state.available).toBe(true);
+		expect(state.running).toBe(true);
+		expect(await getLspmuxCommand("rust-analyzer", [], cwd)).toEqual({ command: externalBinary, args: [] });
+
+		Bun.env.GJC_DISABLE_LSPMUX = "1";
+		resetLspmuxStateForTesting();
+		expect((await detectLspmux(cwd)).available).toBe(false);
+		delete Bun.env.GJC_DISABLE_LSPMUX;
+		Bun.env.PI_DISABLE_LSPMUX = "1";
+		resetLspmuxStateForTesting();
+		expect((await detectLspmux(cwd)).available).toBe(false);
 	});
 
 	it("does not trust a user config symlink that resolves into the repository", async () => {

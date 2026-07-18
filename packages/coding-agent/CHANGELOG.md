@@ -10,7 +10,7 @@
 - SDK host response delivery to a disconnected client no longer escalates a second structured-error send failure into a process-level unhandled rejection; failures stay local to that connection.
 
 ### Fixed
-- Repository LSP configuration can no longer select executable paths or launch arguments, and automatic LSP discovery no longer executes project-local binaries. Trusted user and explicit plugin configuration can still customize launches, while project files retain language, capability, and editor behavior overrides.
+- Repository LSP configuration can no longer define or redirect a final executable: project files may control matching, activation, capabilities, and editor metadata, but cannot set `command`, `args`, an executable, or a client factory. Trusted canonical user configuration outside the project retains launch overrides; automatic discovery uses trusted external executables and rejects project-local or symlink-resolved binaries. Plugin inputs remain unavailable as an LSP launch route. `GJC_DISABLE_LSPMUX=1` is the canonical opt-out and `PI_DISABLE_LSPMUX=1` is a supported compatibility alias; either truthy value disables lspmux probing and wrapping.
 - Palette slash commands now run only from an empty composer; drafts are never touched.
 - Aborting a session without an enabled active goal no longer suppresses the first reminder when a goal is activated later; active-goal abort suppression is one-shot, goal-owned, and clears across inactive or replacement-goal transitions (#2436).
 - Palette slash submissions no longer clear or rewrite composer text, cursor state, history, or pending images created while an asynchronous input hook is awaiting; canonical keyboard submission cleanup remains unchanged (#2441).

@@ -46,9 +46,9 @@
 1. `packages/coding-agent/src/tools/index.ts` registers `lsp: LspTool.createIf`; session creation also gates it behind `session.enableLsp !== false` and `settings.get("lsp.enabled")`.
 2. `LspTool.execute()` in `packages/coding-agent/src/lsp/index.ts` clamps `timeout` with `clampTimeout("lsp", ...)`, builds an `AbortSignal.timeout(...)`, and combines it with the caller signal.
 3. `getConfig()` loads and caches `LspConfig` per cwd, applies idle-timeout config via `setIdleTimeout()`, and reuses the cached config on later calls.
-4. Config loading in `packages/coding-agent/src/lsp/config.ts` merges `defaults.json` with JSON/YAML overrides from project, project config dirs, user config dirs, plugin roots, and home; if there are no overrides it auto-detects servers from root markers plus executable discovery.
+4. Config loading in `packages/coding-agent/src/lsp/config.ts` merges `defaults.json` with JSON/YAML overrides. Project-controlled configuration may control matching, activation, capabilities, and editor metadata, but cannot define a launch command, arguments, executable, or client factory. Only the canonical trusted user config outside the project may override launch definitions; plugin inputs are not an LSP launch configuration source. With no overrides, auto-detection intersects root markers with trusted external executable discovery and rejects project-local binaries, including symlink-resolved paths.
 5. Server routing uses `getServersForFile()` / `getServerForFile()` from `config.ts`: extension or basename match, then sort primary servers before linters. `index.ts` further filters custom linter clients out of navigation/refactor paths with `getLspServersForFile()` / `getLspServerForFile()`.
-6. `getOrCreateClient()` in `client.ts` creates one process per `command:cwd`, optionally wraps supported commands with `lspmux`, spawns the server, starts the background message reader, sends `initialize`, stores server capabilities, then sends `initialized`.
+6. `getOrCreateClient()` in `client.ts` creates one process per trusted `command:cwd` launch definition, optionally wraps supported commands with `lspmux`, spawns the server, starts the background message reader, sends `initialize`, stores server capabilities, then sends `initialized`.
 7. The message reader in `client.ts` parses LSP frames, resolves pending requests, caches `publishDiagnostics`, tracks `$/progress` tokens for project-load completion, answers `workspace/configuration`, and applies `workspace/applyEdit` requests through `applyWorkspaceEdit()`.
 8. File-scoped actions call `ensureFileOpen()` before requests. Column resolution uses `resolveSymbolColumn()` from `utils.ts`: read the target file, pick first non-whitespace when `symbol` is omitted, otherwise find the exact or case-insensitive match on the target line and honor `#N` occurrence selectors.
 9. Actions dispatch in `LspTool.execute()` through dedicated branches: workspace-only branches (`status`, some `diagnostics`, workspace `symbols`, workspace `reload`, `capabilities`, `request`) run before the single-file switch; all other single-file actions share one client lookup and `switch(action)`.
@@ -254,7 +254,7 @@ Same as `definition`, but sends `textDocument/implementation` and reports `imple
   - Spawns language servers with `ptree.spawn()`.
   - Workspace diagnostics spawns `cargo`, `npx`, `go`, or `pyright`.
   - `BiomeClient` and `SwiftLintClient` spawn CLI tools.
-  - Optional `lspmux` detection spawns `lspmux status`; supported servers may be wrapped through `lspmux client`.
+  - Optional lspmux detection uses the trusted external `lspmux` executable; supported servers may be wrapped through `lspmux client`.
 - Session state (transcript, memory, jobs, checkpoints, registries)
   - Caches config per cwd in `configCache`.
   - Caches LSP clients per `command:cwd`, with `pendingRequests`, `diagnostics`, `openFiles`, `serverCapabilities`, and project-load state.
@@ -309,6 +309,6 @@ Same as `definition`, but sends `textDocument/implementation` and reports `imple
 - `request` with `file: "*"` is treated the same as omitted `file`: it does not build workspace-specific params.
 - `reload` does not recreate a client immediately after killing it; the next request triggers reinitialization.
 - `workspace/applyEdit` can apply edits initiated by the server outside the direct tool action result path.
-- `detectLspmux()` can be disabled with `GJC_DISABLE_LSPMUX=1`; only `rust-analyzer` is in `DEFAULT_SUPPORTED_SERVERS`.
+- `GJC_DISABLE_LSPMUX=1` is the canonical opt-out; `PI_DISABLE_LSPMUX=1` is a supported compatibility alias. A truthy value for either variable disables lspmux probing and wrapping. Only `rust-analyzer` is in `DEFAULT_SUPPORTED_SERVERS`.
 - Startup LSP warmup (`discoverStartupLspServers(cwd)` in `sdk.ts`) is gated on `enableLsp && options.hasUI && settings.get("lsp.diagnosticsOnWrite")` — print, ACP, and script sessions skip it and let `getOrCreateClient()` cold-start servers on demand. See `docs/sdk-embedding.md` § Startup performance.
 - `configCache` is per-process and never auto-invalidated; config changes require a fresh process to be observed by `getConfig()` callers.

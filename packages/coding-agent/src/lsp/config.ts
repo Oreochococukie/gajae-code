@@ -338,7 +338,6 @@ function resolveTrustedLspCommand(command: string, cwd: string): string | null {
 
 interface ConfigSource {
 	allowLaunchOverrides: boolean;
-	allowProjectControlledLaunchOverrides: boolean;
 	read(): LoadedConfigSource | null;
 }
 
@@ -362,15 +361,9 @@ function readCanonicalConfigFile(filePath: string, cwd: string): LoadedConfigSou
 	return config ? { config, projectControlled: isProjectControlledPath(canonicalPath, cwd) } : null;
 }
 
-function fileConfigSource(
-	filePath: string,
-	cwd: string,
-	allowLaunchOverrides: boolean,
-	allowProjectControlledLaunchOverrides = false,
-): ConfigSource {
+function fileConfigSource(filePath: string, cwd: string, allowLaunchOverrides: boolean): ConfigSource {
 	return {
 		allowLaunchOverrides,
-		allowProjectControlledLaunchOverrides,
 		read: () => readCanonicalConfigFile(filePath, cwd),
 	};
 }
@@ -429,7 +422,6 @@ function readMarketplaceLspConfig(root: ClaudePluginRoot, cwd: string): LoadedCo
 function marketplaceConfigSource(root: ClaudePluginRoot, cwd: string, allowLaunchOverrides: boolean): ConfigSource {
 	return {
 		allowLaunchOverrides,
-		allowProjectControlledLaunchOverrides: root.origin === "plugin-dir",
 		read: () => readMarketplaceLspConfig(root, cwd),
 	};
 }
@@ -443,8 +435,6 @@ function isProjectControlledPath(candidate: string, cwd: string): boolean {
 }
 
 function pluginCanOverrideLaunch(root: ClaudePluginRoot, cwd: string): boolean {
-	// Explicit --plugin-dir roots are an operator decision for this run.
-	if (root.origin === "plugin-dir") return true;
 	return root.scope !== "project" && !isProjectControlledPath(root.path, cwd);
 }
 
@@ -477,14 +467,12 @@ function getConfigSources(cwd: string): ConfigSource[] {
 		}
 	}
 
-	// Plugin LSP configs (from marketplace/--plugin-dir roots)
+	// Plugin LSP configs
 	const pluginRoots = getPreloadedPluginRoots();
 	for (const root of pluginRoots) {
 		const allowLaunchOverrides = pluginCanOverrideLaunch(root, cwd);
 		for (const filename of filenames) {
-			sources.push(
-				fileConfigSource(path.join(root.path, filename), cwd, allowLaunchOverrides, root.origin === "plugin-dir"),
-			);
+			sources.push(fileConfigSource(path.join(root.path, filename), cwd, allowLaunchOverrides));
 		}
 		sources.push(marketplaceConfigSource(root, cwd, allowLaunchOverrides));
 	}
@@ -539,8 +527,7 @@ export function loadConfig(cwd: string): LspConfig {
 		const loaded = source.read();
 		if (!loaded) continue;
 		const parsed = loaded.config;
-		const allowLaunchOverrides =
-			source.allowLaunchOverrides && (source.allowProjectControlledLaunchOverrides || !loaded.projectControlled);
+		const allowLaunchOverrides = source.allowLaunchOverrides && !loaded.projectControlled;
 		const hasServerOverrides = Object.keys(parsed.servers).length > 0;
 		if (hasServerOverrides) {
 			hasOverrides = true;
