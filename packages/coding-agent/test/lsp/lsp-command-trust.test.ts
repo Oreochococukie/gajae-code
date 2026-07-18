@@ -5,10 +5,11 @@ import * as path from "node:path";
 import * as piUtils from "@gajae-code/utils";
 import { TempDir } from "@gajae-code/utils";
 import * as discoveryHelpers from "../../src/discovery/helpers";
-import { createLspWritethrough } from "../../src/lsp";
+import { createLspWritethrough, LspTool } from "../../src/lsp";
 import { shutdownAll } from "../../src/lsp/client";
 import { loadConfig } from "../../src/lsp/config";
 import { detectLspmux, getLspmuxCommand, resetLspmuxStateForTesting } from "../../src/lsp/lspmux";
+import type { ToolSession } from "../../src/tools";
 
 const ORIGINAL_DISABLE_LSPMUX = Bun.env.PI_DISABLE_LSPMUX;
 const ORIGINAL_GJC_DISABLE_LSPMUX = Bun.env.GJC_DISABLE_LSPMUX;
@@ -217,6 +218,24 @@ describe("LSP repository command trust", () => {
 		const state = await detectLspmux(cwd);
 		expect(state.available).toBe(false);
 		expect(await getLspmuxCommand("rust-analyzer", [], cwd)).toEqual({ command: "rust-analyzer", args: [] });
+		expect(fs.existsSync(canaryPath)).toBe(false);
+	});
+
+	it("uses the session cwd when the LSP status action probes lspmux", async () => {
+		if (process.platform === "win32") return;
+
+		using tempDir = TempDir.createSync("@gjc-lspmux-status-command-trust-");
+		const repositoryRoot = path.join(tempDir.path(), "repo");
+		const sessionCwd = path.join(repositoryRoot, "packages", "nested");
+		const canaryPath = path.join(repositoryRoot, "lspmux-status-ran");
+		await fs.promises.mkdir(path.join(repositoryRoot, ".git"), { recursive: true });
+		await fs.promises.mkdir(sessionCwd, { recursive: true });
+		const repositoryBinary = await writeLspmuxBinary(repositoryRoot, canaryPath);
+		vi.spyOn(piUtils, "$which").mockReturnValue(repositoryBinary);
+
+		const tool = new LspTool({ cwd: sessionCwd } as ToolSession);
+		await tool.execute("status-command-trust", { action: "status" });
+
 		expect(fs.existsSync(canaryPath)).toBe(false);
 	});
 
