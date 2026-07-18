@@ -395,23 +395,25 @@ describe("lsp regressions", () => {
 
 	it("detects tlaplus files for LSP startup and language ids", async () => {
 		const tempDir = TempDir.createSync("@gjc-lsp-tlaplus-");
-		const specPath = path.join(tempDir.path(), "Spec.tla");
-		const aliasPath = path.join(tempDir.path(), "Spec.tlaplus");
+		const cwd = path.join(tempDir.path(), "repo");
+		const externalBinDir = path.join(tempDir.path(), "bin");
+		const specPath = path.join(cwd, "Spec.tla");
+		const aliasPath = path.join(cwd, "Spec.tlaplus");
+		const tlapmLsp = path.join(externalBinDir, "tlapm_lsp");
 
+		await fs.promises.mkdir(cwd, { recursive: true });
+		await fs.promises.mkdir(externalBinDir, { recursive: true });
 		await Bun.write(specPath, "---- MODULE Spec ----\n====\n");
+		await Bun.write(tlapmLsp, "");
 
 		const whichSpy = vi
 			.spyOn(piUtils, "$which")
-			.mockImplementation(command => (command === "tlapm_lsp" ? "/usr/local/bin/tlapm_lsp" : null));
-		const existsSpy = vi
-			.spyOn(fs, "existsSync")
-			.mockImplementation(candidate => typeof candidate === "string" && candidate === specPath);
+			.mockImplementation(command => (command === "tlapm_lsp" ? tlapmLsp : null));
 
 		try {
-			const config = loadConfig(tempDir.path());
+			const config = loadConfig(cwd);
 			expect(getServersForFile(config, specPath).map(([name]) => name)).toEqual(["tlaplus"]);
 			expect(whichSpy).toHaveBeenCalledWith("tlapm_lsp");
-			expect(existsSpy).toHaveBeenCalled();
 			expect(detectLanguageId(specPath)).toBe("tlaplus");
 			expect(detectLanguageId(aliasPath)).toBe("tlaplus");
 		} finally {
@@ -422,19 +424,25 @@ describe("lsp regressions", () => {
 	it("detects csharp-ls as the preferred C# LSP when installed", async () => {
 		const tempDir = TempDir.createSync("@gjc-lsp-csharp-ls-");
 		const cwd = path.join(tempDir.path(), "repo");
+		const externalBinDir = path.join(tempDir.path(), "bin");
+		const csharpLs = path.join(externalBinDir, "csharp-ls");
+		const omnisharp = path.join(externalBinDir, "omnisharp");
 		try {
 			await fs.promises.mkdir(cwd, { recursive: true });
+			await fs.promises.mkdir(externalBinDir, { recursive: true });
 			await Bun.write(path.join(cwd, "Example.csproj"), "<Project />\n");
+			await Bun.write(csharpLs, "");
+			await Bun.write(omnisharp, "");
 
 			const whichSpy = vi.spyOn(piUtils, "$which").mockImplementation(command => {
-				if (command === "csharp-ls") return "/usr/local/bin/csharp-ls";
-				if (command === "omnisharp") return "/usr/local/bin/omnisharp";
+				if (command === "csharp-ls") return csharpLs;
+				if (command === "omnisharp") return omnisharp;
 				return null;
 			});
 
 			const config = loadConfig(cwd);
 
-			expect(config.servers["csharp-ls"]?.resolvedCommand).toBe("/usr/local/bin/csharp-ls");
+			expect(config.servers["csharp-ls"]?.resolvedCommand).toBe(csharpLs);
 			expect(config.servers.omnisharp).toBeUndefined();
 			expect(getServersForFile(config, path.join(cwd, "Program.cs")).map(([name]) => name)).toEqual(["csharp-ls"]);
 			expect(whichSpy).toHaveBeenCalledWith("csharp-ls");
@@ -447,18 +455,20 @@ describe("lsp regressions", () => {
 	it("keeps omnisharp as the C# fallback when csharp-ls is unavailable", async () => {
 		const tempDir = TempDir.createSync("@gjc-lsp-omnisharp-fallback-");
 		const cwd = path.join(tempDir.path(), "repo");
+		const externalBinDir = path.join(tempDir.path(), "bin");
+		const omnisharp = path.join(externalBinDir, "omnisharp");
 		try {
 			await fs.promises.mkdir(cwd, { recursive: true });
+			await fs.promises.mkdir(externalBinDir, { recursive: true });
 			await Bun.write(path.join(cwd, "Example.csproj"), "<Project />\n");
+			await Bun.write(omnisharp, "");
 
-			vi.spyOn(piUtils, "$which").mockImplementation(command =>
-				command === "omnisharp" ? "/usr/local/bin/omnisharp" : null,
-			);
+			vi.spyOn(piUtils, "$which").mockImplementation(command => (command === "omnisharp" ? omnisharp : null));
 
 			const config = loadConfig(cwd);
 
 			expect(config.servers["csharp-ls"]).toBeUndefined();
-			expect(config.servers.omnisharp?.resolvedCommand).toBe("/usr/local/bin/omnisharp");
+			expect(config.servers.omnisharp?.resolvedCommand).toBe(omnisharp);
 			expect(getServersForFile(config, path.join(cwd, "Program.cs")).map(([name]) => name)).toEqual(["omnisharp"]);
 		} finally {
 			tempDir.removeSync();

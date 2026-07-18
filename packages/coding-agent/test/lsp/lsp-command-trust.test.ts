@@ -243,6 +243,26 @@ describe("LSP repository command trust", () => {
 		expect((await detectLspmux(cwd)).available).toBe(false);
 	});
 
+	it("canonicalizes a repository PATH symlink before selecting an external server", async () => {
+		if (process.platform === "win32") return;
+
+		using tempDir = TempDir.createSync("@gjc-lsp-server-symlink-trust-");
+		const repositoryRoot = path.join(tempDir.path(), "repo");
+		const externalBinDir = path.join(tempDir.path(), "bin");
+		const externalServer = path.join(externalBinDir, "typescript-language-server");
+		const repositorySymlink = path.join(repositoryRoot, "typescript-language-server");
+		await fs.promises.mkdir(path.join(repositoryRoot, ".git"), { recursive: true });
+		await fs.promises.mkdir(externalBinDir, { recursive: true });
+		await Bun.write(path.join(repositoryRoot, "package.json"), "{}\n");
+		await Bun.write(externalServer, "");
+		await fs.promises.symlink(externalServer, repositorySymlink);
+		vi.spyOn(piUtils, "$which").mockImplementation(command =>
+			command === "typescript-language-server" ? repositorySymlink : null,
+		);
+
+		const server = loadConfig(repositoryRoot).servers["typescript-language-server"];
+		expect(server?.resolvedCommand).toBe(externalServer);
+	});
 	it("does not trust a user config symlink that resolves into the repository", async () => {
 		if (process.platform === "win32") return;
 

@@ -329,12 +329,11 @@ export function resolveCommand(command: string, cwd: string): string | null {
 
 /** Resolve an LSP executable without consulting project-controlled bin directories. */
 function resolveTrustedLspCommand(command: string, cwd: string): string | null {
-	if (path.isAbsolute(command)) {
-		return fs.existsSync(command) ? command : null;
-	}
-	if (command.includes("/") || command.includes("\\")) return null;
-	const resolved = $which(command);
-	return resolved && !isProjectControlledPath(resolved, cwd) ? resolved : null;
+	if (!path.isAbsolute(command) && (command.includes("/") || command.includes("\\"))) return null;
+	const discovered = path.isAbsolute(command) ? command : $which(command);
+	if (!discovered) return null;
+	const canonical = canonicalExistingPath(discovered);
+	return canonical && !isProjectControlledPath(canonical, cwd) ? canonical : null;
 }
 
 interface ConfigSource {
