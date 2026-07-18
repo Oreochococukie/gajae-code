@@ -170,14 +170,14 @@ function resolveTrustedLspmuxBinary(cwd: string): string | null {
  */
 export async function detectLspmux(cwd = process.cwd()): Promise<LspmuxState> {
 	const now = Date.now();
-	if (cachedState && cacheCwd === cwd && now - cacheTimestamp < STATE_CACHE_TTL_MS) {
-		return cachedState;
-	}
-
 	if ($flag("GJC_DISABLE_LSPMUX") || $flag("PI_DISABLE_LSPMUX")) {
 		cachedState = { available: false, running: false, binaryPath: null, config: null };
 		cacheTimestamp = now;
 		cacheCwd = cwd;
+		return cachedState;
+	}
+
+	if (cachedState && cacheCwd === cwd && now - cacheTimestamp < STATE_CACHE_TTL_MS) {
 		return cachedState;
 	}
 
