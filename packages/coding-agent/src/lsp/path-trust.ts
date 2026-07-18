@@ -1,13 +1,15 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
-import { pathIsWithin, relativePathEscapesRoot } from "@gajae-code/utils";
+import { CONFIG_DIR_NAME, pathIsWithin, relativePathEscapesRoot } from "@gajae-code/utils";
+
+function normalizePathForComparison(candidate: string): string {
+	const resolved = path.resolve(candidate);
+	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
 
 function pathIsLexicallyWithin(root: string, candidate: string): boolean {
-	const resolvedRoot = path.resolve(root);
-	const resolvedCandidate = path.resolve(candidate);
-	const comparisonRoot = process.platform === "win32" ? resolvedRoot.toLowerCase() : resolvedRoot;
-	const comparisonCandidate = process.platform === "win32" ? resolvedCandidate.toLowerCase() : resolvedCandidate;
-	const relative = path.relative(comparisonRoot, comparisonCandidate);
+	const relative = path.relative(normalizePathForComparison(root), normalizePathForComparison(candidate));
 	return !relativePathEscapesRoot(relative);
 }
 
@@ -24,22 +26,47 @@ function canonicalParentPath(candidate: string): string {
 	return path.join(canonicalPath(path.dirname(resolved)), path.basename(resolved));
 }
 
-function findProjectTrustRoot(start: string): string {
+function isDirectory(candidate: string): boolean {
+	try {
+		return fs.statSync(candidate).isDirectory();
+	} catch {
+		return false;
+	}
+}
+
+function pathMatchesStop(candidate: string, stopPaths: ReadonlySet<string>): boolean {
+	return (
+		stopPaths.has(normalizePathForComparison(candidate)) ||
+		stopPaths.has(normalizePathForComparison(canonicalPath(candidate)))
+	);
+}
+
+function findProjectTrustRoot(start: string, stopPaths: ReadonlySet<string>): string {
 	const fallback = path.resolve(start);
+	let nearestConfigRoot: string | undefined;
 	let current = fallback;
 	for (;;) {
+		if (pathMatchesStop(current, stopPaths)) return nearestConfigRoot ?? fallback;
 		if (fs.existsSync(path.join(current, ".git"))) return current;
+		if (nearestConfigRoot === undefined && isDirectory(path.join(current, CONFIG_DIR_NAME))) {
+			nearestConfigRoot = current;
+		}
 		const parent = path.dirname(current);
-		if (parent === current) return fallback;
+		if (parent === current) return nearestConfigRoot ?? fallback;
 		current = parent;
 	}
 }
 
 export function isProjectControlledPath(candidate: string, cwd: string): boolean {
-	const lexicalTrustRoot = findProjectTrustRoot(cwd);
+	const home = os.homedir();
+	const stopPaths = new Set([path.resolve(home), canonicalPath(home)].map(normalizePathForComparison));
+	const lexicalTrustRoot = findProjectTrustRoot(cwd, stopPaths);
 	if (pathIsLexicallyWithin(lexicalTrustRoot, candidate)) return true;
 
-	const canonicalTrustRoots = new Set([canonicalPath(lexicalTrustRoot), findProjectTrustRoot(canonicalPath(cwd))]);
+	const canonicalTrustRoots = new Set([
+		canonicalPath(lexicalTrustRoot),
+		findProjectTrustRoot(canonicalPath(cwd), stopPaths),
+	]);
 	for (const trustRoot of canonicalTrustRoots) {
 		if (
 			pathIsLexicallyWithin(trustRoot, canonicalParentPath(candidate)) ||

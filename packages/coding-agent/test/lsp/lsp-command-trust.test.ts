@@ -9,6 +9,7 @@ import { createLspWritethrough, LspTool } from "../../src/lsp";
 import { shutdownAll } from "../../src/lsp/client";
 import { loadConfig } from "../../src/lsp/config";
 import { detectLspmux, getLspmuxCommand, resetLspmuxStateForTesting } from "../../src/lsp/lspmux";
+import { isProjectControlledPath } from "../../src/lsp/path-trust";
 import type { ToolSession } from "../../src/tools";
 
 const ORIGINAL_DISABLE_LSPMUX = Bun.env.PI_DISABLE_LSPMUX;
@@ -328,6 +329,90 @@ describe("LSP repository command trust", () => {
 		which.mockImplementation(command => (command === "lspmux" ? repositoryLspmux : null));
 		expect((await detectLspmux(sessionCwd)).available).toBe(false);
 		expect(fs.existsSync(lspmuxCanary)).toBe(false);
+	});
+
+	it("anchors non-Git nested sessions to the nearest parent .gjc project", async () => {
+		if (process.platform === "win32") return;
+
+		using tempDir = TempDir.createSync("@gjc-lsp-project-config-root-trust-");
+		const projectRoot = path.join(tempDir.path(), "project");
+		const nestedCwd = path.join(projectRoot, "packages", "nested");
+		const symlinkedCwd = path.join(tempDir.path(), "symlinked-session");
+		const serverBinary = path.join(projectRoot, "typescript-language-server");
+		const lspmuxCanary = path.join(projectRoot, "lspmux-status-ran");
+		await fs.promises.mkdir(path.join(projectRoot, ".gjc"), { recursive: true });
+		await fs.promises.mkdir(nestedCwd, { recursive: true });
+		await fs.promises.symlink(nestedCwd, symlinkedCwd);
+		await Bun.write(path.join(nestedCwd, "package.json"), "{}\n");
+		await Bun.write(serverBinary, "");
+		const projectLspmux = await writeLspmuxBinary(projectRoot, lspmuxCanary);
+		const which = vi
+			.spyOn(piUtils, "$which")
+			.mockImplementation(command => (command === "typescript-language-server" ? serverBinary : null));
+
+		expect(loadConfig(nestedCwd).servers["typescript-language-server"]).toBeUndefined();
+		expect(loadConfig(symlinkedCwd).servers["typescript-language-server"]).toBeUndefined();
+
+		resetLspmuxStateForTesting();
+		which.mockImplementation(command => (command === "lspmux" ? projectLspmux : null));
+		expect((await detectLspmux(nestedCwd)).available).toBe(false);
+		resetLspmuxStateForTesting();
+		expect((await detectLspmux(symlinkedCwd)).available).toBe(false);
+		expect(fs.existsSync(lspmuxCanary)).toBe(false);
+	});
+
+	it("lets a Git root outrank a nearer project .gjc marker", async () => {
+		if (process.platform === "win32") return;
+
+		using tempDir = TempDir.createSync("@gjc-lsp-git-root-precedence-");
+		const repositoryRoot = path.join(tempDir.path(), "repo");
+		const nestedProject = path.join(repositoryRoot, "packages", "nested-project");
+		const cwd = path.join(nestedProject, "src");
+		const serverBinary = path.join(repositoryRoot, "typescript-language-server");
+		const lspmuxCanary = path.join(repositoryRoot, "lspmux-status-ran");
+		await fs.promises.mkdir(repositoryRoot, { recursive: true });
+		await Bun.write(path.join(repositoryRoot, ".git"), "gitdir: ../metadata.git\n");
+		await fs.promises.mkdir(path.join(nestedProject, ".gjc"), { recursive: true });
+		await fs.promises.mkdir(cwd, { recursive: true });
+		await Bun.write(path.join(cwd, "package.json"), "{}\n");
+		await Bun.write(serverBinary, "");
+		const repositoryLspmux = await writeLspmuxBinary(repositoryRoot, lspmuxCanary);
+		const which = vi
+			.spyOn(piUtils, "$which")
+			.mockImplementation(command => (command === "typescript-language-server" ? serverBinary : null));
+
+		expect(loadConfig(cwd).servers["typescript-language-server"]).toBeUndefined();
+		resetLspmuxStateForTesting();
+		which.mockImplementation(command => (command === "lspmux" ? repositoryLspmux : null));
+		expect((await detectLspmux(cwd)).available).toBe(false);
+		expect(fs.existsSync(lspmuxCanary)).toBe(false);
+	});
+
+	it("stops before lexical and canonical home paths when finding project roots", async () => {
+		if (process.platform === "win32") return;
+
+		using tempDir = TempDir.createSync("@gjc-lsp-home-root-guard-");
+		const canonicalHome = path.join(tempDir.path(), "home");
+		const lexicalHome = path.join(tempDir.path(), "home-link");
+		const cwd = path.join(canonicalHome, "workspace", "nested");
+		const userBinDir = path.join(lexicalHome, ".gjc", "bin");
+		const userServer = path.join(userBinDir, "typescript-language-server");
+		await fs.promises.mkdir(userBinDir.replace(lexicalHome, canonicalHome), { recursive: true });
+		await fs.promises.mkdir(cwd, { recursive: true });
+		await fs.promises.symlink(canonicalHome, lexicalHome);
+		await Bun.write(path.join(cwd, "package.json"), "{}\n");
+		await Bun.write(userServer, "");
+		const userLspmux = await writeLspmuxBinary(userBinDir);
+		vi.spyOn(os, "homedir").mockReturnValue(lexicalHome);
+		const which = vi
+			.spyOn(piUtils, "$which")
+			.mockImplementation(command => (command === "typescript-language-server" ? userServer : null));
+
+		expect(isProjectControlledPath(userServer, cwd)).toBe(false);
+		expect(loadConfig(cwd).servers["typescript-language-server"]?.resolvedCommand).toBe(fs.realpathSync(userServer));
+		resetLspmuxStateForTesting();
+		which.mockImplementation(command => (command === "lspmux" ? userLspmux : null));
+		expect((await detectLspmux(cwd)).available).toBe(true);
 	});
 
 	it("treats a repository ..bin child as contained while preserving external executables", async () => {
