@@ -9,6 +9,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { isEnoent, logger } from "@gajae-code/utils";
 import * as git from "../../../utils/git";
+import { validatePublicHttpUrl } from "../../../web/insane/url-guard";
 
 import type { MarketplaceCatalog, MarketplaceSourceType } from "./types";
 import { isValidNameSegment } from "./types";
@@ -194,6 +195,123 @@ export function parseMarketplaceCatalog(content: string, filePath: string): Mark
 
 /** Relative path from a marketplace root to its catalog file. */
 const CATALOG_RELATIVE_PATH = path.join(".claude-plugin", "marketplace.json");
+const URL_FETCH_TIMEOUT_MS = 60_000;
+const URL_FETCH_MAX_REDIRECTS = 5;
+const URL_FETCH_MAX_BYTES = 5 * 1024 * 1024;
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+function withAbortSignal<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+	if (signal.aborted) return Promise.reject(signal.reason);
+
+	const deferred = Promise.withResolvers<T>();
+	const abort = () => deferred.reject(signal.reason);
+	signal.addEventListener("abort", abort, { once: true });
+	operation.then(deferred.resolve, deferred.reject).finally(() => signal.removeEventListener("abort", abort));
+	return deferred.promise;
+}
+
+function cancelResponseBody(response: Response): void {
+	const body = response.body;
+	if (!body) return;
+
+	try {
+		void body.cancel().catch(() => {});
+	} catch {
+		// Preserve the policy error even if the transport cannot be cancelled.
+	}
+}
+
+function cancelReader(reader: { cancel(): Promise<void> }): void {
+	try {
+		void reader.cancel().catch(() => {});
+	} catch {
+		// Preserve the timeout or size-limit error even if the transport cannot be cancelled.
+	}
+}
+
+async function readBoundedResponseText(response: Response, source: string, signal: AbortSignal): Promise<string> {
+	const contentLength = response.headers.get("content-length");
+	if (contentLength !== null && /^\d+$/.test(contentLength)) {
+		const declaredBytes = Number(contentLength);
+		if (!Number.isSafeInteger(declaredBytes) || declaredBytes > URL_FETCH_MAX_BYTES) {
+			cancelResponseBody(response);
+			throw new Error(`Marketplace catalog from ${source} exceeds the maximum size of ${URL_FETCH_MAX_BYTES} bytes`);
+		}
+	}
+
+	if (!response.body) return "";
+
+	const reader = response.body.getReader();
+	const decoder = new TextDecoder();
+	const chunks: string[] = [];
+	let receivedBytes = 0;
+
+	try {
+		while (true) {
+			const { done, value } = await withAbortSignal(reader.read(), signal);
+			if (done) break;
+			receivedBytes += value.byteLength;
+			if (receivedBytes > URL_FETCH_MAX_BYTES) {
+				throw new Error(
+					`Marketplace catalog from ${source} exceeds the maximum size of ${URL_FETCH_MAX_BYTES} bytes`,
+				);
+			}
+			chunks.push(decoder.decode(value, { stream: true }));
+		}
+		chunks.push(decoder.decode());
+		return chunks.join("");
+	} catch (err) {
+		cancelReader(reader);
+		throw err;
+	} finally {
+		reader.releaseLock();
+	}
+}
+
+async function fetchMarketplaceCatalogUrl(source: string): Promise<string> {
+	const deadline = AbortSignal.timeout(URL_FETCH_TIMEOUT_MS);
+	let currentUrl = source;
+
+	try {
+		for (let redirectCount = 0; ; redirectCount++) {
+			const guard = await withAbortSignal(validatePublicHttpUrl(currentUrl), deadline);
+			if (!guard.ok) {
+				throw new Error(
+					`Refusing to fetch marketplace catalog from ${currentUrl}: target URL is not public HTTP(S): ${guard.reason}`,
+				);
+			}
+			currentUrl = guard.url.toString();
+
+			const response = await withAbortSignal(fetch(currentUrl, { redirect: "manual", signal: deadline }), deadline);
+			if (REDIRECT_STATUSES.has(response.status)) {
+				if (redirectCount >= URL_FETCH_MAX_REDIRECTS) {
+					cancelResponseBody(response);
+					throw new Error(`Too many redirects fetching marketplace catalog from ${source}`);
+				}
+				const location = response.headers.get("location");
+				if (!location) {
+					cancelResponseBody(response);
+					throw new Error(`Marketplace catalog redirect from ${currentUrl} is missing a Location header`);
+				}
+				cancelResponseBody(response);
+				currentUrl = new URL(location, currentUrl).toString();
+				continue;
+			}
+			if (!response.ok) {
+				cancelResponseBody(response);
+				throw new Error(
+					`Failed to fetch marketplace catalog from ${currentUrl}: HTTP ${response.status} ${response.statusText}`,
+				);
+			}
+			return await readBoundedResponseText(response, currentUrl, deadline);
+		}
+	} catch (err) {
+		if (deadline.aborted) {
+			throw new Error(`Timed out fetching marketplace catalog from ${source}`);
+		}
+		throw err;
+	}
+}
 
 /**
  * Expand a `~/...` path to an absolute path using os.homedir().
@@ -249,13 +367,7 @@ export async function fetchMarketplace(source: string, cacheDir: string): Promis
 	}
 
 	// type === "url"
-	const response = await fetch(source, { signal: AbortSignal.timeout(60_000) });
-	if (!response.ok) {
-		throw new Error(
-			`Failed to fetch marketplace catalog from ${source}: HTTP ${response.status} ${response.statusText}`,
-		);
-	}
-	const text = await response.text();
+	const text = await fetchMarketplaceCatalogUrl(source);
 	const catalog = parseMarketplaceCatalog(text, source);
 
 	const catalogDir = path.join(cacheDir, catalog.name);
