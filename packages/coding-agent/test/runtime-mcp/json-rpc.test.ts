@@ -1,0 +1,55 @@
+import { afterEach, describe, expect, it, vi } from "bun:test";
+import { logger } from "@gajae-code/utils";
+import { callMCP } from "../../src/runtime-mcp/json-rpc";
+
+describe("runtime MCP JSON-RPC diagnostics", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("redacts endpoint credentials from HTTP failure diagnostics without changing the request URL", async () => {
+		const endpoint =
+			"https://synthetic-user-marker:synthetic-password-marker@example.test/mcp?access_token=synthetic-query-marker&plain=synthetic-plain-marker#synthetic-fragment";
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 502 }));
+		const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => {});
+
+		await expect(callMCP(endpoint, "tools/list")).rejects.toThrow("MCP request failed: 502");
+
+		expect(fetchSpy).toHaveBeenCalledWith(endpoint, expect.any(Object));
+		const metadata = errorSpy.mock.calls[0]?.[1] as Record<string, unknown>;
+		const loggedEndpoint = String(metadata.url);
+		expect(loggedEndpoint).toContain("%3Credacted%3E");
+		expect(loggedEndpoint).not.toContain("synthetic-user-marker");
+		expect(loggedEndpoint).not.toContain("synthetic-password-marker");
+		expect(loggedEndpoint).not.toContain("synthetic-query-marker");
+		expect(loggedEndpoint).not.toContain("synthetic-plain-marker");
+		expect(loggedEndpoint).not.toContain("synthetic-fragment");
+	});
+
+	it("redacts endpoint credentials from response parse failure diagnostics", async () => {
+		const endpoint = "https://example.test/mcp?apiKey=synthetic-parse-marker";
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("not-json", { status: 200 }));
+		const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => {});
+
+		await expect(callMCP(endpoint, "tools/list")).rejects.toThrow("Failed to parse MCP response");
+
+		const metadata = errorSpy.mock.calls[0]?.[1] as Record<string, unknown>;
+		const loggedEndpoint = String(metadata.url);
+		expect(loggedEndpoint).toContain("apiKey=%3Credacted%3E");
+		expect(loggedEndpoint).not.toContain("synthetic-parse-marker");
+	});
+
+	it("fails closed when a malformed endpoint cannot be parsed for redaction", async () => {
+		const endpoint = "http://alpha-marker:beta-marker@[::1";
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 502 }));
+		const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => {});
+
+		await expect(callMCP(endpoint, "tools/list")).rejects.toThrow("MCP request failed: 502");
+
+		expect(fetchSpy).toHaveBeenCalledWith(endpoint, expect.any(Object));
+		const metadata = errorSpy.mock.calls[0]?.[1] as Record<string, unknown>;
+		expect(metadata.url).toBe("<redacted>");
+		expect(JSON.stringify(metadata)).not.toContain("alpha-marker");
+		expect(JSON.stringify(metadata)).not.toContain("beta-marker");
+	});
+});
