@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Restricted the local dashboard API to its exact loopback authority and same-origin browser requests, with POST-only bounded session sync.
+
 ## [0.5.1] - 2026-06-14
 
 - Version aligned with the 0.5.1 monorepo release; no functional changes in this package.
