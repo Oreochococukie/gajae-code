@@ -394,13 +394,13 @@ export const handleDocsRs: SpecialHandler = async (
 			chunks.push(value);
 			totalSize += value.length;
 			if (totalSize > MAX_BYTES) {
-				reader.cancel();
-				break;
+				await reader.cancel();
+				return null;
 			}
 		}
 
 		const compressed = Buffer.concat(chunks);
-		const jsonStr = gunzipSync(compressed).toString("utf-8");
+		const jsonStr = gunzipSync(compressed, { maxOutputLength: MAX_BYTES }).toString("utf-8");
 		crate_ = tryParseJson<RustdocCrate>(jsonStr);
 		if (crate_?.index) {
 			await writeCachedRustdocCrate(target, jsonStr);
