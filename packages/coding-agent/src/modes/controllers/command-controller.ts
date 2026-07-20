@@ -120,21 +120,34 @@ export class CommandController {
 	}
 
 	async handleShareCommand(): Promise<void> {
-		const tmpFile = path.join(os.tmpdir(), `${Snowflake.next()}.html`);
-		const cleanupTempFile = async () => {
-			try {
-				await fs.rm(tmpFile, { force: true });
-			} catch {
-				// Ignore cleanup errors
-			}
-		};
+		let tempDir: string | undefined;
 		try {
-			await this.ctx.session.exportToHtml(tmpFile);
-		} catch (error: unknown) {
-			this.ctx.showError(`Failed to export session: ${error instanceof Error ? error.message : "Unknown error"}`);
-			return;
+			let tmpFile: string;
+			try {
+				tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-share-"));
+				if (process.platform !== "win32") await fs.chmod(tempDir, 0o700);
+				tmpFile = path.join(tempDir, "session.html");
+				const file = await fs.open(tmpFile, "wx", 0o600);
+				await file.close();
+				await this.ctx.session.exportToHtml(tmpFile);
+				if (process.platform !== "win32") await fs.chmod(tmpFile, 0o600);
+			} catch (error: unknown) {
+				this.ctx.showError(`Failed to export session: ${error instanceof Error ? error.message : "Unknown error"}`);
+				return;
+			}
+			await this.#shareExport(tmpFile);
+		} finally {
+			if (tempDir) {
+				try {
+					await fs.rm(tempDir, { recursive: true, force: true });
+				} catch {
+					// Ignore cleanup errors
+				}
+			}
 		}
+	}
 
+	async #shareExport(tmpFile: string): Promise<void> {
 		try {
 			const customShare = await loadCustomShare();
 			if (customShare) {
@@ -149,7 +162,6 @@ export class CommandController {
 					this.ctx.editorContainer.clear();
 					this.ctx.editorContainer.addChild(this.ctx.editor);
 					this.ctx.ui.setFocus(this.ctx.editor);
-					await cleanupTempFile();
 				};
 
 				try {
@@ -176,7 +188,6 @@ export class CommandController {
 				}
 			}
 		} catch (err) {
-			await cleanupTempFile();
 			this.ctx.showError(err instanceof Error ? err.message : String(err));
 			return;
 		}
@@ -184,12 +195,10 @@ export class CommandController {
 		try {
 			const authResult = await $`gh auth status`.quiet().nothrow();
 			if (authResult.exitCode !== 0) {
-				await cleanupTempFile();
 				this.ctx.showError("GitHub CLI is not logged in. Run 'gh auth login' first.");
 				return;
 			}
 		} catch {
-			await cleanupTempFile();
 			this.ctx.showError("GitHub CLI (gh) is not installed. Install it from https://cli.github.com/");
 			return;
 		}
@@ -205,7 +214,6 @@ export class CommandController {
 			this.ctx.editorContainer.clear();
 			this.ctx.editorContainer.addChild(this.ctx.editor);
 			this.ctx.ui.setFocus(this.ctx.editor);
-			await cleanupTempFile();
 		};
 
 		loader.onAbort = () => {
