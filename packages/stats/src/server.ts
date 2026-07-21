@@ -31,24 +31,6 @@ const IS_BUN_COMPILED =
 	import.meta.url.includes("~BUN") ||
 	import.meta.url.includes("%7EBUN");
 
-interface SyncResult {
-	processed: number;
-	files: number;
-}
-
-export interface StatsServerOptions {
-	getDashboardStats?: (range?: string | null) => Promise<DashboardStats>;
-	syncAllSessions?: () => Promise<SyncResult>;
-	getTotalMessageCount?: () => Promise<number>;
-}
-
-interface ApiContext {
-	getDashboardStats: (range?: string | null) => Promise<DashboardStats>;
-	syncAllSessions: () => Promise<SyncResult>;
-	getTotalMessageCount: () => Promise<number>;
-	syncInProgress: boolean;
-}
-
 const COMPILED_CLIENT_DIR_ROOT = path.join(os.tmpdir(), "gjc-stats-client");
 let compiledClientDirPromise: Promise<string> | null = null;
 
@@ -182,6 +164,24 @@ const ensureClientBuild = async () => {
 
 	await Bun.write(path.join(STATIC_DIR, "index.html"), indexHtml);
 };
+
+interface SyncResult {
+	processed: number;
+	files: number;
+}
+
+export interface StatsServerOptions {
+	getDashboardStats?: (range?: string | null) => Promise<DashboardStats>;
+	syncAllSessions?: () => Promise<SyncResult>;
+	getTotalMessageCount?: () => Promise<number>;
+}
+
+interface ApiContext {
+	getDashboardStats: (range?: string | null) => Promise<DashboardStats>;
+	syncAllSessions: () => Promise<SyncResult>;
+	getTotalMessageCount: () => Promise<number>;
+	syncInProgress: boolean;
+}
 
 /**
  * Handle API requests.
