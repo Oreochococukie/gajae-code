@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it, vi } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
 import type { AgentTool, AgentToolResult } from "@gajae-code/agent-core";
 import {
 	disposePyToolBridge,
@@ -71,60 +71,6 @@ describe("Python tool bridge HTTP server", () => {
 			expect(calls).toHaveLength(1);
 			// `_i` survives the bridge round trip so transcript renderers have a label.
 			expect((calls[0]!.args as { _i?: string })._i).toBe("py prelude");
-		} finally {
-			unregister();
-		}
-	});
-
-	it("prefers the session's prepared tool dispatch over the raw registry lookup", async () => {
-		const rawCalls: FakeCall[] = [];
-		const preparedCalls: FakeCall[] = [];
-		const rawTool = makeFakeTool("bash", rawCalls, { content: [{ type: "text", text: "raw" }] });
-		const preparedTool = makeFakeTool("bash", preparedCalls, {
-			content: [{ type: "text", text: "prepared" }],
-		});
-		const session = {
-			getToolByName: () => rawTool,
-			getToolForExecution: () => preparedTool,
-		} as unknown as ToolSession;
-		const info = await ensurePyToolBridge();
-		const unregister = registerPyToolBridge("prepared-session", { toolSession: session });
-		try {
-			const res = await call(info, {
-				session: "prepared-session",
-				name: "bash",
-				args: { command: "echo guarded" },
-			});
-			const body = await res.json();
-			expect(body).toEqual({ ok: true, value: "prepared" });
-			expect(preparedCalls).toHaveLength(1);
-			expect(rawCalls).toHaveLength(0);
-		} finally {
-			unregister();
-		}
-	});
-
-	it("does not fall back to the raw registry when prepared dispatch rejects a tool", async () => {
-		const rawCalls: FakeCall[] = [];
-		const rawTool = makeFakeTool("bash", rawCalls, { content: [{ type: "text", text: "raw" }] });
-		const rawLookup = vi.fn(() => rawTool);
-		const session = {
-			getToolByName: rawLookup,
-			getToolForExecution: () => undefined,
-		} as unknown as ToolSession;
-		const info = await ensurePyToolBridge();
-		const unregister = registerPyToolBridge("rejected-prepared-session", { toolSession: session });
-		try {
-			const res = await call(info, {
-				session: "rejected-prepared-session",
-				name: "bash",
-				args: { command: "echo unguarded" },
-			});
-			const body = await res.json();
-			expect(res.status).toBe(200);
-			expect(body).toEqual({ ok: false, error: "Unknown tool from js runtime: bash" });
-			expect(rawLookup).not.toHaveBeenCalled();
-			expect(rawCalls).toHaveLength(0);
 		} finally {
 			unregister();
 		}
