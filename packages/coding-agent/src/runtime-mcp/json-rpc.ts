@@ -7,7 +7,7 @@
 // biome-ignore assist/source/organizeImports: Keep independent MCP security imports on separate merge anchors.
 import { cancelMCPStream, MCP_HTTP_TIMEOUT_MS, MCP_MAX_CONTENT_BYTES, readMCPResponseText } from "./content-limits";
 import { logger } from "@gajae-code/utils";
-import { redactMCPEndpoint } from "./redaction";
+import { redactMCPDiagnosticValue, redactMCPEndpoint } from "./redaction";
 
 /** Parse SSE response format (lines starting with "data: ") */
 export function parseSSE(text: string): unknown {
@@ -83,7 +83,7 @@ export async function callMCP<T = unknown>(
 	if (!response.ok) {
 		cancelMCPStream(response.body);
 		const errorMsg = `MCP request failed: ${response.status} ${response.statusText}`;
-		logger.error(errorMsg, { url: redactMCPEndpoint(url), method, params });
+		logger.error(errorMsg, { url: redactMCPEndpoint(url), method, params: redactMCPDiagnosticValue(params) });
 		throw new Error(errorMsg);
 	}
 

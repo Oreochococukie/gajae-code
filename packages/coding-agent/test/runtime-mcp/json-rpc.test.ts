@@ -26,6 +26,26 @@ describe("runtime MCP JSON-RPC diagnostics", () => {
 		expect(loggedEndpoint).not.toContain("synthetic-fragment");
 	});
 
+	it("redacts sensitive JSON-RPC parameters from HTTP failure diagnostics", async () => {
+		const secret = "synthetic-parameter-secret";
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 502 }));
+		const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => {});
+
+		await expect(
+			callMCP("https://example.test/mcp", "tools/call", {
+				access_token: secret,
+				nested: { clientSecret: secret, ordinary: "safe" },
+			}),
+		).rejects.toThrow("MCP request failed: 502");
+
+		const metadata = errorSpy.mock.calls[0]?.[1] as Record<string, unknown>;
+		expect(JSON.stringify(metadata)).not.toContain(secret);
+		expect(metadata.params).toEqual({
+			access_token: "<redacted>",
+			nested: { clientSecret: "<redacted>", ordinary: "safe" },
+		});
+	});
+
 	it("redacts endpoint credentials from response parse failure diagnostics", async () => {
 		const endpoint = "https://example.test/mcp?apiKey=synthetic-parse-marker";
 		vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("not-json", { status: 200 }));
