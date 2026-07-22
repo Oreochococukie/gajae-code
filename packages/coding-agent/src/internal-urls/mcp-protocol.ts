@@ -2,22 +2,71 @@ import { MCPManager } from "../runtime-mcp/manager";
 import type { MCPResourceReadResult } from "../runtime-mcp/types";
 import type { InternalResource, InternalUrl, ProtocolHandler } from "./types";
 
-function escapeRegex(text: string): string {
-	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const MAX_MCP_RESOURCE_URI_CHARS = 16_384;
+const MAX_MCP_URI_TEMPLATE_CHARS = 8_192;
+const MAX_MCP_URI_TEMPLATE_EXPRESSIONS = 32;
+
+interface CompiledUriTemplate {
+	literalSegments: string[];
+	literalChars: number;
+	expressionCount: number;
+}
+
+function compileUriTemplate(uriTemplate: string): CompiledUriTemplate | undefined {
+	if (uriTemplate.length > MAX_MCP_URI_TEMPLATE_CHARS) return undefined;
+
+	const literalSegments: string[] = [];
+	let expressionCount = 0;
+	let literalChars = 0;
+	let segmentStart = 0;
+	let scanPosition = 0;
+	while (scanPosition < uriTemplate.length) {
+		const expressionStart = uriTemplate.indexOf("{", scanPosition);
+		if (expressionStart < 0) break;
+		const expressionEnd = uriTemplate.indexOf("}", expressionStart + 1);
+		if (expressionEnd < 0) break;
+		if (expressionEnd === expressionStart + 1) {
+			scanPosition = expressionStart + 1;
+			continue;
+		}
+		expressionCount++;
+		if (expressionCount > MAX_MCP_URI_TEMPLATE_EXPRESSIONS) return undefined;
+		const segment = uriTemplate.slice(segmentStart, expressionStart);
+		literalSegments.push(segment);
+		literalChars += segment.length;
+		segmentStart = expressionEnd + 1;
+		scanPosition = segmentStart;
+	}
+	const finalSegment = uriTemplate.slice(segmentStart);
+	literalSegments.push(finalSegment);
+	literalChars += finalSegment.length;
+	return { literalSegments, literalChars, expressionCount };
+}
+
+function matchesUriTemplate(uri: string, template: CompiledUriTemplate): boolean {
+	const { literalSegments, expressionCount } = template;
+	if (expressionCount === 0) return uri === literalSegments[0];
+	if (!uri.startsWith(literalSegments[0])) return false;
+
+	let cursor = literalSegments[0].length;
+	for (let index = 1; index < literalSegments.length - 1; index++) {
+		const segment = literalSegments[index];
+		const matchIndex = uri.indexOf(segment, cursor);
+		if (matchIndex < 0) return false;
+		cursor = matchIndex + segment.length;
+	}
+
+	const suffix = literalSegments.at(-1) ?? "";
+	return suffix.length === 0 || (uri.endsWith(suffix) && uri.length - suffix.length >= cursor);
 }
 
 function getUriTemplateMatchScore(
 	uri: string,
 	uriTemplate: string,
 ): { literalChars: number; expressionCount: number } | undefined {
-	const expressionPattern = /\{[^}]+\}/g;
-	const literalSegments = uriTemplate.split(expressionPattern);
-	const expressionCount = (uriTemplate.match(expressionPattern) ?? []).length;
-	const pattern = literalSegments.map(escapeRegex).join("(.*?)");
-	const regex = new RegExp(`^${pattern}$`);
-	if (!regex.test(uri)) return undefined;
-	const literalChars = literalSegments.reduce((total, segment) => total + segment.length, 0);
-	return { literalChars, expressionCount };
+	const template = compileUriTemplate(uriTemplate);
+	if (!template || !matchesUriTemplate(uri, template)) return undefined;
+	return { literalChars: template.literalChars, expressionCount: template.expressionCount };
 }
 
 function extractResourceUri(url: InternalUrl): string {
@@ -111,6 +160,9 @@ export class McpProtocolHandler implements ProtocolHandler {
 		}
 
 		const uri = extractResourceUri(url);
+		if (uri.length > MAX_MCP_RESOURCE_URI_CHARS) {
+			throw new Error("MCP resource URI exceeds the 16384-character limit.");
+		}
 		const targetServer = resolveTargetServer(mcpManager, uri);
 		if (!targetServer) {
 			throw new Error(
