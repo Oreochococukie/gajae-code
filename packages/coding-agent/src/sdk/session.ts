@@ -1540,6 +1540,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			goalToolAllowedOps: options.goalToolAllowedOps,
 			discoverableToolAllowedNames: options.discoverableToolAllowedNames,
 			getToolByName: name => session?.getToolByName(name),
+			getToolForExecution: name => session?.getToolForExecution(name),
 			agentRegistry,
 			getSessionSpawns: () => options.spawns ?? "*",
 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
