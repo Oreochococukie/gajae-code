@@ -67,6 +67,11 @@ pub enum InputError {
 	UnknownKey(String),
 }
 
+pub(super) enum KeypressOutcome {
+	Completed,
+	Cancelled,
+}
+
 impl From<CoordError> for InputError {
 	fn from(value: CoordError) -> Self {
 		Self::Coord(value)
@@ -261,12 +266,33 @@ impl<S: EventSink> InputController<S> {
 	/// Returns [`InputError::UnknownKey`] when a name is unrecognized; keys
 	/// before the failure have already been sent.
 	pub fn keypress(&mut self, keys: &[String]) -> Result<(), InputError> {
+		self.keypress_abortable(keys, &|| false).map(|_| ())
+	}
+
+	/// Press and release each named key in order, polling `cancelled` before
+	/// every key-down and after its matching key-up. A cancellation observed
+	/// after key-down still allows the matching key-up, then stops the action.
+	///
+	/// # Errors
+	/// Returns [`InputError::UnknownKey`] when a name is unrecognized. Keys
+	/// before the failure have already been sent.
+	pub(super) fn keypress_abortable(
+		&mut self,
+		keys: &[String],
+		cancelled: &dyn Fn() -> bool,
+	) -> Result<KeypressOutcome, InputError> {
 		for name in keys {
+			if cancelled() {
+				return Ok(KeypressOutcome::Cancelled);
+			}
 			let code = key_code_for(name).ok_or_else(|| InputError::UnknownKey(name.clone()))?;
 			self.sink.key(code, true);
 			self.sink.key(code, false);
+			if cancelled() {
+				return Ok(KeypressOutcome::Cancelled);
+			}
 		}
-		Ok(())
+		Ok(KeypressOutcome::Completed)
 	}
 
 	/// Release every held mouse button (idempotent). Run on abort/error paths

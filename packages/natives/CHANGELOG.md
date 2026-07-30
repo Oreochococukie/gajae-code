@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Native computer keypress sequences now stop before the next key when suspension or cancellation latches, while still releasing any key already admitted; suspension keeps precedence across the pre-dispatch race.
+
 ## [0.12.4] - 2026-07-30
 
 ## [0.12.3] - 2026-07-30

@@ -15,7 +15,7 @@
 
 use super::{
 	coords::{CoordError, NormalizedDisplay},
-	input::{EventSink, InputController, InputError, MouseButton},
+	input::{EventSink, InputController, InputError, KeypressOutcome, MouseButton},
 	supervisor::Supervisor,
 };
 
@@ -202,16 +202,27 @@ where
 {
 	gate(action, supervisor, perms, display_ctx, expected_epoch)?;
 	if cancelled() {
-		return Err(ExecError::Cancelled);
+		return Err(if supervisor.is_suspended() {
+			ExecError::Suspended
+		} else {
+			ExecError::Cancelled
+		});
 	}
 
-	let result = dispatch(action, display, controller, cancelled);
+	let action_cancelled = || cancelled() || supervisor.is_suspended();
+	let result = dispatch(action, display, controller, &action_cancelled);
+	let suspended = supervisor.is_suspended();
 
 	// release_all on any failure, or if the kill-switch latched mid-action.
-	if result.is_err() || supervisor.is_suspended() {
+	if result.is_err() || suspended {
 		controller.release_all();
 	}
-	result
+
+	match result {
+		Ok(()) if suspended => Err(ExecError::Suspended),
+		Err(ExecError::Cancelled) if suspended => Err(ExecError::Suspended),
+		other => other,
+	}
 }
 
 fn dispatch<S: EventSink>(
@@ -238,7 +249,10 @@ fn dispatch<S: EventSink>(
 			controller.type_text(text);
 			Ok(())
 		},
-		InputAction::Keypress { keys } => controller.keypress(keys).map_err(Into::into),
+		InputAction::Keypress { keys } => match controller.keypress_abortable(keys, cancelled)? {
+			KeypressOutcome::Completed => Ok(()),
+			KeypressOutcome::Cancelled => Err(ExecError::Cancelled),
+		},
 		InputAction::Wait { ms } => wait_abortable(*ms, cancelled),
 	}
 }
@@ -258,6 +272,8 @@ fn wait_abortable(ms: u64, cancelled: &dyn Fn() -> bool) -> Result<(), ExecError
 
 #[cfg(test)]
 mod tests {
+	use std::cell::Cell;
+
 	use super::{DisplayContext, ExecError, InputAction, PermissionGate, execute_input};
 	use crate::computer::{
 		coords::{LogicalPoint, NormalizedDisplay},
@@ -306,6 +322,36 @@ mod tests {
 
 		fn key(&mut self, code: u16, down: bool) {
 			self.ops.push(SinkOp::Key { code, down });
+		}
+	}
+
+	struct LatchingSink<'a> {
+		latch: &'a dyn Fn(),
+		ops:   Vec<SinkOp>,
+	}
+
+	impl EventSink for LatchingSink<'_> {
+		fn move_cursor(&mut self, to: LogicalPoint) {
+			self.ops.push(SinkOp::Move(to));
+		}
+
+		fn mouse_button(&mut self, at: LogicalPoint, button: MouseButton, down: bool) {
+			self.ops.push(SinkOp::Button { at, button, down });
+		}
+
+		fn scroll(&mut self, dx: f64, dy: f64) {
+			self.ops.push(SinkOp::Scroll { dx, dy });
+		}
+
+		fn type_unicode(&mut self, text: &str) {
+			self.ops.push(SinkOp::TypeUnicode(text.to_string()));
+		}
+
+		fn key(&mut self, code: u16, down: bool) {
+			self.ops.push(SinkOp::Key { code, down });
+			if down {
+				(self.latch)();
+			}
 		}
 	}
 
@@ -439,10 +485,89 @@ mod tests {
 		assert!(res.is_ok());
 		assert_eq!(ops, vec![SinkOp::TypeUnicode("hi".to_string())]);
 
-		let (res2, ops2) =
-			run(&InputAction::Keypress { keys: vec!["enter".to_string()] }, &sup, true, None, 0);
+		let (res2, ops2) = run(
+			&InputAction::Keypress { keys: vec!["enter".to_string(), "tab".to_string()] },
+			&sup,
+			true,
+			None,
+			0,
+		);
 		assert!(res2.is_ok());
-		assert_eq!(ops2.len(), 2); // key down + up
+		assert_eq!(ops2, vec![
+			SinkOp::Key { code: 36, down: true },
+			SinkOp::Key { code: 36, down: false },
+			SinkOp::Key { code: 48, down: true },
+			SinkOp::Key { code: 48, down: false },
+		]);
+	}
+
+	#[test]
+	fn suspension_during_keypress_releases_current_key_and_stops_before_next() {
+		let sup = live_supervisor();
+		let latch = || sup.trigger_stop();
+		let mut controller = InputController::new(LatchingSink { latch: &latch, ops: Vec::new() });
+		let result = execute_input(
+			&InputAction::Keypress { keys: vec!["enter".to_string(), "tab".to_string()] },
+			&sup,
+			&FakePerms { granted: true },
+			&FakeDisplay { epoch: 0 },
+			None,
+			&display(),
+			&mut controller,
+			&never_cancel(),
+		);
+
+		assert_eq!(result, Err(ExecError::Suspended));
+		assert_eq!(controller.into_sink().ops, vec![
+			SinkOp::Key { code: 36, down: true },
+			SinkOp::Key { code: 36, down: false },
+		]);
+	}
+
+	#[test]
+	fn suspension_during_initial_cancellation_probe_takes_precedence() {
+		let sup = live_supervisor();
+		let mut controller = InputController::new(RecordingSink::default());
+		let result = execute_input(
+			&InputAction::Keypress { keys: vec!["enter".to_string(), "tab".to_string()] },
+			&sup,
+			&FakePerms { granted: true },
+			&FakeDisplay { epoch: 0 },
+			None,
+			&display(),
+			&mut controller,
+			&|| {
+				sup.trigger_stop();
+				true
+			},
+		);
+
+		assert_eq!(result, Err(ExecError::Suspended));
+		assert!(controller.into_sink().ops.is_empty());
+	}
+
+	#[test]
+	fn cancellation_during_keypress_releases_current_key_and_stops_before_next() {
+		let sup = live_supervisor();
+		let cancelled = Cell::new(false);
+		let latch = || cancelled.set(true);
+		let mut controller = InputController::new(LatchingSink { latch: &latch, ops: Vec::new() });
+		let result = execute_input(
+			&InputAction::Keypress { keys: vec!["enter".to_string(), "tab".to_string()] },
+			&sup,
+			&FakePerms { granted: true },
+			&FakeDisplay { epoch: 0 },
+			None,
+			&display(),
+			&mut controller,
+			&|| cancelled.get(),
+		);
+
+		assert_eq!(result, Err(ExecError::Cancelled));
+		assert_eq!(controller.into_sink().ops, vec![
+			SinkOp::Key { code: 36, down: true },
+			SinkOp::Key { code: 36, down: false },
+		]);
 	}
 
 	#[test]
