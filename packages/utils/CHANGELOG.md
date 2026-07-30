@@ -9,6 +9,10 @@
 
 - Retryable responses discarded before another fetch attempt now begin body cancellation without blocking retry progress on transport cleanup, releasing buffered response data without consuming responses returned to callers.
 
+### Fixed
+
+- `fetchWithRetry` now normalizes the final response and network-error delay immediately before scheduling, so a scheduled value that remains negative or non-finite after capping becomes an immediate retry instead of reaching the timer runtime; valid delays and the existing hint-over-cap fail-fast path retain their behavior.
+
 ## [0.12.4] - 2026-07-30
 
 ## [0.12.3] - 2026-07-30

@@ -87,7 +87,8 @@ export interface FetchWithRetryOptions extends RequestInit {
 	/**
 	 * Fallback delay schedule when no server hint is present. Number, array
 	 * (indexed by attempt, clamped to last), or function. Default exponential
-	 * `500ms * 2 ** attempt` capped at `maxDelayMs`.
+	 * `500ms * 2 ** attempt` capped at `maxDelayMs`. Values that remain negative
+	 * or non-finite after capping retry immediately.
 	 */
 	defaultDelayMs?: number | readonly number[] | ((attempt: number) => number);
 	/**
@@ -142,7 +143,8 @@ export async function fetchWithRetry(
 			if (signal?.aborted) throw new Error("Request was aborted");
 			const wrapped = wrapNetworkError(error);
 			if (attempt + 1 >= maxAttempts) throw wrapped;
-			await scheduler.wait(resolveDefaultDelay(defaultDelayMs, attempt, maxDelayMs), { signal });
+			const delayMs = normalizeRetryDelay(resolveDefaultDelay(defaultDelayMs, attempt), maxDelayMs);
+			await scheduler.wait(delayMs, { signal });
 			continue;
 		}
 
@@ -152,7 +154,7 @@ export async function fetchWithRetry(
 		const hint = extractRetryHint(response, await response.clone().text());
 		if (hint !== undefined && hint > maxDelayMs) return response;
 
-		const delayMs = Math.min(hint ?? resolveDefaultDelay(defaultDelayMs, attempt, maxDelayMs), maxDelayMs);
+		const delayMs = normalizeRetryDelay(hint ?? resolveDefaultDelay(defaultDelayMs, attempt), maxDelayMs);
 		void response.body?.cancel().catch(() => undefined);
 		await scheduler.wait(delayMs, { signal });
 	}
@@ -184,15 +186,16 @@ function wrapNetworkError(error: unknown): Error {
 	return new Error(String(error));
 }
 
-function resolveDefaultDelay(
-	option: FetchWithRetryOptions["defaultDelayMs"],
-	attempt: number,
-	maxDelayMs: number,
-): number {
-	if (option === undefined) return Math.min(500 * 2 ** attempt, maxDelayMs);
-	if (typeof option === "number") return Math.min(option, maxDelayMs);
-	if (typeof option === "function") return Math.min(option(attempt), maxDelayMs);
-	return Math.min(option[Math.min(attempt, option.length - 1)] ?? 0, maxDelayMs);
+function resolveDefaultDelay(option: FetchWithRetryOptions["defaultDelayMs"], attempt: number): number {
+	if (option === undefined) return 500 * 2 ** attempt;
+	if (typeof option === "number") return option;
+	if (typeof option === "function") return option(attempt);
+	return option[Math.min(attempt, option.length - 1)] ?? 0;
+}
+
+function normalizeRetryDelay(delayMs: number, maxDelayMs: number): number {
+	const cappedDelayMs = Math.min(delayMs, maxDelayMs);
+	return Number.isFinite(cappedDelayMs) && cappedDelayMs >= 0 ? cappedDelayMs : 0;
 }
 
 /**
