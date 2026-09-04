@@ -110,6 +110,11 @@ const PREAUTH_HANDSHAKE_TASKS: usize = 16;
 /// admission.
 const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(2);
 
+/// Delay before retrying a listener after a transient accept failure. In
+/// particular, this prevents an `EMFILE`/`ENFILE` loop from starving
+/// handshake and connection cleanup.
+const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(10);
+
 /// Grace period for connection tasks to observe server cancellation before
 /// forced abort.
 const CONNECTION_JOIN_GRACE: Duration = Duration::from_secs(1);
@@ -1666,6 +1671,11 @@ pub async fn start(config: ServerConfig) -> std::io::Result<ServerHandle> {
 async fn accept_loop(listener: TcpListener, state: Arc<ServerState>, cancel: CancellationToken) {
 	let mut connections = JoinSet::new();
 	let mut handshakes: JoinSet<Option<ConnectionWebSocket>> = JoinSet::new();
+	// Keep one descriptor available so an `EMFILE` accept failure can still
+	// drain one queued socket and return the listener to a state where it can
+	// make progress once a handshake task releases its descriptor.
+	let null_device = if cfg!(windows) { "NUL" } else { "/dev/null" };
+	let mut accept_spare = std::fs::File::open(null_device).ok();
 	loop {
 		tokio::select! {
 			() = cancel.cancelled() => break,
@@ -1678,17 +1688,94 @@ async fn accept_loop(listener: TcpListener, state: Arc<ServerState>, cancel: Can
 				}
 			},
 			accepted = listener.accept() => {
-				let Ok((stream, _peer)) = accepted else { continue };
-				if handshakes.len() >= PREAUTH_HANDSHAKE_TASKS {
-					drop(stream);
-					continue;
+				match accepted {
+					Ok((stream, _peer)) => {
+						if handshakes.len() >= PREAUTH_HANDSHAKE_TASKS {
+							match handshakes.try_join_next() {
+								Some(Ok(Some(ws))) => {
+									connections.spawn(handle_conn(ws, Arc::clone(&state), cancel.clone()));
+								},
+								Some(Ok(None) | Err(_)) => {},
+								None => {
+									drop(stream);
+									continue;
+								},
+							}
+						}
+						handshakes.spawn(handshake_conn(stream, Arc::clone(&state), cancel.clone()));
+					},
+					Err(error) if is_fd_exhaustion(&error) => {
+						if !drain_fd_exhausted_accept(
+							&listener,
+							&cancel,
+							null_device,
+							&mut accept_spare,
+						)
+						.await
+						{
+							break;
+			}
+					},
+					Err(_) => {
+						if !backoff_after_accept_error(&cancel).await {
+							break;
+			}
+					},
 				}
-				handshakes.spawn(handshake_conn(stream, Arc::clone(&state), cancel.clone()));
 			}
 		}
 	}
 	cancel.cancel();
 	join_connection_tasks(&mut handshakes, &mut connections).await;
+}
+
+async fn drain_fd_exhausted_accept(
+	listener: &TcpListener,
+	cancel: &CancellationToken,
+	null_device: &str,
+	accept_spare: &mut Option<std::fs::File>,
+) -> bool {
+	// With no spare descriptor, accepting another socket would fail repeatedly
+	// and leave queued clients ahead of future valid upgrades. Close the reserve,
+	// accept one socket for immediate disposal, then recreate the reserve.
+	drop(accept_spare.take());
+	let drained = tokio::select! {
+		() = cancel.cancelled() => return false,
+		accepted = listener.accept() => accepted,
+	};
+	match drained {
+		Ok((stream, _peer)) => drop(stream),
+		Err(_) => {
+			if !backoff_after_accept_error(cancel).await {
+				return false;
+			}
+		},
+	}
+	*accept_spare = std::fs::File::open(null_device).ok();
+	true
+}
+
+async fn backoff_after_accept_error(cancel: &CancellationToken) -> bool {
+	tokio::select! {
+		() = cancel.cancelled() => false,
+		() = sleep(ACCEPT_ERROR_BACKOFF) => true,
+	}
+}
+
+#[cfg(unix)]
+fn is_fd_exhaustion(error: &std::io::Error) -> bool {
+	matches!(error.raw_os_error(), Some(code) if code == libc::EMFILE || code == libc::ENFILE)
+}
+
+#[cfg(windows)]
+fn is_fd_exhaustion(error: &std::io::Error) -> bool {
+	// WSAEMFILE (the Winsock form of ERROR_TOO_MANY_OPEN_FILES).
+	matches!(error.raw_os_error(), Some(4 | 10024))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn is_fd_exhaustion(_error: &std::io::Error) -> bool {
+	false
 }
 
 type ConnectionWebSocket = tokio_tungstenite::WebSocketStream<TcpStream>;
@@ -2386,6 +2473,8 @@ pub(crate) fn tokens_match(a: &str, b: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+	use std::net::Ipv6Addr;
+
 	use futures_util::SinkExt;
 	use tokio::io::{AsyncReadExt, AsyncWriteExt};
 	use tokio_tungstenite::connect_async;
@@ -3164,6 +3253,22 @@ mod tests {
 		assert_ne!(handle.addr().port(), 0);
 		assert!(handle.addr().ip().is_loopback());
 		handle.stop();
+	}
+
+	#[tokio::test]
+	async fn start_binds_ipv6_loopback_when_available() {
+		let mut config = ServerConfig::new("ipv6", "secret");
+		config.host = IpAddr::V6(Ipv6Addr::LOCALHOST);
+		let handle = match start(config).await {
+			Ok(handle) => handle,
+			Err(error) if error.kind() == std::io::ErrorKind::AddrNotAvailable => return,
+			Err(error) => panic!("IPv6 loopback bind failed: {error}"),
+		};
+		assert!(handle.addr().ip().is_loopback());
+		assert!(handle.addr().ip().is_ipv6());
+		let mut ws = connect(&handle, "secret").await;
+		assert!(matches!(next_server_msg(&mut ws).await, ServerMessage::Hello(_)));
+		handle.stop_and_wait().await;
 	}
 
 	#[tokio::test]
