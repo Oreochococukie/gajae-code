@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Notification WebSocket admission now bounds incomplete handshakes to 16 concurrent tasks and expires them after two seconds without limiting authenticated clients.
+
 ## [0.16.3] - 2026-09-04
 
 ## [0.16.2] - 2026-09-04
