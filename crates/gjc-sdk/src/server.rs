@@ -652,6 +652,48 @@ struct ServerState {
 	connection_sequence: AtomicU64,
 }
 
+struct ConnectionCleanup {
+	state:         Arc<ServerState>,
+	connection_id: String,
+	generation:    String,
+}
+
+impl ConnectionCleanup {
+	const fn new(state: Arc<ServerState>, connection_id: String, generation: String) -> Self {
+		Self { state, connection_id, generation }
+	}
+}
+
+impl Drop for ConnectionCleanup {
+	fn drop(&mut self) {
+		cleanup_connection(&self.state, &self.connection_id, &self.generation);
+	}
+}
+
+fn cleanup_connection(state: &ServerState, connection_id: &str, generation: &str) {
+	if state.connections.lock().remove(connection_id).is_none() {
+		return;
+	}
+	let _ = state.close_tx.send(connection_id.to_owned());
+	let mut acks = state.acks.lock();
+	let ids: Vec<_> = acks
+		.pending
+		.iter()
+		.filter(|(_, pending)| {
+			pending
+				.origin
+				.as_ref()
+				.is_some_and(|(origin_id, origin_generation)| {
+					origin_id == connection_id && origin_generation == generation
+				})
+		})
+		.map(|(id, _)| id.clone())
+		.collect();
+	for id in ids {
+		acks.finish_disconnect(&id);
+	}
+}
+
 /// An authenticated inbound message paired with its server-assigned connection
 /// id.
 #[derive(Debug)]
@@ -1884,6 +1926,8 @@ async fn handle_conn(ws: ConnectionWebSocket, state: Arc<ServerState>, cancel: C
 			queued_directed_frames: Arc::clone(&queued_directed_frames),
 			tx:                     direct_tx.clone(),
 		});
+	let _cleanup =
+		ConnectionCleanup::new(Arc::clone(&state), connection_id.clone(), generation.clone());
 
 	// Replay readiness before ask presentation; the ask itself is tailored by the
 	// connection task after insertion and never written before ClientHello policy.
@@ -1893,7 +1937,6 @@ async fn handle_conn(ws: ConnectionWebSocket, state: Arc<ServerState>, cancel: C
 			.await
 			.is_err()
 	{
-		state.connections.lock().remove(&connection_id);
 		return;
 	}
 	let _ = direct_tx.send(DirectCommand::ReevaluateAsk);
@@ -2094,21 +2137,6 @@ async fn handle_conn(ws: ConnectionWebSocket, state: Arc<ServerState>, cancel: C
 				}
 			},
 		}
-	}
-	state.connections.lock().remove(&connection_id);
-	let _ = state.close_tx.send(connection_id.clone());
-	let ids: Vec<_> = state
-		.acks
-		.lock()
-		.pending
-		.iter()
-		.filter(|(_, pending)| {
-			pending.origin.as_ref() == Some(&(connection_id.clone(), generation.clone()))
-		})
-		.map(|(id, _)| id.clone())
-		.collect();
-	for id in ids {
-		state.acks.lock().finish_disconnect(&id);
 	}
 }
 
@@ -3000,6 +3028,41 @@ mod tests {
 		.expect("connection joins must remain bounded");
 		assert!(handshakes.is_empty());
 		assert!(connections.is_empty());
+	}
+
+	#[tokio::test]
+	async fn aborted_connection_task_removes_state_and_notifies_close() {
+		let handle = start(ServerConfig::new("s", "secret")).await.unwrap();
+		let mut close_rx = handle.take_close_receiver().expect("close receiver");
+		let (tx, _rx) = mpsc::unbounded_channel();
+		let connection_id = "aborted-connection".to_owned();
+		handle
+			.state
+			.connections
+			.lock()
+			.insert(connection_id.clone(), Connection {
+				generation: "generation".into(),
+				capabilities: Vec::new(),
+				negotiation: Negotiation::Negotiated,
+				delivered: None,
+				queued_directed_frames: Arc::new(AtomicUsize::new(0)),
+				tx,
+			});
+
+		let cleanup = ConnectionCleanup::new(
+			Arc::clone(&handle.state),
+			connection_id.clone(),
+			"generation".into(),
+		);
+		let task = tokio::spawn(async move {
+			let _cleanup = cleanup;
+			std::future::pending::<()>().await;
+		});
+		task.abort();
+		assert!(task.await.expect_err("aborted task").is_cancelled());
+		assert!(!handle.state.connections.lock().contains_key(&connection_id));
+		assert_eq!(close_rx.recv().await.as_deref(), Some("aborted-connection"));
+		handle.stop_and_wait().await;
 	}
 
 	fn ask(id: &str) -> ActionNeeded {
