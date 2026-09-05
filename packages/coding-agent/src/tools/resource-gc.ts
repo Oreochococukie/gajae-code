@@ -106,7 +106,7 @@ const defaultDeps: ResourceGcDeps = {
 };
 
 // ── Controller state (process-global; tabs/browsers are module-global too) ──────────────────
-const activeSessions = new Map<string, { settings: Settings; cwd: () => string }>();
+const activeSessions = new Map<string, { settings: Settings; cwd: () => string; memoryGuardGeneration: symbol }>();
 const scheduler = new MemoryGuardHost({
 	run: async () => {
 		await sweepOnce(deps);
@@ -141,12 +141,17 @@ function resolveSessionSweepIntervalMs(settings: Settings): number {
 export function registerResourceGcSession(reg: ResourceGcRegistration): () => void {
 	const registeredCwd = reg.cwd;
 	const cwd = typeof registeredCwd === "function" ? registeredCwd : () => registeredCwd ?? process.cwd();
-	activeSessions.set(reg.sessionId, { settings: reg.settings, cwd });
+	const registration = { settings: reg.settings, cwd, memoryGuardGeneration: Symbol() };
+	activeSessions.set(reg.sessionId, registration);
 	const unregisterSchedule = scheduler.register({
 		ownerId: reg.sessionId,
 		intervalMs: resolveSessionSweepIntervalMs(reg.settings),
 	});
 	const unregisterSettings = reg.settings.onChanged(path => {
+		if (path === "memoryGuard.enabled") {
+			// Fence samples already in flight, even if the guard is re-enabled before they settle.
+			registration.memoryGuardGeneration = Symbol();
+		}
 		if (
 			path === "memoryGuard.enabled" ||
 			path === "memoryGuard.checkIntervalMs" ||
@@ -498,8 +503,8 @@ function sweepMemoryPressureGuard(d: ResourceGcDeps): Promise<void> | undefined 
 }
 async function sweepEnabledMemoryPressureGuard(d: ResourceGcDeps): Promise<void> {
 	const now = d.monotonicNow();
-	const dueSessions: Array<{ sessionId: string; policy: MemoryGuardPolicy; cwd: string }> = [];
-	for (const [sessionId, { settings, cwd: resolveCwd }] of activeSessions) {
+	const dueSessions: Array<{ sessionId: string; policy: MemoryGuardPolicy; cwd: string; generation: symbol }> = [];
+	for (const [sessionId, { settings, cwd: resolveCwd, memoryGuardGeneration }] of activeSessions) {
 		const policy = resolveMemoryGuardPolicy(settings);
 		const cwd = resolveCwd();
 		if (!policy.enabled) {
@@ -511,14 +516,15 @@ async function sweepEnabledMemoryPressureGuard(d: ResourceGcDeps): Promise<void>
 		const lastEvaluated = memoryGuardLastEvaluatedAt.get(sessionId);
 		if (lastEvaluated !== undefined && now - lastEvaluated < policy.checkIntervalMs) continue;
 		memoryGuardLastEvaluatedAt.set(sessionId, now);
-		dueSessions.push({ sessionId, policy, cwd });
+		dueSessions.push({ sessionId, policy, cwd, generation: memoryGuardGeneration });
 	}
 	if (dueSessions.length === 0) return;
 
 	const snapshot = await d.memorySnapshot();
 	let gcRequested = false;
-	const gcTelemetry: Array<{ sessionId: string } & Record<string, unknown>> = [];
-	for (const { sessionId, policy } of dueSessions) {
+	const gcTelemetry: Array<{ sessionId: string; generation: symbol } & Record<string, unknown>> = [];
+	for (const { sessionId, policy, generation } of dueSessions) {
+		if (activeSessions.get(sessionId)?.memoryGuardGeneration !== generation) continue;
 		const pressure = __selectMemoryPressureDomainForTest(snapshot, policy.policyLimitBytes);
 		const limit = resolveEffectiveMemoryLimit({
 			hardCapBytes: pressure.hardCapBytes,
@@ -548,6 +554,7 @@ async function sweepEnabledMemoryPressureGuard(d: ResourceGcDeps): Promise<void>
 				gcRequested = true;
 				gcTelemetry.push({
 					sessionId,
+					generation,
 					parentBytes: pressure.parentBytes,
 					totalUsageBytes: pressure.totalUsageBytes,
 					effectiveLimitBytes: limit.effectiveBytes,
@@ -587,7 +594,8 @@ async function sweepEnabledMemoryPressureGuard(d: ResourceGcDeps): Promise<void>
 	if (gcRequested) {
 		try {
 			d.runGc();
-			for (const { sessionId, ...telemetry } of gcTelemetry) {
+			for (const { sessionId, generation, ...telemetry } of gcTelemetry) {
+				if (activeSessions.get(sessionId)?.memoryGuardGeneration !== generation) continue;
 				memoryGuardGcActive.add(sessionId);
 				d.logWarn("Memory guard: GC threshold reached", { sessionId, ...telemetry });
 			}
