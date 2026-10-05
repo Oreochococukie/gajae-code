@@ -312,6 +312,7 @@ function createConfig(
 		return {
 			type: "http",
 			url: selected.connection.deploymentUrl,
+			publicNetwork: true,
 		};
 	}
 

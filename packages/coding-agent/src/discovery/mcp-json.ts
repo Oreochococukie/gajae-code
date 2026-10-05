@@ -217,6 +217,7 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta, quiet = f
 				cwd: serverConfig.cwd,
 				url: serverConfig.url,
 				headers: serverConfig.headers,
+				publicNetwork: serverConfig.type === "http" && serverConfig.publicNetwork === true ? true : undefined,
 				auth: serverConfig.auth,
 				oauth: serverConfig.oauth,
 				transport: serverConfig.type,
