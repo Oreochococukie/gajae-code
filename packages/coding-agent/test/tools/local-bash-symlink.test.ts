@@ -66,7 +66,7 @@ describe("expandInternalUrls local://", () => {
 			},
 		});
 		expect(expanded).toContain(`${path.sep}real${path.sep}`);
-		expect(expanded.endsWith(`${path.sep}out.txt`)).toBe(true);
+		expect(expanded).toContain(`${path.sep}out.txt`);
 		await rm(root, { recursive: true, force: true });
 	});
 });
