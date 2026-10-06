@@ -19,4 +19,19 @@ describe("assertInsideWorkspace", () => {
 			/escapes the workspace/,
 		);
 	});
+
+	it("allows a new file whose parent does not exist yet and rejects one under an outside link", async () => {
+		const root = await mkdtemp(path.join(tmpdir(), "lsp-edit-new-"));
+		const workspace = path.join(root, "repo");
+		await mkdir(path.join(workspace, "src"), { recursive: true });
+		const created = path.join(workspace, "src", "newdir", "a.ts");
+		await expect(assertInsideWorkspace(workspace, created)).resolves.toBeUndefined();
+
+		const outside = path.join(root, "outside");
+		await mkdir(outside);
+		await symlink(outside, path.join(workspace, "link"));
+		await expect(assertInsideWorkspace(workspace, path.join(workspace, "link", "newdir", "a.ts"))).rejects.toThrow(
+			/escapes the workspace/,
+		);
+	});
 });
