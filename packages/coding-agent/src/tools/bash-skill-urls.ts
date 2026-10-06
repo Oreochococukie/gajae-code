@@ -1,7 +1,13 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { isEnoent } from "@gajae-code/utils";
 import type { Skill } from "../extensibility/skills";
-import { initializeLocalRoot, type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
+import {
+	initializeLocalRoot,
+	type LocalProtocolOptions,
+	resolveLocalRoot,
+	resolveLocalUrlToPath,
+} from "../internal-urls/local-protocol";
 import { validateRelativePath } from "../internal-urls/skill-protocol";
 import type { InternalResource } from "../internal-urls/types";
 import { normalizeLocalScheme } from "./path-utils";
@@ -180,10 +186,20 @@ async function resolveInternalUrlToPath(
 		}
 		await initializeLocalRoot(localOptions);
 		const resolvedLocalPath = resolveLocalUrlToPath(url, localOptions);
-		if (ensureLocalParentDirs) {
-			await fs.mkdir(path.dirname(resolvedLocalPath), { recursive: true });
+		const localRoot = await fs.realpath(resolveLocalRoot(localOptions));
+		let realTarget = resolvedLocalPath;
+		try {
+			realTarget = await fs.realpath(resolvedLocalPath);
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
 		}
-		return resolvedLocalPath;
+		if (realTarget !== localRoot && !realTarget.startsWith(`${localRoot}${path.sep}`)) {
+			throw new ToolError("local:// path escapes the session local root");
+		}
+		if (ensureLocalParentDirs) {
+			await fs.mkdir(path.dirname(realTarget), { recursive: true });
+		}
+		return realTarget;
 	}
 
 	if (!internalRouter?.canHandle(url)) {
