@@ -31,7 +31,7 @@ function redactPersistedSecrets(text: string): string {
 }
 
 export async function parseCodexError(response: Response): Promise<CodexErrorInfo> {
-	const raw = redactPersistedSecrets(await response.text());
+	const raw = await response.text();
 	let message = raw || response.statusText || `Codex request failed (HTTP ${response.status})`;
 	let friendlyMessage: string | undefined;
 	let rateLimits: CodexRateLimits | undefined;
@@ -85,7 +85,7 @@ export async function parseCodexError(response: Response): Promise<CodexErrorInf
 				: typeof (parsed?.detail as { message?: unknown } | undefined)?.message === "string"
 					? (parsed.detail as { message: string }).message
 					: undefined;
-		message = redactPersistedSecrets(errMessage || detail || friendlyMessage || message);
+		message = errMessage || detail || friendlyMessage || message;
 	} catch {
 		// raw body not JSON
 	}
@@ -109,7 +109,7 @@ export async function parseCodexError(response: Response): Promise<CodexErrorInf
 		friendlyMessage,
 		code,
 		rateLimits,
-		raw: raw,
+		raw: redactPersistedSecrets(raw),
 	};
 }
 

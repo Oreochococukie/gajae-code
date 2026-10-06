@@ -14,6 +14,20 @@ describe("parseCodexError", () => {
 		expect(info.status).toBe(401);
 	});
 
+	it("keeps the error code when a compact JSON body reflects a bearer token", async () => {
+		const info = await parseCodexError(
+			new Response('{"error":{"message":"denied Bearer abc123","code":"rate_limit_exceeded"}}', {
+				status: 429,
+				headers: { "content-type": "application/json" },
+			}),
+		);
+		expect(info.code).toBe("rate_limit_exceeded");
+		expect(info.friendlyMessage).toContain("rate limit");
+		expect(info.raw).not.toContain("abc123");
+		expect(info.message).not.toContain("abc123");
+		expect(info.message).toContain("Bearer [REDACTED]");
+	});
+
 	it("does not persist a bare sk- token in a non-JSON body", async () => {
 		const info = await parseCodexError(new Response("upstream said sk-live-secret", { status: 500 }));
 		expect(info.raw).not.toContain("sk-live-secret");
