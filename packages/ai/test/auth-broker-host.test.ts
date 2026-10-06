@@ -67,8 +67,10 @@ function httpGet(
 				.join("");
 			socket.write(`GET ${requestPath} HTTP/1.1\r\nHost: ${hostHeader}\r\n${extra}Connection: close\r\n\r\n`);
 		});
-		const chunks: Buffer[] = [];
-		socket.on("data", chunk => chunks.push(chunk));
+		const chunks: Uint8Array[] = [];
+		socket.on("data", chunk => {
+			chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+		});
 		socket.on("error", reject);
 		socket.on("end", () => {
 			const raw = Buffer.concat(chunks).toString("utf8");
