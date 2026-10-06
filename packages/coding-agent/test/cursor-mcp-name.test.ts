@@ -10,7 +10,7 @@ function fakeTool(name: string, calls: string[]): AgentTool {
 			calls.push(name);
 			return { content: [{ type: "text", text: `${name} ran` }], details: {} };
 		},
-	} as AgentTool;
+	} as unknown as AgentTool;
 }
 
 describe("cursorMcpDispatchName", () => {
