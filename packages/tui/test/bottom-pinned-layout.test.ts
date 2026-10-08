@@ -108,6 +108,20 @@ describe("TUI bottom-pinned layout", () => {
 				const contractedViewport = term.getViewport().map(line => line.trimEnd());
 				expect(contractedViewport.slice(-2)).toEqual(["", "status"]);
 
+				term.resize(40, 8);
+				await term.waitForRender();
+
+				const resizedScrollBuffer = term.getScrollBuffer().map(line => line.trimEnd());
+				expect(resizedScrollBuffer.filter(line => line.startsWith("transcript-"))).toEqual(
+					Array.from({ length: 14 }, (_value, index) => `transcript-${index}`),
+				);
+				expect(
+					term
+						.getViewport()
+						.map(line => line.trimEnd())
+						.at(-1),
+				).toBe("status");
+
 				transcript.setLines(Array.from({ length: 15 }, (_value, index) => `transcript-${index}`));
 				tui.requestRender();
 				await term.waitForRender();
@@ -116,12 +130,9 @@ describe("TUI bottom-pinned layout", () => {
 				expect(grownScrollBuffer.filter(line => line.startsWith("transcript-"))).toEqual(
 					Array.from({ length: 15 }, (_value, index) => `transcript-${index}`),
 				);
-				expect(
-					term
-						.getViewport()
-						.map(line => line.trimEnd())
-						.slice(-2),
-				).toEqual(["transcript-14", "status"]);
+				const grownViewport = term.getViewport().map(line => line.trimEnd());
+				expect(grownViewport).toContain("transcript-14");
+				expect(grownViewport.slice(-2)).toEqual(["", "status"]);
 			} finally {
 				tui.stop();
 			}

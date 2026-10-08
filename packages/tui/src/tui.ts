@@ -4881,8 +4881,8 @@ export class TUI extends Container {
 			newLines = this.#constrainPinnedSuffix(renderedLines, height, renderedChildren);
 			if (hasStickySuffix && height > 0 && this.#manualViewportTop === undefined) {
 				// Row indices survive live content changes, but not terminal reflow.
-				const unchangedTerminalSize = this.#previousWidth === width && this.#previousHeight === height;
-				const minimumLineCount = unchangedTerminalSize ? prevViewportTop + height : height;
+				const stableRowIndices = this.#previousWidth === width;
+				const minimumLineCount = stableRowIndices ? prevViewportTop + height : height;
 				newLines = this.#padBeforeBottomPinnedComponent(
 					newLines,
 					minimumLineCount,
