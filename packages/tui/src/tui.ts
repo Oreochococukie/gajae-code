@@ -1112,6 +1112,7 @@ export class TUI extends Container {
 	#nativeScrollbackAdmissionPending = false;
 	#transcriptIdentityResetPending = false;
 	#manualViewportTop: number | undefined;
+	#manualResumeViewportTop: number | undefined;
 	#viewportAnchorComponent: Component | null = null;
 	#viewportAnchorFrame: ViewportAnchorFrame | null = null;
 	#manualViewportAnchor: ManualViewportAnchor | null = null;
@@ -1564,6 +1565,7 @@ export class TUI extends Container {
 		this.#scrollbackResumeViewportTop = undefined;
 		this.#nativeScrollbackViewportTop = 0;
 		this.#nativeScrollbackAdmissionPending = false;
+		this.#manualResumeViewportTop = undefined;
 		this.#transcriptIdentityResetPending = true;
 		this.#manualOutputNotice = false;
 		this.#paintedManualOutputNotice = false;
@@ -1587,6 +1589,7 @@ export class TUI extends Container {
 	/** Allow one semantic-neighbor reconciliation after a definitive same-transcript rebuild. */
 	prepareViewportAnchorForTranscriptRebuild(): void {
 		this.#transcriptRebuildPending = true;
+		this.#manualResumeViewportTop = undefined;
 		if (this.#manualViewportAnchor !== null) this.#reconcileMissingViewportAnchor = true;
 	}
 
@@ -1692,6 +1695,7 @@ export class TUI extends Container {
 		const previousManualViewportAnchor = this.#manualViewportAnchor;
 		const previousManualViewportFallbackAnchors = this.#manualViewportFallbackAnchors;
 		const previousReconcileMissingViewportAnchor = this.#reconcileMissingViewportAnchor;
+		const previousManualResumeViewportTop = this.#manualResumeViewportTop;
 
 		const direction: -1 | 1 = delta < 0 ? -1 : 1;
 		const pin = options?.pin ?? "stable";
@@ -1786,6 +1790,10 @@ export class TUI extends Container {
 				this.#manualViewportFallbackAnchors = fallbacks;
 			}
 		}
+		if (previousManualViewportTop === undefined && this.#latestRenderedFrontierSpacerLineCount > 0) {
+			const committedFrontier = this.#scrollbackResumeViewportTop ?? this.#nativeScrollbackViewportTop;
+			this.#manualResumeViewportTop = committedFrontier > 0 ? committedFrontier : undefined;
+		}
 		this.#manualViewportTop = targetViewportTop;
 		let contentPainted = false;
 		const painted = this.#repaintViewportFromLines(
@@ -1817,6 +1825,7 @@ export class TUI extends Container {
 			this.#manualViewportAnchor = previousManualViewportAnchor;
 			this.#manualViewportFallbackAnchors = previousManualViewportFallbackAnchors;
 			this.#reconcileMissingViewportAnchor = previousReconcileMissingViewportAnchor;
+			this.#manualResumeViewportTop = previousManualResumeViewportTop;
 		}
 		return painted;
 	}
@@ -1832,9 +1841,12 @@ export class TUI extends Container {
 		if (this.#manualViewportTop === undefined) return false;
 		const height = this.terminal.rows;
 		const width = this.terminal.columns;
+		// Manual rendering can drop transient padding from the latest frame; restore the
+		// frontier captured when manual history began before rebuilding the live viewport.
+		const committedFrontier = this.#manualResumeViewportTop;
 		const paddedLiveLines = this.#padBeforeBottomPinnedComponent(
 			this.#latestRenderedLines,
-			height,
+			committedFrontier === undefined ? height : Math.max(height, committedFrontier + height),
 			this.#latestRenderedSuffixLineCount,
 		);
 		const liveLines = paddedLiveLines.lines;
@@ -1867,6 +1879,7 @@ export class TUI extends Container {
 				this.#manualOutputNotice = false;
 				this.#committedTranscriptRows = [];
 				this.#paintedManualOutputNotice = false;
+				this.#manualResumeViewportTop = undefined;
 				this.#lastCursorPosition = liveCursorPosition;
 				this.#previousLines = liveLines;
 				this.#manualTranscriptLineCount = liveTranscriptLineCount;
@@ -2923,6 +2936,7 @@ export class TUI extends Container {
 		this.#transcriptRebuildPending = false;
 		this.#latestRenderedFrontierSpacerLineCount = 0;
 		this.#manualFrontierSpacerLineCount = 0;
+		this.#manualResumeViewportTop = undefined;
 		this.#resizeRenderQueued = false;
 		this.#resizeRenderMutationQueued = false;
 		this.#renderMutationQueued = false;
@@ -4771,6 +4785,8 @@ export class TUI extends Container {
 			this.#manualViewportTop === undefined &&
 			this.#latestRaw.length > 0 &&
 			this.#latestRenderedLines.length === this.#latestRaw.length &&
+			// A cached spacer count is not valid after natural rows replace the transient padding.
+			this.#latestRenderedFrontierSpacerLineCount === 0 &&
 			this.#previousLines === this.#latestRenderedLines;
 		let previousKittyPlacementSpans = this.#kittyPlacementSpans;
 		const placementOwners = new Map<string, KittyPlacementOwner>();

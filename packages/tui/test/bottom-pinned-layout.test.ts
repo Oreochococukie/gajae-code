@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { type Component, TUI } from "@gajae-code/tui";
+import { type Component, Container, TUI } from "@gajae-code/tui";
 import { VirtualTerminal } from "./virtual-terminal";
 
 class LinesComponent implements Component {
@@ -31,6 +31,21 @@ class MutableLinesComponent implements Component {
 }
 
 describe("TUI bottom-pinned layout", () => {
+	const terminalEnvironmentKeys = ["TMUX", "TMUX_PANE", "STY", "ZELLIJ", "GJC_TMUX_LAUNCHED", "TERM"] as const;
+	let previousTerminalEnvironment = new Map<string, string | undefined>();
+	beforeEach(() => {
+		previousTerminalEnvironment = new Map(terminalEnvironmentKeys.map(key => [key, process.env[key]]));
+		for (const key of terminalEnvironmentKeys) delete process.env[key];
+		process.env.TERM = "xterm-256color";
+	});
+	afterEach(() => {
+		for (const key of terminalEnvironmentKeys) {
+			const value = previousTerminalEnvironment.get(key);
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	});
+
 	it("pads short content so the pinned component reaches the bottom row", async () => {
 		const term = new VirtualTerminal(40, 8);
 		const tui = new TUI(term);
@@ -149,6 +164,116 @@ describe("TUI bottom-pinned layout", () => {
 
 	for (const isProcessTerminal of [false, true]) {
 		describe(`frontier preservation with ${isProcessTerminal ? "process" : "virtual"} terminal`, () => {
+			it("preserves the committed frontier when following live after manual-history output", async () => {
+				const term = new VirtualTerminal(40, 6, { isProcessTerminal });
+				const tui = new TUI(term);
+				const transcript = new MutableLinesComponent(["transcript-0", "transcript-1", "transcript-2"]);
+				const working = new MutableLinesComponent(Array.from({ length: 5 }, (_value, index) => `working-${index}`));
+				const status = new LinesComponent(["status"]);
+				tui.addChild(transcript);
+				tui.addChild(working);
+				tui.addChild(status);
+				tui.setBottomPinnedComponent(status);
+
+				try {
+					tui.start();
+					await term.waitForRender();
+					transcript.setLines(Array.from({ length: 14 }, (_value, index) => `transcript-${index}`));
+					tui.requestRender();
+					await term.waitForRender();
+
+					working.setLines([]);
+					tui.requestRender();
+					await term.waitForRender();
+					const committedRows = Array.from({ length: 14 }, (_value, index) => `transcript-${index}`);
+					expect(
+						term
+							.getScrollBuffer()
+							.map(line => line.trimEnd())
+							.filter(line => line.startsWith("transcript-")),
+					).toEqual(committedRows);
+
+					expect(tui.scrollViewportPages(-1)).toBe(true);
+					await term.flush();
+					working.setLines(["later-0"]);
+					tui.requestRender();
+					await term.waitForRender();
+
+					expect(tui.followLiveViewport()).toBe(true);
+					await term.flush();
+					const followedViewport = term.getViewport().map(line => line.trimEnd());
+					if (isProcessTerminal) {
+						expect(followedViewport).toEqual(["later-0", "", "", "", "", "status"]);
+					} else {
+						expect(followedViewport.at(-1)).toBe("status");
+						expect(followedViewport.filter(line => line === "later-0")).toHaveLength(1);
+					}
+
+					working.setLines(["later-0", "later-1"]);
+					tui.requestRender();
+					await term.waitForRender();
+					expect(
+						term
+							.getScrollBuffer()
+							.map(line => line.trimEnd())
+							.filter(line => line.startsWith("transcript-")),
+					).toEqual(committedRows);
+					const appendedViewport = term.getViewport().map(line => line.trimEnd());
+					if (isProcessTerminal) {
+						expect(appendedViewport).toEqual(["later-0", "later-1", "", "", "", "status"]);
+					} else {
+						expect(appendedViewport.at(-1)).toBe("status");
+						expect(appendedViewport.filter(line => line === "later-0")).toHaveLength(1);
+						expect(appendedViewport.filter(line => line === "later-1")).toHaveLength(1);
+					}
+				} finally {
+					tui.stop();
+				}
+			});
+
+			it("recomputes frontier spacer geometry after layout growth", async () => {
+				const term = new VirtualTerminal(40, 6, { isProcessTerminal });
+				const tui = new TUI(term, undefined, { widthSettleMs: 0 });
+				const transcript = new Container();
+				transcript.replaceChildren(
+					Array.from({ length: 3 }, (_value, index) => new MutableLinesComponent([`transcript-${index}`])),
+				);
+				const working = new MutableLinesComponent(Array.from({ length: 5 }, (_value, index) => `working-${index}`));
+				const status = new LinesComponent(["status"]);
+				tui.addChild(transcript);
+				tui.addChild(working);
+				tui.addChild(status);
+				tui.setViewportAnchorComponent(transcript);
+				tui.setBottomPinnedComponent(status);
+				tui.setViewportOutputSource({ identity: "session:frontier-spacer-layout", revision: 0n });
+
+				try {
+					tui.start();
+					await term.waitForRender();
+					transcript.replaceChildren(
+						Array.from({ length: 14 }, (_value, index) => new MutableLinesComponent([`transcript-${index}`])),
+					);
+					tui.setViewportOutputSource({ identity: "session:frontier-spacer-layout", revision: 1n });
+					tui.requestRender();
+					await term.waitForRender();
+
+					working.setLines([]);
+					tui.requestRender();
+					await term.waitForRender();
+					working.setLines(Array.from({ length: 5 }, (_value, index) => `working-${index}`));
+					tui.requestLayoutRender("frontier-spacer-layout-growth");
+					await term.waitForRender();
+
+					expect(tui.scrollViewportPages(-1)).toBe(true);
+					await term.flush();
+					const viewport = term.getViewport().map(line => line.trimEnd());
+					expect(viewport.at(-1)).toBe("status");
+					expect(viewport.some(line => line.startsWith("transcript-"))).toBe(true);
+				} finally {
+					tui.stop();
+				}
+			});
+
 			it("shows a short replacement transcript instead of the old session frontier", async () => {
 				const term = new VirtualTerminal(40, 6, { isProcessTerminal });
 				const tui = new TUI(term);
