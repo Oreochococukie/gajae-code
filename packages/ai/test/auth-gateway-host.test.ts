@@ -4,6 +4,7 @@ import { startAuthGateway } from "../src/auth-gateway/server";
 import type { AuthGatewayServerHandle } from "../src/auth-gateway/types";
 import type { AuthStorage } from "../src/auth-storage";
 import type { Api, Model } from "../src/types";
+import { hostHeaderMatchesBind, parseBind } from "../src/utils/parse-bind";
 
 const TEST_MODEL = {
 	id: "test-model",
@@ -77,6 +78,41 @@ describe("auth-gateway tokenless host pin", () => {
 			const response = await httpGet(gateway.port, "attacker.example:80", "/healthz");
 			expect(response.status).toBe(200);
 			expect(response.raw).toContain('"ok":true');
+		} finally {
+			await gateway.close();
+		}
+	});
+
+	it("accepts a portless Host when the tokenless listener is on port 80", async () => {
+		expect(hostHeaderMatchesBind("127.0.0.1", parseBind("127.0.0.1:80"))).toBe(true);
+		let gateway: AuthGatewayServerHandle | undefined;
+		try {
+			gateway = startAuthGateway({
+				bind: "127.0.0.1:80",
+				providerScope: { provider: TEST_MODEL.provider },
+				hasProviderCredential: () => true,
+				reloadProviderCredentials: async () => {},
+				validateProviderCredential: () => true,
+				bearerTokens: [],
+				version: "test",
+				storage: {
+					exportSnapshot: () => ({ credentials: [{ provider: TEST_MODEL.provider }] }),
+				} as unknown as AuthStorage,
+				resolveModel: () => TEST_MODEL,
+				listModels: () => [TEST_MODEL],
+			});
+		} catch (error) {
+			const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+			const message = error instanceof Error ? error.message : String(error);
+			if (/EACCES|EPERM|EADDRINUSE|permission/i.test(`${code} ${message}`)) return;
+			throw error;
+		}
+		try {
+			const response = await httpGet(gateway.port, "127.0.0.1", "/v1/models");
+			expect(response.status).toBe(200);
+			expect(response.raw).toContain("test-model");
+			const rebound = await httpGet(gateway.port, "attacker.example", "/v1/models");
+			expect(rebound.status).toBe(403);
 		} finally {
 			await gateway.close();
 		}
