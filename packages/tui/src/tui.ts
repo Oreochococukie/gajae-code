@@ -2849,7 +2849,7 @@ export class TUI extends Container {
 		this.#stop(false);
 	}
 
-	/** Temporarily release terminal modes while retaining the current manual viewport for restart. */
+	/** Temporarily releases terminal modes for foreground handoff and preserves viewport state for restart. */
 	suspend(): void {
 		this.#stop(true);
 	}
@@ -2888,12 +2888,18 @@ export class TUI extends Container {
 			this.#tabWidthRepairPending = false;
 			this.#manualResumeViewportTop = undefined;
 		}
-		// Move the cursor after the frame actually displayed to prevent
-		// overwriting/artifacts on exit. The latest logical frame can differ while
-		// a semantic viewport retains the previously painted frame.
 		const displayedFrameLines = this.#previousLines.length || this.#latestRenderedLines.length;
-		const preserveManualViewportForRestart = temporary && this.#manualViewportTop !== undefined;
-		if (displayedFrameLines > 0 && !preserveManualViewportForRestart) {
+		if (displayedFrameLines > 0 && this.#manualViewportTop !== undefined) {
+			// The manual viewport's logical row is not a physical screen coordinate.
+			// Insert a blank bottom handoff row and discard the pinned row rather than
+			// scrolling committed history into native scrollback. start() redraws the
+			// pinned suffix on resume.
+			const bottomRow = Math.max(1, this.terminal.rows);
+			this.#writeTerminal(`\x1b[${bottomRow};1H\x1b[1L`);
+			this.#hardwareCursorRow = bottomRow - 1;
+		} else if (displayedFrameLines > 0) {
+			// The latest logical frame can differ from the last painted frame when a
+			// semantic viewport retains its previous image.
 			const targetRow = displayedFrameLines; // Line after the last content
 			const lineDiff = targetRow - this.#hardwareCursorRow;
 			if (lineDiff > 0) {
@@ -2918,7 +2924,9 @@ export class TUI extends Container {
 		// non-manual restart keeps only the durable baseline until its first render:
 		// that render can admit a raw-prefix-proven append without replaying history.
 		this.#restartViewportRepaintPending =
-			this.#manualViewportTop === undefined && (this.#previousLines.length > 0 || this.#maxLinesRendered > 0);
+			temporary &&
+			this.#manualViewportTop === undefined &&
+			(this.#previousLines.length > 0 || this.#maxLinesRendered > 0);
 		if (this.#restartViewportRepaintPending) {
 			this.#restartDurableLineCount = this.#durableLineCount;
 			this.#restartDurableRenderedLines = this.#durableRenderedLines.slice();

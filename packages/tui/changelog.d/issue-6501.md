@@ -1,3 +1,3 @@
 ### Fixed
 
-- Preserve the committed viewport frontier when bottom-pinned TUI frames contract, preventing the newest scrolled-off transcript row from being painted twice.
+- Preserve the committed viewport frontier through bottom-pinned frame contractions and temporary manual-history handoffs, preventing scrolled-off transcript rows from being added to scrollback twice.

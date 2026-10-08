@@ -268,29 +268,38 @@ describe("TUI bottom-pinned layout", () => {
 						.getScrollBuffer()
 						.map(line => line.trimEnd())
 						.filter(line => line.startsWith("transcript-"));
+					const manualViewportBeforeStop = term.getViewport().map(line => line.trimEnd());
 					tui.suspend();
+					await term.flush();
 					expect(
 						term
 							.getScrollBuffer()
 							.map(line => line.trimEnd())
 							.filter(line => line.startsWith("transcript-")),
 					).toEqual(manualRowsBeforeStop);
+					expect(term.getViewport().at(-1)?.trimEnd()).toBe("");
+					working.setLines(["later-0", "later-1"]);
 					tui.start();
 					await term.waitForRender();
+					expect(term.getViewport().map(line => line.trimEnd())).toEqual(manualViewportBeforeStop);
 
 					expect(tui.followLiveViewport()).toBe(true);
 					await term.flush();
+					expect(
+						term
+							.getScrollBuffer()
+							.map(line => line.trimEnd())
+							.filter(line => line.startsWith("transcript-")),
+					).toEqual(committedRows);
 					const followedViewport = term.getViewport().map(line => line.trimEnd());
 					if (isProcessTerminal) {
-						expect(followedViewport).toEqual(["later-0", "", "", "", "", "status"]);
+						expect(followedViewport).toEqual(["later-0", "later-1", "", "", "", "status"]);
 					} else {
 						expect(followedViewport.at(-1)).toBe("status");
 						expect(followedViewport.filter(line => line === "later-0")).toHaveLength(1);
+						expect(followedViewport.filter(line => line === "later-1")).toHaveLength(1);
 					}
 
-					working.setLines(["later-0", "later-1"]);
-					tui.requestRender();
-					await term.waitForRender();
 					expect(
 						term
 							.getScrollBuffer()
@@ -473,7 +482,7 @@ describe("TUI bottom-pinned layout", () => {
 		});
 	}
 
-	it("positions the cursor after manual history on permanent stop", async () => {
+	it("leaves a blank handoff row after manual history on permanent stop", async () => {
 		const term = new VirtualTerminal(40, 6, { isProcessTerminal: true });
 		const tui = new TUI(term);
 		tui.addChild(new MutableLinesComponent(Array.from({ length: 14 }, (_value, index) => `transcript-${index}`)));
@@ -486,10 +495,19 @@ describe("TUI bottom-pinned layout", () => {
 			await term.waitForRender();
 			expect(tui.scrollViewportPages(-1)).toBe(true);
 			await term.flush();
-			const writeStart = term.getWriteLog().length;
+			const transcriptRowsBeforeStop = term
+				.getScrollBuffer()
+				.map(line => line.trimEnd())
+				.filter(line => line.startsWith("transcript-"));
 			tui.stop();
-			const stopOutput = term.getWriteLog().slice(writeStart).join("");
-			expect(stopOutput).toContain("\r\n");
+			await term.flush();
+			expect(
+				term
+					.getScrollBuffer()
+					.map(line => line.trimEnd())
+					.filter(line => line.startsWith("transcript-")),
+			).toEqual(transcriptRowsBeforeStop);
+			expect(term.getViewport().at(-1)?.trimEnd()).toBe("");
 		} finally {
 			tui.stop();
 		}
