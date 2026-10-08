@@ -4880,9 +4880,10 @@ export class TUI extends Container {
 			}
 			newLines = this.#constrainPinnedSuffix(renderedLines, height, renderedChildren);
 			if (hasStickySuffix && height > 0 && this.#manualViewportTop === undefined) {
-				// Row indices survive live content changes, but not terminal reflow.
-				const stableRowIndices = this.#previousWidth === width;
-				const minimumLineCount = stableRowIndices ? prevViewportTop + height : height;
+				// A width change reflows rows; height-only resizes need a frontier only when scrollback is retained.
+				const preserveLiveFrontier =
+					this.#previousWidth === width && (this.#previousHeight === height || this.#viewportRepaintHost());
+				const minimumLineCount = preserveLiveFrontier ? prevViewportTop + height : height;
 				newLines = this.#padBeforeBottomPinnedComponent(
 					newLines,
 					minimumLineCount,
