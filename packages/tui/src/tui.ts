@@ -1002,6 +1002,8 @@ export class TUI extends Container {
 	#latestRenderedLines: string[] = [];
 	#latestRenderedTranscriptLineCount = 0;
 	#latestRenderedSuffixLineCount = 0;
+	// Transient live rows between transcript content and the pinned suffix.
+	#latestRenderedFrontierSpacerLineCount = 0;
 	#latestRenderedPlacementOwners = new Map<string, KittyPlacementOwner>();
 	#kittyPlacementSpans: KittyPlacementSpan[] = [];
 	#latestRaw: string[] = [];
@@ -1019,6 +1021,7 @@ export class TUI extends Container {
 	#restartDurableRawLines: string[] = [];
 	#restartDurableWidth = 0;
 	#transcriptIdentityReplaced = false;
+	#transcriptRebuildPending = false;
 	#lineNormalizationCache = new Map<string, LineNormalizationCacheEntry>();
 	#lineEmitWidthCache = new Map<string, number>();
 	#lineTruncationCache = new Map<string, string>();
@@ -1078,6 +1081,9 @@ export class TUI extends Container {
 	#forcedRenderQueued = false;
 	#restartViewportRepaintPending = false;
 	#lastObservedWidth = 0;
+	// Preserve the last committed grid before requestRender(true) invalidates diff dimensions.
+	#forcedRenderPreviousWidth = 0;
+	#forcedRenderPreviousHeight = 0;
 	// Trailing debounce for the settled width repair. Instance-local: taken from
 	// options.widthSettleMs when provided (deterministic harnesses pass 0 to
 	// disable), otherwise from GJC_TUI_WIDTH_SETTLE_MS / PI_TUI_WIDTH_SETTLE_MS,
@@ -1159,6 +1165,7 @@ export class TUI extends Container {
 	#manualOutputNotice = false;
 	#manualTranscriptLineCount = 0;
 	#manualSuffixLineCount = 0;
+	#manualFrontierSpacerLineCount = 0;
 	#committedTranscriptRows: Array<number | null> = [];
 	#paintedManualOutputNotice = false;
 	#rasterGeneration = 0;
@@ -1579,6 +1586,7 @@ export class TUI extends Container {
 
 	/** Allow one semantic-neighbor reconciliation after a definitive same-transcript rebuild. */
 	prepareViewportAnchorForTranscriptRebuild(): void {
+		this.#transcriptRebuildPending = true;
 		if (this.#manualViewportAnchor !== null) this.#reconcileMissingViewportAnchor = true;
 	}
 
@@ -1792,13 +1800,15 @@ export class TUI extends Container {
 				contentPainted = true;
 				this.#manualTranscriptLineCount = this.#latestRenderedTranscriptLineCount;
 				this.#manualSuffixLineCount = this.#latestRenderedSuffixLineCount;
+				this.#manualFrontierSpacerLineCount = this.#latestRenderedFrontierSpacerLineCount;
 			},
 			false,
 			this.#kittyPlacementSpans,
 			this.#kittyPlacementSpansForLines(this.#previousLines, this.#latestRenderedPlacementOwners),
 			{
-				transcriptLineCount: this.#latestRenderedTranscriptLineCount,
-				suffixLineCount: this.#latestRenderedSuffixLineCount,
+				transcriptLineCount: this.#manualTranscriptLineCount,
+				suffixLineCount: this.#manualSuffixLineCount,
+				frontierSpacerLineCount: this.#manualFrontierSpacerLineCount,
 			},
 			true,
 		);
@@ -1829,7 +1839,9 @@ export class TUI extends Container {
 		);
 		const liveLines = paddedLiveLines.lines;
 		const liveTranscriptLineCount = this.#latestRenderedTranscriptLineCount;
-		const liveSuffixLineCount = this.#latestRenderedSuffixLineCount + paddedLiveLines.insertedBlankRows;
+		const liveSuffixLineCount = this.#latestRenderedSuffixLineCount;
+		const liveFrontierSpacerLineCount =
+			this.#latestRenderedFrontierSpacerLineCount + paddedLiveLines.insertedBlankRows;
 		const liveKittyPlacementSpans = this.#kittyPlacementSpansForLines(liveLines, this.#latestRenderedPlacementOwners);
 		let liveCursorPosition = this.#lastCursorPosition;
 		if (liveCursorPosition !== null && liveCursorPosition.row >= paddedLiveLines.insertionRow) {
@@ -1859,7 +1871,9 @@ export class TUI extends Container {
 				this.#previousLines = liveLines;
 				this.#manualTranscriptLineCount = liveTranscriptLineCount;
 				this.#manualSuffixLineCount = liveSuffixLineCount;
+				this.#manualFrontierSpacerLineCount = liveFrontierSpacerLineCount;
 				this.#latestRenderedLines = liveLines.slice();
+				this.#latestRenderedFrontierSpacerLineCount = liveFrontierSpacerLineCount;
 				if (this.#scrollbackResumeViewportTop === undefined) {
 					this.#nativeScrollbackViewportTop = liveViewportTop;
 				}
@@ -1876,7 +1890,11 @@ export class TUI extends Container {
 			true,
 			this.#kittyPlacementSpans,
 			liveKittyPlacementSpans,
-			{ transcriptLineCount: liveTranscriptLineCount, suffixLineCount: liveSuffixLineCount },
+			{
+				transcriptLineCount: liveTranscriptLineCount,
+				suffixLineCount: liveSuffixLineCount,
+				frontierSpacerLineCount: liveFrontierSpacerLineCount,
+			},
 		);
 	}
 
@@ -2900,6 +2918,11 @@ export class TUI extends Container {
 		this.#lineEmitWidthCache.clear();
 		this.#previousWidth = 0;
 		this.#previousHeight = 0;
+		this.#forcedRenderPreviousWidth = 0;
+		this.#forcedRenderPreviousHeight = 0;
+		this.#transcriptRebuildPending = false;
+		this.#latestRenderedFrontierSpacerLineCount = 0;
+		this.#manualFrontierSpacerLineCount = 0;
 		this.#resizeRenderQueued = false;
 		this.#resizeRenderMutationQueued = false;
 		this.#renderMutationQueued = false;
@@ -3206,8 +3229,14 @@ export class TUI extends Container {
 		if (force) {
 			// A forced full redraw supersedes any queued input-priority render.
 			this.#inputRenderPending = false;
-			if (!widthSettleRequest) this.#forcedRenderQueued = true;
 			if (!widthSettleRequest) {
+				if (!this.#forcedRenderQueued) {
+					this.#forcedRenderPreviousWidth =
+						this.#previousWidth < 0 ? this.#forcedRenderPreviousWidth : this.#previousWidth;
+					this.#forcedRenderPreviousHeight =
+						this.#previousHeight < 0 ? this.#forcedRenderPreviousHeight : this.#previousHeight;
+				}
+				this.#forcedRenderQueued = true;
 				this.#previousWidth = -1; // -1 triggers widthChanged
 				this.#previousHeight = -1; // -1 triggers heightChanged
 			}
@@ -4412,12 +4441,16 @@ export class TUI extends Container {
 		paintLive = false,
 		placementsToClear: KittyPlacementSpan[] = this.#kittyPlacementSpans,
 		placementsToPaint: KittyPlacementSpan[] = placementsToClear,
-		geometry?: { transcriptLineCount: number; suffixLineCount: number },
+		geometry?: { transcriptLineCount: number; suffixLineCount: number; frontierSpacerLineCount?: number },
 		avoidScrollback = true,
 	): boolean {
 		const paintManual = this.#manualViewportTop !== undefined && !paintLive;
 		const transcriptLineCount = geometry?.transcriptLineCount ?? this.#manualTranscriptLineCount;
 		const suffixLineCount = geometry?.suffixLineCount ?? this.#manualSuffixLineCount;
+		const frontierSpacerLineCount =
+			geometry?.frontierSpacerLineCount ??
+			(paintManual ? this.#manualFrontierSpacerLineCount : this.#latestRenderedFrontierSpacerLineCount);
+		const suffixStart = transcriptLineCount + frontierSpacerLineCount;
 		if (height <= 0 || width <= 0) return false;
 		const maxViewportTop = Math.max(
 			0,
@@ -4442,7 +4475,7 @@ export class TUI extends Container {
 		const emittedRegions: KittyPlacementRegion[] = paintManual
 			? [
 					{ top: nextViewportTop, bottom: nextViewportTop + transcriptCapacity },
-					{ top: transcriptLineCount, bottom: transcriptLineCount + suffixLineCount },
+					{ top: suffixStart, bottom: suffixStart + suffixLineCount },
 				]
 			: [{ top: nextViewportTop, bottom: nextViewportTop + height }];
 		const lineForScreenRow = (screenRow: number): string => {
@@ -4451,7 +4484,7 @@ export class TUI extends Container {
 			return paintManual && screenRow === transcriptCapacity && noticeRows > 0
 				? "New output — type to follow"
 				: paintManual && suffixRow >= 0
-					? (lines[transcriptLineCount + suffixRow] ?? "")
+					? (lines[suffixStart + suffixRow] ?? "")
 					: paintManual && lineIndex >= transcriptLineCount
 						? ""
 						: (lines[lineIndex] ?? "");
@@ -4542,6 +4575,9 @@ export class TUI extends Container {
 	}
 	#recordPaintedViewportObservation(viewportTop: number, height: number, paintManual: boolean): void {
 		const transcriptCapacity = this.#manualTranscriptCapacity(height);
+		const transcriptLineCount = this.#manualTranscriptLineCount;
+		const suffixStart = transcriptLineCount + this.#manualFrontierSpacerLineCount;
+		const noticeRows = this.#manualOutputNotice && height > this.#manualSuffixLineCount ? 1 : 0;
 		const anchorFrame = this.#viewportAnchorFrame;
 		const semanticAnchor =
 			anchorFrame === null
@@ -4556,9 +4592,10 @@ export class TUI extends Container {
 		const cursor = this.#lastCursorPosition;
 		let cursorRow: number | null = null;
 		if (cursor !== null) {
-			if (paintManual && cursor.row >= this.#manualTranscriptLineCount) {
-				const noticeRows = this.#manualOutputNotice && height > this.#manualSuffixLineCount ? 1 : 0;
-				cursorRow = transcriptCapacity + noticeRows + (cursor.row - this.#manualTranscriptLineCount);
+			if (paintManual && cursor.row >= suffixStart) {
+				cursorRow = transcriptCapacity + noticeRows + (cursor.row - suffixStart);
+			} else if (paintManual && cursor.row >= transcriptLineCount) {
+				cursorRow = null;
 			} else if (paintManual) {
 				cursorRow = this.#committedTranscriptRows.indexOf(cursor.row);
 			} else {
@@ -4695,6 +4732,10 @@ export class TUI extends Container {
 		const widthSettleRenderQueued = this.#widthSettleRenderQueued;
 		const tabWidthRepairPending = this.#tabWidthRepairPending;
 		const forcedRenderQueued = this.#forcedRenderQueued;
+		const frontierPreviousWidth = this.#previousWidth < 0 ? this.#forcedRenderPreviousWidth : this.#previousWidth;
+		const frontierPreviousHeight = this.#previousHeight < 0 ? this.#forcedRenderPreviousHeight : this.#previousHeight;
+		const transcriptRebuildPending = this.#transcriptRebuildPending;
+		this.#transcriptRebuildPending = false;
 		this.#resizeRenderQueued = false;
 		this.#resizeRenderMutationQueued = false;
 		this.#renderMutationQueued = false;
@@ -4843,6 +4884,7 @@ export class TUI extends Container {
 		let diffStart = 0;
 		let usedWindowNormalize = false;
 		let stitched = false;
+		let frontierSpacerLineCount = 0;
 		if (reusedAnchor !== null && layoutPrefixEligible && !layoutPrefixBlocked) {
 			const reused = this.#reuseCachedLayoutPrefix(
 				width,
@@ -4859,6 +4901,7 @@ export class TUI extends Container {
 				cursorPos = reused.cursorPos;
 				diffStart = reused.diffStart;
 				usedWindowNormalize = true;
+				frontierSpacerLineCount = this.#latestRenderedFrontierSpacerLineCount;
 			}
 		}
 		if (!stitched) {
@@ -4880,15 +4923,21 @@ export class TUI extends Container {
 			}
 			newLines = this.#constrainPinnedSuffix(renderedLines, height, renderedChildren);
 			if (hasStickySuffix && height > 0 && this.#manualViewportTop === undefined) {
-				// A width change reflows rows; height-only resizes need a frontier only when scrollback is retained.
+				// Rebuilds start at their new transcript frontier. Forced redraws use the
+				// captured rendered dimensions rather than their -1 invalidation sentinels.
 				const preserveLiveFrontier =
-					this.#previousWidth === width && (this.#previousHeight === height || this.#viewportRepaintHost());
+					!transcriptIdentityReplaced &&
+					!transcriptRebuildPending &&
+					frontierPreviousWidth === width &&
+					(frontierPreviousHeight === height || this.#viewportRepaintHost());
 				const minimumLineCount = preserveLiveFrontier ? prevViewportTop + height : height;
-				newLines = this.#padBeforeBottomPinnedComponent(
+				const padded = this.#padBeforeBottomPinnedComponent(
 					newLines,
 					minimumLineCount,
 					newLines.length - sourceTranscriptLineCount,
-				).lines;
+				);
+				newLines = padded.lines;
+				frontierSpacerLineCount = padded.insertedBlankRows;
 			}
 			// Composite overlays into the rendered lines (before differential compare)
 			if (this.overlayStack.length > 0) {
@@ -4945,7 +4994,15 @@ export class TUI extends Container {
 			}
 		}
 		const nextTranscriptLineCount = sourceTranscriptLineCount;
-		const nextSuffixLineCount = hasStickySuffix ? Math.max(0, newLines.length - nextTranscriptLineCount) : 0;
+		// Live-only frontier rows must not consume the manual viewport's pinned-suffix capacity.
+		const nextSuffixLineCount = hasStickySuffix
+			? Math.max(0, newLines.length - nextTranscriptLineCount - frontierSpacerLineCount)
+			: 0;
+		const nextFrameGeometry = {
+			transcriptLineCount: nextTranscriptLineCount,
+			suffixLineCount: nextSuffixLineCount,
+			frontierSpacerLineCount,
+		};
 		this.#lastCursorPosition = cursorPos;
 		const total = rawLines.length;
 		if (renderMetrics.enabled) {
@@ -4962,6 +5019,7 @@ export class TUI extends Container {
 		this.#latestRenderedLines = newLines;
 		this.#latestRenderedTranscriptLineCount = nextTranscriptLineCount;
 		this.#latestRenderedSuffixLineCount = nextSuffixLineCount;
+		this.#latestRenderedFrontierSpacerLineCount = frontierSpacerLineCount;
 		this.#latestRenderedPlacementOwners = placementOwners;
 		const naturalViewportTop = Math.max(0, newLines.length - height);
 		const priorLogicalLineCount = Math.max(this.#previousLines.length, this.#maxLinesRendered);
@@ -5022,11 +5080,12 @@ export class TUI extends Container {
 							this.#previousHeight = height;
 							this.#manualTranscriptLineCount = nextTranscriptLineCount;
 							this.#manualSuffixLineCount = nextSuffixLineCount;
+							this.#manualFrontierSpacerLineCount = frontierSpacerLineCount;
 						},
 						false,
 						previousKittyPlacementSpans,
 						nextKittyPlacementSpans,
-						{ transcriptLineCount: nextTranscriptLineCount, suffixLineCount: nextSuffixLineCount },
+						nextFrameGeometry,
 						true,
 					);
 					if (contentPainted) {
@@ -5078,6 +5137,9 @@ export class TUI extends Container {
 				newLines.length === this.#previousLines.length &&
 				newLines.every((line, index) => line === this.#previousLines[index])
 			) {
+				this.#manualTranscriptLineCount = nextTranscriptLineCount;
+				this.#manualSuffixLineCount = nextSuffixLineCount;
+				this.#manualFrontierSpacerLineCount = frontierSpacerLineCount;
 				return;
 			}
 			this.#manualViewportTop = nextViewportTop;
@@ -5099,11 +5161,12 @@ export class TUI extends Container {
 					this.#paintedManualOutputNotice = this.#manualOutputNotice;
 					this.#manualTranscriptLineCount = nextTranscriptLineCount;
 					this.#manualSuffixLineCount = nextSuffixLineCount;
+					this.#manualFrontierSpacerLineCount = frontierSpacerLineCount;
 				},
 				false,
 				previousKittyPlacementSpans,
 				nextKittyPlacementSpans,
-				{ transcriptLineCount: nextTranscriptLineCount, suffixLineCount: nextSuffixLineCount },
+				nextFrameGeometry,
 			);
 			if (!contentPainted) restoreManualIntent();
 			return;
@@ -5175,6 +5238,7 @@ export class TUI extends Container {
 					);
 					this.#manualTranscriptLineCount = nextTranscriptLineCount;
 					this.#manualSuffixLineCount = nextSuffixLineCount;
+					this.#manualFrontierSpacerLineCount = frontierSpacerLineCount;
 					this.#refreshPaintedLiveViewportObservation(height);
 					this.#durableLineCount = newLines.length;
 					this.#durableRenderedLines = newLines.slice();
@@ -5213,6 +5277,7 @@ export class TUI extends Container {
 					this.#previousHeight = height;
 					this.#manualTranscriptLineCount = nextTranscriptLineCount;
 					this.#manualSuffixLineCount = nextSuffixLineCount;
+					this.#manualFrontierSpacerLineCount = frontierSpacerLineCount;
 					this.#refreshPaintedLiveViewportObservation(height);
 					this.#latestRenderedLines = newLines.slice();
 					if (this.#virtualViewport) this.#latestRaw = rawLines.slice();
@@ -5220,7 +5285,7 @@ export class TUI extends Container {
 				false,
 				previousKittyPlacementSpans,
 				nextKittyPlacementSpans,
-				{ transcriptLineCount: nextTranscriptLineCount, suffixLineCount: nextSuffixLineCount },
+				nextFrameGeometry,
 				true,
 			);
 		};
@@ -5642,6 +5707,7 @@ export class TUI extends Container {
 						);
 						this.#manualTranscriptLineCount = nextTranscriptLineCount;
 						this.#manualSuffixLineCount = nextSuffixLineCount;
+						this.#manualFrontierSpacerLineCount = frontierSpacerLineCount;
 						this.#refreshPaintedLiveViewportObservation(height);
 					})
 				)
@@ -5659,6 +5725,7 @@ export class TUI extends Container {
 			this.#viewportTopRow = Math.max(0, newLines.length - height);
 			this.#manualTranscriptLineCount = nextTranscriptLineCount;
 			this.#manualSuffixLineCount = nextSuffixLineCount;
+			this.#manualFrontierSpacerLineCount = frontierSpacerLineCount;
 			this.#refreshPaintedLiveViewportObservation(height);
 			return;
 		}
@@ -5962,6 +6029,7 @@ export class TUI extends Container {
 					);
 					this.#manualTranscriptLineCount = nextTranscriptLineCount;
 					this.#manualSuffixLineCount = nextSuffixLineCount;
+					this.#manualFrontierSpacerLineCount = frontierSpacerLineCount;
 					this.#refreshPaintedLiveViewportObservation(height);
 				},
 				preserveRasterLeases,

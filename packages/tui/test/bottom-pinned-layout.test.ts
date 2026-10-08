@@ -143,6 +143,135 @@ describe("TUI bottom-pinned layout", () => {
 		});
 	}
 
+	for (const isProcessTerminal of [false, true]) {
+		describe(`frontier preservation with ${isProcessTerminal ? "process" : "virtual"} terminal`, () => {
+			it("shows a short replacement transcript instead of the old session frontier", async () => {
+				const term = new VirtualTerminal(40, 6, { isProcessTerminal });
+				const tui = new TUI(term);
+				const transcript = new MutableLinesComponent(Array.from({ length: 18 }, (_value, index) => `old-${index}`));
+				const status = new LinesComponent(["status"]);
+				tui.addChild(transcript);
+				tui.addChild(status);
+				tui.setBottomPinnedComponent(status);
+
+				try {
+					tui.start();
+					await term.waitForRender();
+					tui.resetViewportAnchorIntent();
+					transcript.setLines(["replacement-0", "replacement-1"]);
+					tui.requestRender();
+					await term.waitForRender();
+
+					const viewport = term.getViewport().map(line => line.trimEnd());
+					expect(viewport).toContain("replacement-0");
+					expect(viewport).toContain("replacement-1");
+					expect(viewport.some(line => line.startsWith("old-"))).toBe(false);
+					expect(viewport.at(-1)).toBe("status");
+				} finally {
+					tui.stop();
+				}
+			});
+
+			it("shows a rebuilt summary instead of preserving a stale live frontier", async () => {
+				const term = new VirtualTerminal(40, 6, { isProcessTerminal });
+				const tui = new TUI(term);
+				const transcript = new MutableLinesComponent(
+					Array.from({ length: 18 }, (_value, index) => `history-${index}`),
+				);
+				const status = new LinesComponent(["status"]);
+				tui.addChild(transcript);
+				tui.addChild(status);
+				tui.setBottomPinnedComponent(status);
+
+				try {
+					tui.start();
+					await term.waitForRender();
+					tui.prepareViewportAnchorForTranscriptRebuild();
+					transcript.setLines(["summary-0", "summary-1", "summary-2"]);
+					tui.requestRender();
+					await term.waitForRender();
+
+					const viewport = term.getViewport().map(line => line.trimEnd());
+					expect(viewport).toContain("summary-0");
+					expect(viewport).toContain("summary-2");
+					expect(viewport.at(-1)).toBe("status");
+				} finally {
+					tui.stop();
+				}
+			});
+
+			it("preserves the live frontier during a same-width forced redraw", async () => {
+				const term = new VirtualTerminal(40, 6, { isProcessTerminal });
+				const tui = new TUI(term);
+				const transcript = new MutableLinesComponent(["transcript-0", "transcript-1", "transcript-2"]);
+				const working = new MutableLinesComponent(["working"]);
+				const status = new LinesComponent(["status"]);
+				tui.addChild(transcript);
+				tui.addChild(working);
+				tui.addChild(status);
+				tui.setBottomPinnedComponent(status);
+
+				try {
+					tui.start();
+					await term.waitForRender();
+					transcript.setLines(Array.from({ length: 14 }, (_value, index) => `transcript-${index}`));
+					tui.requestRender();
+					await term.waitForRender();
+					working.setLines([]);
+					tui.requestRender(true, "test.forced-contraction");
+					await term.waitForRender();
+
+					const scrollRows = term
+						.getScrollBuffer()
+						.map(line => line.trimEnd())
+						.filter(line => line.startsWith("transcript-"));
+					expect(scrollRows).toEqual(Array.from({ length: 14 }, (_value, index) => `transcript-${index}`));
+					const viewport = term.getViewport().map(line => line.trimEnd());
+					if (isProcessTerminal) {
+						expect(viewport.filter(line => line.startsWith("transcript-"))).toEqual(
+							Array.from({ length: 4 }, (_value, index) => `transcript-${index + 10}`),
+						);
+					}
+					expect(viewport.at(-1)).toBe("status");
+				} finally {
+					tui.stop();
+				}
+			});
+
+			it("keeps manual transcript capacity separate from frontier spacers", async () => {
+				const term = new VirtualTerminal(40, 6, { isProcessTerminal });
+				const tui = new TUI(term);
+				const transcript = new MutableLinesComponent(
+					Array.from({ length: 6 }, (_value, index) => `transcript-${index}`),
+				);
+				const working = new MutableLinesComponent(
+					Array.from({ length: 20 }, (_value, index) => `working-${index}`),
+				);
+				const status = new LinesComponent(["status"]);
+				tui.addChild(transcript);
+				tui.addChild(working);
+				tui.addChild(status);
+				tui.setBottomPinnedComponent(status);
+
+				try {
+					tui.start();
+					await term.waitForRender();
+					working.setLines([]);
+					tui.requestRender();
+					await term.waitForRender();
+
+					expect(tui.scrollViewportPages(-1)).toBe(true);
+					await term.flush();
+					const viewport = term.getViewport().map(line => line.trimEnd());
+					expect(viewport.filter(line => line.startsWith("transcript-"))).not.toHaveLength(0);
+					expect(viewport.at(-1)).toBe("status");
+				} finally {
+					tui.stop();
+				}
+			});
+		});
+	}
+
 	describe("with the GJC psmux launch marker", () => {
 		let origTmux: string | undefined;
 		let origTmuxPane: string | undefined;
