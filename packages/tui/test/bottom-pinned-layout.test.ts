@@ -231,7 +231,7 @@ describe("TUI bottom-pinned layout", () => {
 				}
 			});
 
-			it("retains the manual resume frontier across stop and start", async () => {
+			it("retains the manual resume frontier across temporary suspend and start", async () => {
 				const term = new VirtualTerminal(40, 6, { isProcessTerminal });
 				const tui = new TUI(term);
 				const transcript = new MutableLinesComponent(["transcript-0", "transcript-1", "transcript-2"]);
@@ -268,7 +268,7 @@ describe("TUI bottom-pinned layout", () => {
 						.getScrollBuffer()
 						.map(line => line.trimEnd())
 						.filter(line => line.startsWith("transcript-"));
-					tui.stop();
+					tui.suspend();
 					expect(
 						term
 							.getScrollBuffer()
@@ -472,6 +472,28 @@ describe("TUI bottom-pinned layout", () => {
 			});
 		});
 	}
+
+	it("positions the cursor after manual history on permanent stop", async () => {
+		const term = new VirtualTerminal(40, 6, { isProcessTerminal: true });
+		const tui = new TUI(term);
+		tui.addChild(new MutableLinesComponent(Array.from({ length: 14 }, (_value, index) => `transcript-${index}`)));
+		const status = new LinesComponent(["status"]);
+		tui.addChild(status);
+		tui.setBottomPinnedComponent(status);
+
+		try {
+			tui.start();
+			await term.waitForRender();
+			expect(tui.scrollViewportPages(-1)).toBe(true);
+			await term.flush();
+			const writeStart = term.getWriteLog().length;
+			tui.stop();
+			const stopOutput = term.getWriteLog().slice(writeStart).join("");
+			expect(stopOutput).toContain("\r\n");
+		} finally {
+			tui.stop();
+		}
+	});
 
 	describe("with the GJC psmux launch marker", () => {
 		let origTmux: string | undefined;

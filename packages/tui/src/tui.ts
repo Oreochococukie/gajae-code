@@ -2846,6 +2846,15 @@ export class TUI extends Container {
 	}
 
 	stop(): void {
+		this.#stop(false);
+	}
+
+	/** Temporarily release terminal modes while retaining the current manual viewport for restart. */
+	suspend(): void {
+		this.#stop(true);
+	}
+
+	#stop(temporary: boolean): void {
 		this.#invalidatePreparations();
 		// Invalidate every raster-queue body captured under the running epoch
 		// before any teardown: nothing queued before stop may write after
@@ -2883,9 +2892,8 @@ export class TUI extends Container {
 		// overwriting/artifacts on exit. The latest logical frame can differ while
 		// a semantic viewport retains the previously painted frame.
 		const displayedFrameLines = this.#previousLines.length || this.#latestRenderedLines.length;
-		// A manual viewport is a history window; moving to the logical end can make
-		// the next temporary restart scroll an already committed row into history.
-		if (displayedFrameLines > 0 && this.#manualViewportTop === undefined) {
+		const preserveManualViewportForRestart = temporary && this.#manualViewportTop !== undefined;
+		if (displayedFrameLines > 0 && !preserveManualViewportForRestart) {
 			const targetRow = displayedFrameLines; // Line after the last content
 			const lineDiff = targetRow - this.#hardwareCursorRow;
 			if (lineDiff > 0) {
@@ -2894,6 +2902,7 @@ export class TUI extends Container {
 				this.#writeTerminal(`\x1b[${-lineDiff}A`);
 			}
 			this.#writeTerminal("\r\n");
+			this.#hardwareCursorRow = targetRow + 1;
 		}
 
 		if (this.#useImeBlockCursor) {
