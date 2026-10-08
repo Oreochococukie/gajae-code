@@ -4334,14 +4334,14 @@ export class TUI extends Container {
 
 	#padBeforeBottomPinnedComponent(
 		lines: string[],
-		height: number,
+		minimumLineCount: number,
 		pinnedLineCount: number,
 	): { lines: string[]; insertionRow: number; insertedBlankRows: number } {
-		if (pinnedLineCount <= 0 || lines.length >= height) {
+		if (pinnedLineCount <= 0 || lines.length >= minimumLineCount) {
 			return { lines, insertionRow: lines.length, insertedBlankRows: 0 };
 		}
 
-		const insertedBlankRows = height - lines.length;
+		const insertedBlankRows = minimumLineCount - lines.length;
 		const insertionRow = Math.max(0, lines.length - pinnedLineCount);
 		const padded = [...lines];
 		padded.splice(insertionRow, 0, ...Array.from({ length: insertedBlankRows }, () => ""));
@@ -4880,9 +4880,12 @@ export class TUI extends Container {
 			}
 			newLines = this.#constrainPinnedSuffix(renderedLines, height, renderedChildren);
 			if (hasStickySuffix && height > 0 && this.#manualViewportTop === undefined) {
+				// Row indices survive live content changes, but not terminal reflow.
+				const unchangedTerminalSize = this.#previousWidth === width && this.#previousHeight === height;
+				const minimumLineCount = unchangedTerminalSize ? prevViewportTop + height : height;
 				newLines = this.#padBeforeBottomPinnedComponent(
 					newLines,
-					height,
+					minimumLineCount,
 					newLines.length - sourceTranscriptLineCount,
 				).lines;
 			}
