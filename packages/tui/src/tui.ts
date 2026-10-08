@@ -1112,7 +1112,7 @@ export class TUI extends Container {
 	#nativeScrollbackAdmissionPending = false;
 	#transcriptIdentityResetPending = false;
 	#manualViewportTop: number | undefined;
-	#manualResumeViewportTop: number | undefined;
+	#manualResumeViewportTop: number | undefined; // Preserved through temporary stop/start while manual history is active.
 	#viewportAnchorComponent: Component | null = null;
 	#viewportAnchorFrame: ViewportAnchorFrame | null = null;
 	#manualViewportAnchor: ManualViewportAnchor | null = null;
@@ -2871,17 +2871,21 @@ export class TUI extends Container {
 		// An armed TIMER dies with the session, but a repair already deferred while
 		// the user was reading scrollback must survive a temporary stop/start
 		// (Ctrl-Z resume, external editor): manual viewport ownership survives
-		// restart, so followLiveViewport() still needs the pending repair. Without
-		// manual ownership the flags are moot — start() issues a forced full render.
+		// restart, so followLiveViewport() still needs the pending repair and saved
+		// frontier because teardown drops its transient spacers. Without manual
+		// ownership the flags are moot — start() issues a forced full render.
 		if (this.#manualViewportTop === undefined) {
 			this.#widthSettleRepairPending = false;
 			this.#tabWidthRepairPending = false;
+			this.#manualResumeViewportTop = undefined;
 		}
 		// Move the cursor after the frame actually displayed to prevent
 		// overwriting/artifacts on exit. The latest logical frame can differ while
 		// a semantic viewport retains the previously painted frame.
 		const displayedFrameLines = this.#previousLines.length || this.#latestRenderedLines.length;
-		if (displayedFrameLines > 0) {
+		// A manual viewport is a history window; moving to the logical end can make
+		// the next temporary restart scroll an already committed row into history.
+		if (displayedFrameLines > 0 && this.#manualViewportTop === undefined) {
 			const targetRow = displayedFrameLines; // Line after the last content
 			const lineDiff = targetRow - this.#hardwareCursorRow;
 			if (lineDiff > 0) {
@@ -2939,7 +2943,6 @@ export class TUI extends Container {
 		this.#transcriptRebuildPending = false;
 		this.#latestRenderedFrontierSpacerLineCount = 0;
 		this.#manualFrontierSpacerLineCount = 0;
-		this.#manualResumeViewportTop = undefined;
 		this.#resizeRenderQueued = false;
 		this.#resizeRenderMutationQueued = false;
 		this.#renderMutationQueued = false;

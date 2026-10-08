@@ -231,6 +231,78 @@ describe("TUI bottom-pinned layout", () => {
 				}
 			});
 
+			it("retains the manual resume frontier across stop and start", async () => {
+				const term = new VirtualTerminal(40, 6, { isProcessTerminal });
+				const tui = new TUI(term);
+				const transcript = new MutableLinesComponent(["transcript-0", "transcript-1", "transcript-2"]);
+				const working = new MutableLinesComponent(Array.from({ length: 5 }, (_value, index) => `working-${index}`));
+				const status = new LinesComponent(["status"]);
+				tui.addChild(transcript);
+				tui.addChild(working);
+				tui.addChild(status);
+				tui.setBottomPinnedComponent(status);
+
+				try {
+					tui.start();
+					await term.waitForRender();
+					transcript.setLines(Array.from({ length: 14 }, (_value, index) => `transcript-${index}`));
+					tui.requestRender();
+					await term.waitForRender();
+					working.setLines([]);
+					tui.requestRender();
+					await term.waitForRender();
+					const committedRows = Array.from({ length: 14 }, (_value, index) => `transcript-${index}`);
+					expect(
+						term
+							.getScrollBuffer()
+							.map(line => line.trimEnd())
+							.filter(line => line.startsWith("transcript-")),
+					).toEqual(committedRows);
+
+					expect(tui.scrollViewportPages(-1)).toBe(true);
+					await term.flush();
+					working.setLines(["later-0"]);
+					tui.requestRender();
+					await term.waitForRender();
+					const manualRowsBeforeStop = term
+						.getScrollBuffer()
+						.map(line => line.trimEnd())
+						.filter(line => line.startsWith("transcript-"));
+					tui.stop();
+					expect(
+						term
+							.getScrollBuffer()
+							.map(line => line.trimEnd())
+							.filter(line => line.startsWith("transcript-")),
+					).toEqual(manualRowsBeforeStop);
+					tui.start();
+					await term.waitForRender();
+
+					expect(tui.followLiveViewport()).toBe(true);
+					await term.flush();
+					const followedViewport = term.getViewport().map(line => line.trimEnd());
+					if (isProcessTerminal) {
+						expect(followedViewport).toEqual(["later-0", "", "", "", "", "status"]);
+					} else {
+						expect(followedViewport.at(-1)).toBe("status");
+						expect(followedViewport.filter(line => line === "later-0")).toHaveLength(1);
+					}
+
+					working.setLines(["later-0", "later-1"]);
+					tui.requestRender();
+					await term.waitForRender();
+					expect(
+						term
+							.getScrollBuffer()
+							.map(line => line.trimEnd())
+							.filter(line => line.startsWith("transcript-")),
+					).toEqual(committedRows);
+					expect(term.getViewport().at(-1)?.trimEnd()).toBe("status");
+				} finally {
+					tui.stop();
+				}
+			});
+
 			it("recomputes frontier spacer geometry after layout growth", async () => {
 				const term = new VirtualTerminal(40, 6, { isProcessTerminal });
 				const tui = new TUI(term, undefined, { widthSettleMs: 0 });
