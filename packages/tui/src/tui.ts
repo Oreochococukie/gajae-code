@@ -1554,6 +1554,11 @@ export class TUI extends Container {
 	getViewportAnchorComponent(): Component | null {
 		return this.#viewportAnchorComponent;
 	}
+	#captureManualResumeViewportTop(): void {
+		if (this.#latestRenderedFrontierSpacerLineCount === 0) return;
+		const committedFrontier = this.#scrollbackResumeViewportTop ?? this.#nativeScrollbackViewportTop;
+		this.#manualResumeViewportTop = committedFrontier > 0 ? committedFrontier : undefined;
+	}
 
 	/** Clear manual viewport ownership and durable history before replacing the transcript identity. */
 	resetViewportAnchorIntent(): void {
@@ -1644,6 +1649,7 @@ export class TUI extends Container {
 			this.#suspendRasterLeasesForManualViewport(() => this.revealViewportAnchor(id, alignment))
 		)
 			return true;
+		if (this.#manualViewportTop === undefined) this.#captureManualResumeViewportTop();
 		this.#manualViewportAnchor = {
 			id: selected.id,
 			graphemeIndex:
@@ -1790,10 +1796,7 @@ export class TUI extends Container {
 				this.#manualViewportFallbackAnchors = fallbacks;
 			}
 		}
-		if (previousManualViewportTop === undefined && this.#latestRenderedFrontierSpacerLineCount > 0) {
-			const committedFrontier = this.#scrollbackResumeViewportTop ?? this.#nativeScrollbackViewportTop;
-			this.#manualResumeViewportTop = committedFrontier > 0 ? committedFrontier : undefined;
-		}
+		if (previousManualViewportTop === undefined) this.#captureManualResumeViewportTop();
 		this.#manualViewportTop = targetViewportTop;
 		let contentPainted = false;
 		const painted = this.#repaintViewportFromLines(
