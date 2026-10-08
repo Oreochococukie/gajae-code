@@ -123,6 +123,10 @@ describe("TUI bottom-pinned layout", () => {
 					expect(resizedViewport.filter(line => line.startsWith("transcript-"))).toEqual(
 						Array.from({ length: 4 }, (_value, index) => `transcript-${index + 10}`),
 					);
+				} else {
+					expect(resizedViewport.filter(line => line.startsWith("transcript-"))).toEqual(
+						Array.from({ length: 7 }, (_value, index) => `transcript-${index + 7}`),
+					);
 				}
 				expect(resizedViewport.at(-1)).toBe("status");
 
