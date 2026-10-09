@@ -24,7 +24,7 @@ describe("MCP HTTP redirects", () => {
 		});
 		try {
 			await expect(
-				fetchMcpRespectingOrigin(`${trusted.url}/mcp`, {
+				fetchMcpRespectingOrigin(new URL("/mcp", trusted.url).toString(), {
 					method: "POST",
 					headers: { "X-Api-Key": "secret-key", "Mcp-Session-Id": "session-1" },
 					body: '{"jsonrpc":"2.0"}',
@@ -38,24 +38,31 @@ describe("MCP HTTP redirects", () => {
 	});
 
 	test("follows a same-origin redirect and keeps the custom header", async () => {
+		const seen: string[] = [];
 		const server = Bun.serve({
 			hostname: "127.0.0.1",
 			port: 0,
 			fetch(request) {
 				const url = new URL(request.url);
+				seen.push(url.pathname);
 				if (url.pathname === "/a") {
 					return new Response(null, { status: 307, headers: { location: "/b" } });
 				}
-				return new Response(request.headers.get("x-api-key") ?? "");
+				if (url.pathname === "/b") {
+					return new Response(request.headers.get("x-api-key") ?? "", { status: 200 });
+				}
+				return new Response("unexpected", { status: 404 });
 			},
 		});
 		try {
-			const response = await fetchMcpRespectingOrigin(`${server.url}/a`, {
+			const response = await fetchMcpRespectingOrigin(new URL("/a", server.url).toString(), {
 				method: "POST",
 				headers: { "X-Api-Key": "secret-key" },
 				body: "{}",
 			});
+			expect(response.status).toBe(200);
 			expect(await response.text()).toBe("secret-key");
+			expect(seen).toEqual(["/a", "/b"]);
 		} finally {
 			server.stop(true);
 		}
