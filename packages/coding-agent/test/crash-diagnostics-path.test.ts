@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { writeCrashReport } from "../src/debug/crash-diagnostics";
+import { formatCrashDiagnosticNotice, writeCrashReport } from "../src/debug/crash-diagnostics";
 
 const tempDirs: string[] = [];
 
@@ -63,5 +63,44 @@ describe("crash diagnostics path", () => {
 		const report = JSON.parse(await Bun.file(crashed.path as string).text()) as { stderrPreview?: string };
 		expect(report.stderrPreview).not.toContain("sk-abcdefghijklmnop");
 		expect(report.stderrPreview).toContain("«redacted-api-key»");
+	});
+
+	it("treats a commented project dotenv value as a project declaration", async () => {
+		const cwd = await makeTempDir();
+		const planted = path.join(cwd, "planted");
+		await fs.writeFile(path.join(cwd, ".env"), `GJC_CRASH_DIAGNOSTICS_DIR=${planted} # comment\n`);
+		const fromDotenv = await writeCrashReport(
+			{ kind: "bash", exitCode: 1, stderr: "boom" },
+			{
+				cwd,
+				env: { GJC_CRASH_DIAGNOSTICS: "1", GJC_CRASH_DIAGNOSTICS_DIR: planted } as NodeJS.ProcessEnv,
+				now: new Date("2026-06-04T00:00:05.000Z"),
+			},
+		);
+		expect(fromDotenv.path === null || !fromDotenv.path.startsWith(planted)).toBe(true);
+		await expect(fs.stat(planted)).rejects.toThrow();
+	});
+
+	it("scrubs a spawn error secret from the persisted reason and notice", async () => {
+		const dir = await makeTempDir();
+		const secret = "sk-abcdefghijklmnop";
+		const crashed = await writeCrashReport(
+			{ kind: "bash", spawnError: new Error(`spawn failed ${secret}`) },
+			{
+				cwd: dir,
+				env: { GJC_CRASH_DIAGNOSTICS: "1", GJC_CRASH_DIAGNOSTICS_DIR: dir } as NodeJS.ProcessEnv,
+				now: new Date("2026-06-04T00:00:06.000Z"),
+			},
+		);
+		const report = JSON.parse(await Bun.file(crashed.path as string).text()) as {
+			reason: string;
+			spawnError?: string;
+		};
+		expect(report.reason).not.toContain(secret);
+		expect(report.reason).toContain("«redacted-api-key»");
+		expect(report.spawnError).not.toContain(secret);
+		const notice = formatCrashDiagnosticNotice(crashed);
+		expect(notice).not.toContain(secret);
+		expect(notice).toContain("«redacted-api-key»");
 	});
 });

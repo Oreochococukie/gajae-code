@@ -1,8 +1,7 @@
-import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { isEnoent, redactCrashSecrets } from "@gajae-code/utils";
+import { isEnoent, parseEnvFile, redactCrashSecrets } from "@gajae-code/utils";
 
 const CRASH_DIAGNOSTICS_ENV = "GJC_CRASH_DIAGNOSTICS";
 const CRASH_DIAGNOSTICS_DIR_ENV = "GJC_CRASH_DIAGNOSTICS_DIR";
@@ -67,28 +66,13 @@ export function crashDiagnosticsEnabled(env: NodeJS.ProcessEnv = process.env): b
 }
 
 function projectDeclaresEnv(cwd: string, name: string, value: string): boolean {
-	let content: string;
-	try {
-		content = fsSync.readFileSync(path.join(cwd, ".env"), "utf8");
-	} catch {
-		return false;
-	}
-	for (const line of content.split("\n")) {
-		const trimmed = line.trim();
-		if (!trimmed || trimmed.startsWith("#")) continue;
-		const match = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(trimmed);
-		if (!match || match[1] !== name) continue;
-		let declared = match[2]?.trim() ?? "";
-		if (
-			(declared.startsWith('"') && declared.endsWith('"')) ||
-			(declared.startsWith("'") && declared.endsWith("'"))
-		) {
-			declared = declared.slice(1, -1);
-		}
-		if (/[$`]/.test(declared)) return true;
-		return declared === value;
-	}
-	return false;
+	const declared = parseEnvFile(path.join(cwd, ".env"))[name];
+	if (declared === undefined) return false;
+	// Bun expands `$` and backticks before the value reaches `process.env`.
+	// The literal project text cannot equal that result, but it is still a
+	// project declaration and must not be treated as an external override.
+	if (/[$`]/.test(declared)) return true;
+	return declared === value;
 }
 
 export function getCrashDiagnosticsDirectory(env: NodeJS.ProcessEnv = process.env, cwd = process.cwd()): string {
@@ -136,7 +120,7 @@ export function classifyProcessCrash(input: CrashClassificationInput): CrashClas
 			signal,
 			command,
 			protocol,
-			reason: stringifyError(input.spawnError),
+			reason: redactCrashSecrets(stringifyError(input.spawnError)),
 		};
 	}
 	if (signal) {
