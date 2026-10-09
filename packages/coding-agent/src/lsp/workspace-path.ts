@@ -49,3 +49,11 @@ export async function assertInsideWorkspace(cwd: string, filePath: string): Prom
 		throw new ToolError(`LSP edit escapes the workspace: ${filePath}`);
 	}
 }
+
+/** Rename only after both real paths stay inside the workspace. */
+export async function renameInsideWorkspace(cwd: string, source: string, dest: string): Promise<void> {
+	await assertInsideWorkspace(cwd, source);
+	await assertInsideWorkspace(cwd, dest);
+	await fs.mkdir(path.dirname(dest), { recursive: true });
+	await fs.rename(source, dest);
+}

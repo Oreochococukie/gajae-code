@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { assertInsideWorkspace } from "../src/lsp/workspace-path";
+import { assertInsideWorkspace, renameInsideWorkspace } from "../src/lsp/workspace-path";
 
 describe("assertInsideWorkspace", () => {
 	it("allows a workspace file and rejects a symlink that leaves it", async () => {
@@ -33,5 +33,34 @@ describe("assertInsideWorkspace", () => {
 		await expect(assertInsideWorkspace(workspace, path.join(workspace, "link", "newdir", "a.ts"))).rejects.toThrow(
 			/escapes the workspace/,
 		);
+	});
+
+	it("renames inside the workspace and refuses a destination or symlink that leaves it", async () => {
+		const root = await mkdtemp(path.join(tmpdir(), "lsp-rename-"));
+		const workspace = path.join(root, "repo");
+		await mkdir(workspace);
+		const source = path.join(workspace, "note.txt");
+		const outside = path.join(root, "secret.txt");
+		await writeFile(source, "ok");
+		await writeFile(outside, "secret");
+		await symlink(outside, path.join(workspace, "leak.txt"));
+
+		await expect(
+			renameInsideWorkspace(workspace, source, path.join(workspace, "moved.txt")),
+		).resolves.toBeUndefined();
+		expect(await readFile(path.join(workspace, "moved.txt"), "utf8")).toBe("ok");
+		await expect(lstat(source)).rejects.toMatchObject({ code: "ENOENT" });
+
+		await expect(renameInsideWorkspace(workspace, path.join(workspace, "moved.txt"), outside)).rejects.toThrow(
+			/escapes the workspace/,
+		);
+		expect(await readFile(path.join(workspace, "moved.txt"), "utf8")).toBe("ok");
+		expect(await readFile(outside, "utf8")).toBe("secret");
+
+		await expect(
+			renameInsideWorkspace(workspace, path.join(workspace, "leak.txt"), path.join(workspace, "stolen.txt")),
+		).rejects.toThrow(/escapes the workspace/);
+		expect(await readFile(outside, "utf8")).toBe("secret");
+		await expect(lstat(path.join(workspace, "stolen.txt"))).rejects.toMatchObject({ code: "ENOENT" });
 	});
 });

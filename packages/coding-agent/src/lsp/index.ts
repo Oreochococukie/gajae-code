@@ -77,6 +77,7 @@ import {
 	symbolKindToIcon,
 	uriToFile,
 } from "./utils";
+import { assertInsideWorkspace, renameInsideWorkspace } from "./workspace-path";
 
 export type { LspServerStatus } from "./client";
 export type { LspToolDetails } from "./types";
@@ -1371,6 +1372,9 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				};
 			}
 
+			await assertInsideWorkspace(this.session.cwd, source);
+			await assertInsideWorkspace(this.session.cwd, dest);
+
 			const enumerated = await enumerateRenamePairs(source, dest);
 			if (enumerated.exceeded) {
 				return {
@@ -1527,6 +1531,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 			for (const [uri, bucket] of acceptedByUri) {
 				const filePath = uriToFile(uri);
+				await assertInsideWorkspace(this.session.cwd, filePath);
 				await applyTextEdits(filePath, bucket.edits);
 				const rel = formatPathRelativeToCwd(filePath, this.session.cwd);
 				summary.push(`  ${bucket.primaryServer}: applied ${bucket.edits.length} edit(s) to ${rel}`);
@@ -1541,8 +1546,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				}
 			}
 
-			await fs.promises.mkdir(path.dirname(dest), { recursive: true });
-			await fs.promises.rename(source, dest);
+			await renameInsideWorkspace(this.session.cwd, source, dest);
 			summary.push(`  Renamed ${sourceLabel} → ${destLabel}`);
 
 			for (const [serverName, serverConfig] of servers) {
