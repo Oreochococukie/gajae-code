@@ -151,7 +151,7 @@ describe("mcp oauth flow", () => {
 	});
 
 	it("does not follow redirects when fetching public registration metadata", async () => {
-		let metadataRedirect: RequestRedirect | undefined;
+		let metadataRedirect: string | undefined;
 		using _hook = hookFetch((input, init) => {
 			const url = String(input);
 			if (url === "https://provider.example/.well-known/oauth-authorization-server") {
