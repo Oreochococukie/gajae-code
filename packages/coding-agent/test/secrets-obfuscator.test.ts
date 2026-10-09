@@ -7,6 +7,11 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AssistantMessage } from "@gajae-code/ai/core";
+import { convertAnthropicMessages } from "@gajae-code/ai/providers/anthropic";
+import { convertMessages as convertGoogleMessages } from "@gajae-code/ai/providers/google-shared";
+import { streamOpenAIResponses } from "@gajae-code/ai/providers/openai-responses";
+import { convertResponsesAssistantMessage } from "@gajae-code/ai/providers/openai-responses-shared";
+import type { Model } from "@gajae-code/ai/types";
 import { createSecretObfuscator, loadSecrets } from "../src/secrets";
 import { deobfuscateSessionContext, obfuscateMessages, SecretObfuscator } from "../src/secrets/obfuscator";
 import { compileSecretRegex } from "../src/secrets/regex";
@@ -843,5 +848,240 @@ describe("obfuscateMessages", () => {
 		expect(JSON.stringify(obfuscatedOpenai)).not.toContain("rs_1");
 
 		expect(obfuscatedClean).toBe(cleanSigned);
+	});
+
+	it("omits signed provider replay bytes and redacts only the text those providers do not sign", async () => {
+		const secret = "configured-secret-value";
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }], TEST_KEY);
+		const usage = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const anthropicModel: Model<"anthropic-messages"> = {
+			api: "anthropic-messages",
+			provider: "anthropic",
+			id: "claude-sonnet-4-6",
+			name: "Claude Sonnet 4.6",
+			baseUrl: "https://api.anthropic.com",
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			maxTokens: 8_192,
+			contextWindow: 200_000,
+			reasoning: true,
+		};
+		const responsesModel: Model<"openai-responses"> = {
+			api: "openai-responses",
+			provider: "openai",
+			id: "gpt-4.1-mini",
+			name: "gpt-4.1-mini",
+			baseUrl: "https://api.openai.com/v1",
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			maxTokens: 16_000,
+			contextWindow: 128_000,
+			reasoning: true,
+		};
+		const googleModel: Model<"google-generative-ai"> = {
+			api: "google-generative-ai",
+			provider: "google",
+			id: "gemini-2.0-flash",
+			name: "Gemini 2.0 Flash",
+			baseUrl: "",
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			maxTokens: 8_192,
+			contextWindow: 1_000_000,
+			reasoning: true,
+		};
+		const googleSignature = "QUJDRA==";
+		const cleanReasoning = JSON.stringify({
+			type: "reasoning",
+			id: "rs_clean",
+			encrypted_content: "enc-clean",
+		});
+		const anthropic: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: `plan ${secret}`, thinkingSignature: "anthropic-sig" },
+				{ type: "thinking", thinking: `unsigned ${secret}`, thinkingSignature: "" },
+				{ type: "redactedThinking", data: `blob ${secret}` },
+				{ type: "toolCall", id: "toolu_replay", name: "bash", arguments: { command: "echo ok" } },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: anthropicModel.id,
+			usage,
+			stopReason: "toolUse",
+			timestamp: 1,
+		};
+		const responses: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{
+					type: "thinking",
+					thinking: `plan ${secret}`,
+					thinkingSignature: cleanReasoning,
+					itemId: "rs_clean",
+				},
+			],
+			api: "openai-responses",
+			provider: "openai",
+			model: responsesModel.id,
+			usage,
+			stopReason: "stop",
+			timestamp: 2,
+		};
+		const google: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: `plan ${secret}`, thinkingSignature: googleSignature },
+				{
+					type: "toolCall",
+					id: "call_google",
+					name: "bash",
+					arguments: { command: `echo ${secret}` },
+					thoughtSignature: googleSignature,
+				},
+			],
+			api: "google-generative-ai",
+			provider: "google",
+			model: googleModel.id,
+			usage,
+			stopReason: "toolUse",
+			timestamp: 3,
+		};
+		const completions: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{
+					type: "thinking",
+					thinking: `plan ${secret}`,
+					thinkingSignature: "reasoning_content",
+				},
+			],
+			api: "openai-completions",
+			provider: "openai",
+			model: "compat-model",
+			usage,
+			stopReason: "stop",
+			timestamp: 4,
+		};
+		const history: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "visible reply" }],
+			api: "openai-responses",
+			provider: "openai",
+			model: responsesModel.id,
+			usage,
+			stopReason: "stop",
+			timestamp: 5,
+			providerPayload: {
+				type: "openaiResponsesHistory",
+				provider: "openai",
+				dt: true,
+				items: [
+					{ type: "reasoning", id: "rs_payload", encrypted_content: `cipher ${secret}` },
+					{
+						type: "function_call",
+						call_id: "call_payload",
+						name: "bash",
+						arguments: JSON.stringify({ command: `echo ${secret}` }),
+					},
+					{
+						type: "message",
+						role: "assistant",
+						status: "completed",
+						id: "msg_clean",
+						content: [{ type: "output_text", text: "clean reply" }],
+					},
+				],
+			},
+		};
+
+		const [obfuscatedAnthropic, obfuscatedResponses, obfuscatedGoogle, obfuscatedCompletions, obfuscatedHistory] =
+			obfuscateMessages(obfuscator, [anthropic, responses, google, completions, history]);
+		if (obfuscatedAnthropic?.role !== "assistant") throw new Error("expected anthropic assistant");
+		if (obfuscatedResponses?.role !== "assistant") throw new Error("expected responses assistant");
+		if (obfuscatedGoogle?.role !== "assistant") throw new Error("expected google assistant");
+		if (obfuscatedCompletions?.role !== "assistant") throw new Error("expected completions assistant");
+		if (obfuscatedHistory?.role !== "assistant") throw new Error("expected history assistant");
+
+		const anthropicWire = JSON.stringify(
+			convertAnthropicMessages(
+				[{ role: "user", content: "continue", timestamp: 1 }, obfuscatedAnthropic],
+				anthropicModel,
+				false,
+			),
+		);
+		expect(anthropicWire).not.toContain(secret);
+		expect(anthropicWire).not.toContain("anthropic-sig");
+		expect(anthropicWire).not.toContain("redacted_thinking");
+		expect(anthropicWire).toContain("tool_use");
+		expect(anthropicWire).toContain("unsigned");
+		const unsigned = obfuscatedAnthropic.content.find(block => block.type === "thinking");
+		if (unsigned?.type !== "thinking") throw new Error("expected redacted unsigned thinking");
+		expect(unsigned.thinking).not.toContain(secret);
+		expect(unsigned.thinkingSignature).toBe("");
+
+		const responsesBlock = obfuscatedResponses.content[0];
+		if (responsesBlock?.type !== "thinking") throw new Error("expected responses thinking to stay");
+		expect(responsesBlock.thinking).not.toContain(secret);
+		expect(responsesBlock.thinkingSignature).toBe(cleanReasoning);
+		const responsesWire = JSON.stringify(
+			convertResponsesAssistantMessage(obfuscatedResponses, responsesModel, 0, new Set()),
+		);
+		expect(responsesWire).not.toContain(secret);
+		expect(responsesWire).toContain("rs_clean");
+		expect(responsesWire).toContain("enc-clean");
+
+		const googleWire = JSON.stringify(
+			convertGoogleMessages(googleModel, {
+				messages: [{ role: "user", content: "continue", timestamp: 1 }, obfuscatedGoogle],
+			}),
+		);
+		expect(googleWire).not.toContain(secret);
+		expect(googleWire).not.toContain(googleSignature);
+		expect(googleWire).toContain("bash");
+		const googleCall = obfuscatedGoogle.content.find(block => block.type === "toolCall");
+		if (googleCall?.type !== "toolCall") throw new Error("expected google tool call");
+		expect(googleCall.thoughtSignature).toBeUndefined();
+		expect(JSON.stringify(googleCall.arguments)).not.toContain(secret);
+
+		const completionsBlock = obfuscatedCompletions.content[0];
+		if (completionsBlock?.type !== "thinking") throw new Error("expected completions thinking to stay");
+		expect(completionsBlock.thinking).not.toContain(secret);
+		expect(completionsBlock.thinkingSignature).toBe("reasoning_content");
+
+		const historyItems = obfuscatedHistory.providerPayload?.items ?? [];
+		expect(historyItems.some(item => item.type === "reasoning")).toBe(false);
+		expect(JSON.stringify(historyItems)).not.toContain(secret);
+		expect(JSON.stringify(historyItems)).toContain("call_payload");
+		const controller = new AbortController();
+		controller.abort();
+		const payload = await Promise.race([
+			new Promise<unknown>(resolve => {
+				streamOpenAIResponses(
+					responsesModel,
+					{ messages: [{ role: "user", content: "continue", timestamp: 1 }, obfuscatedHistory] },
+					{
+						apiKey: "test-key",
+						signal: controller.signal,
+						onPayload: captured => resolve(captured),
+					},
+				);
+			}),
+			new Promise<never>((_resolve, reject) => {
+				setTimeout(() => reject(new Error("OpenAI replay payload was not captured")), 20_000);
+			}),
+		]);
+		const replayWire = JSON.stringify(payload);
+		expect(replayWire).not.toContain(secret);
+		expect(replayWire).not.toContain("rs_payload");
+		expect(replayWire).toContain("call_payload");
+		expect(replayWire).toContain("clean reply");
 	});
 });

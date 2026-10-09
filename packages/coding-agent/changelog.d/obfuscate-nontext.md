@@ -1,3 +1,3 @@
 ### Fixed
 
-- Configured secrets in unsigned thinking text and tool-call arguments are replaced before those messages leave the process. A signed thinking block or opaque redacted-thinking block that contains a secret is omitted instead of rewritten under its provider signature. Image payloads are not scanned.
+- Configured secrets in unsigned thinking text and tool-call arguments are replaced before those messages leave the process, and a signed thinking block, opaque redacted-thinking block, or replayed Responses reasoning item that contains a secret is omitted instead of being rewritten under its provider signature.

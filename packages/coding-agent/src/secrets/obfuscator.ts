@@ -375,16 +375,22 @@ export function deobfuscateSessionContext(
 
 /**
  * Obfuscate text and tool-call arguments. Unsigned thinking text is redacted.
- * A thinking or redacted-thinking block that carries provider integrity data
- * (Anthropic `thinkingSignature`, OpenAI reasoning-item `thinkingSignature` /
- * `itemId`, or opaque `redactedThinking.data`) is omitted when a configured
- * secret occurs in it. Those bytes are not rewritten under the old signature.
- * Image payloads are not scanned.
+ * A block whose provider replays it under integrity metadata is omitted when a
+ * configured secret occurs in those bytes or in the text that would be sent
+ * with them. OpenAI Responses sends the reasoning item in `thinkingSignature`
+ * (and, when present, `providerPayload` history) rather than the thinking
+ * prose, so a clean signature is kept and only the prose is redacted. Image
+ * payloads are not scanned.
  */
 export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Message[]): Message[] {
 	return messages.map(msg => {
-		if (!Array.isArray(msg.content)) return msg;
+		const payload = scrubHistoryPayload(obfuscator, readProviderPayload(msg));
+		const payloadChanged = payload !== readProviderPayload(msg);
+		if (!Array.isArray(msg.content)) {
+			return payloadChanged ? ({ ...msg, providerPayload: payload } as typeof msg) : msg;
+		}
 
+		const api = msg.role === "assistant" ? msg.api : undefined;
 		let changed = false;
 		const content: object[] = [];
 		for (const block of msg.content) {
@@ -399,7 +405,7 @@ export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Messag
 				continue;
 			}
 			if (block.type === "thinking") {
-				const next = redactUnsignedThinking(obfuscator, block);
+				const next = scrubThinkingBlock(obfuscator, block, api);
 				if (next === undefined) {
 					changed = true;
 					continue;
@@ -418,16 +424,21 @@ export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Messag
 			}
 			if (block.type === "toolCall") {
 				const obfuscatedArguments = deepWalkStrings(block.arguments, text => obfuscator.obfuscate(text));
-				if (obfuscatedArguments !== block.arguments) {
+				const dropSignature =
+					textHasSecret(obfuscator, block.thoughtSignature) || obfuscatedArguments !== block.arguments;
+				if (dropSignature) {
 					changed = true;
-					content.push({ ...block, arguments: obfuscatedArguments });
+					const { thoughtSignature: _signature, ...rest } = block;
+					content.push({ ...rest, arguments: obfuscatedArguments });
 					continue;
 				}
 			}
 			content.push(block);
 		}
 
-		return changed ? ({ ...msg, content } as typeof msg) : msg;
+		if (!changed && !payloadChanged) return msg;
+		const next = changed ? { ...msg, content } : { ...msg };
+		return payloadChanged ? ({ ...next, providerPayload: payload } as typeof msg) : (next as typeof msg);
 	});
 }
 
@@ -435,13 +446,23 @@ function textHasSecret(obfuscator: SecretObfuscator, value: string | undefined):
 	return value !== undefined && obfuscator.obfuscate(value) !== value;
 }
 
+const RESPONSES_APIS = new Set(["openai-responses", "azure-openai-responses", "openai-codex-responses"]);
+const SIGNED_TEXT_APIS = new Set(["anthropic-messages", "bedrock-converse-stream"]);
+
+/** Google only replays a thought signature when it is valid base64. */
+function signatureIsGoogleThought(signature: string | undefined): boolean {
+	if (!signature || signature.length % 4 !== 0) return false;
+	return /^[A-Za-z0-9+/]+={0,2}$/.test(signature);
+}
+
 /**
- * Signed thinking is replayed with its signature. Rewriting the text and
- * keeping that signature makes Anthropic reject the turn and makes OpenAI
- * parse a stale reasoning item. Omit the block instead. Unsigned thinking
- * has no integrity metadata, so only its semantic strings are redacted.
+ * Decide per provider whether thinking text can be redacted in place.
+ * Anthropic, Bedrock, and Google send the thinking text together with a
+ * signature, so a secret there drops the block instead of rewriting it.
+ * Responses sends `JSON.parse(thinkingSignature)` and leaves the prose off
+ * the wire, so a clean signature stays byte-for-byte.
  */
-function redactUnsignedThinking<
+function scrubThinkingBlock<
 	T extends {
 		type: "thinking";
 		thinking: string;
@@ -450,22 +471,126 @@ function redactUnsignedThinking<
 		summaryText?: string;
 		rawText?: string;
 	},
->(obfuscator: SecretObfuscator, block: T): T | undefined {
-	const signed = block.thinkingSignature !== undefined || block.itemId !== undefined;
-	const secretInIntegrity =
-		textHasSecret(obfuscator, block.thinkingSignature) || textHasSecret(obfuscator, block.itemId);
-	const secretInText =
+>(obfuscator: SecretObfuscator, block: T, api: string | undefined): T | undefined {
+	const secretInSignature = textHasSecret(obfuscator, block.thinkingSignature);
+	const secretInItemId = textHasSecret(obfuscator, block.itemId);
+	const secretInSemantic =
 		textHasSecret(obfuscator, block.thinking) ||
 		textHasSecret(obfuscator, block.summaryText) ||
 		textHasSecret(obfuscator, block.rawText);
-	if (secretInIntegrity || (signed && secretInText)) return undefined;
-	if (!secretInText) return block;
+
+	if (api !== undefined && RESPONSES_APIS.has(api)) {
+		if (secretInSignature || secretInItemId) return undefined;
+		if (!secretInSemantic) return block;
+		return redactThinkingText(obfuscator, block);
+	}
+	if (api === "openai-completions") {
+		if (secretInSignature || secretInItemId) return undefined;
+		if (!secretInSemantic) return block;
+		return redactThinkingText(obfuscator, block);
+	}
+	if (api?.startsWith("google-")) {
+		if (secretInSignature || secretInItemId) return undefined;
+		if (signatureIsGoogleThought(block.thinkingSignature) && secretInSemantic) return undefined;
+		if (!secretInSemantic) return block;
+		return redactThinkingText(obfuscator, block);
+	}
+	if (api !== undefined && SIGNED_TEXT_APIS.has(api)) {
+		const signed = Boolean(block.thinkingSignature?.trim());
+		if (secretInSignature || secretInItemId || (signed && secretInSemantic)) return undefined;
+		if (!secretInSemantic) return block;
+		return redactThinkingText(obfuscator, block);
+	}
+	const signed = Boolean(block.thinkingSignature?.trim() || block.itemId?.trim());
+	if (secretInSignature || secretInItemId || (signed && secretInSemantic)) return undefined;
+	if (!secretInSemantic) return block;
+	return redactThinkingText(obfuscator, block);
+}
+
+function redactThinkingText<
+	T extends {
+		thinking: string;
+		summaryText?: string;
+		rawText?: string;
+	},
+>(obfuscator: SecretObfuscator, block: T): T {
+	const thinking = obfuscator.obfuscate(block.thinking);
+	const summaryText = block.summaryText !== undefined ? obfuscator.obfuscate(block.summaryText) : undefined;
+	const rawText = block.rawText !== undefined ? obfuscator.obfuscate(block.rawText) : undefined;
+	if (thinking === block.thinking && summaryText === block.summaryText && rawText === block.rawText) return block;
 	return {
 		...block,
-		thinking: obfuscator.obfuscate(block.thinking),
-		...(block.summaryText !== undefined ? { summaryText: obfuscator.obfuscate(block.summaryText) } : {}),
-		...(block.rawText !== undefined ? { rawText: obfuscator.obfuscate(block.rawText) } : {}),
+		thinking,
+		...(block.summaryText !== undefined ? { summaryText } : {}),
+		...(block.rawText !== undefined ? { rawText } : {}),
 	};
+}
+
+function readProviderPayload(msg: object): { type?: unknown; items?: unknown } | undefined {
+	if (!("providerPayload" in msg)) return undefined;
+	return (msg as { providerPayload?: { type?: unknown; items?: unknown } }).providerPayload;
+}
+
+/**
+ * Native Responses replay prefers `providerPayload.items` over thinking blocks.
+ * Reasoning items are opaque and are dropped whole. Tool arguments and message
+ * text are semantic and are redacted in place.
+ */
+function scrubHistoryPayload<T>(obfuscator: SecretObfuscator, payload: T): T {
+	if (!payload || typeof payload !== "object") return payload;
+	const record = payload as { type?: unknown; items?: unknown };
+	if (record.type !== "openaiResponsesHistory" || !Array.isArray(record.items)) return payload;
+	let changed = false;
+	const items: unknown[] = [];
+	for (const item of record.items) {
+		const next = scrubHistoryItem(obfuscator, item);
+		if (next === undefined) {
+			changed = true;
+			continue;
+		}
+		if (next !== item) changed = true;
+		items.push(next);
+	}
+	if (!changed) return payload;
+	return { ...record, items } as T;
+}
+
+function scrubHistoryItem(obfuscator: SecretObfuscator, item: unknown): unknown | undefined {
+	if (!item || typeof item !== "object") {
+		return typeof item === "string" && textHasSecret(obfuscator, item) ? undefined : item;
+	}
+	const record = item as Record<string, unknown>;
+	if (record.type === "reasoning") return historyItemHasSecret(obfuscator, record) ? undefined : record;
+	if (record.type === "function_call") return rewriteHistoryField(obfuscator, record, "arguments");
+	if (record.type === "custom_tool_call") return rewriteHistoryField(obfuscator, record, "input");
+	if (record.type === "function_call_output" || record.type === "custom_tool_call_output") {
+		return rewriteHistoryField(obfuscator, record, "output");
+	}
+	if (record.type === "message" && Array.isArray(record.content)) {
+		const content = deepWalkStrings(record.content, text => obfuscator.obfuscate(text));
+		return content === record.content ? record : { ...record, content };
+	}
+	return historyItemHasSecret(obfuscator, record) ? undefined : record;
+}
+
+function rewriteHistoryField(
+	obfuscator: SecretObfuscator,
+	item: Record<string, unknown>,
+	key: "arguments" | "input" | "output",
+): Record<string, unknown> {
+	if (!(key in item)) return item;
+	const next = deepWalkStrings(item[key], text => obfuscator.obfuscate(text));
+	return next === item[key] ? item : { ...item, [key]: next };
+}
+
+function historyItemHasSecret(obfuscator: SecretObfuscator, item: Record<string, unknown>): boolean {
+	let encoded: string;
+	try {
+		encoded = JSON.stringify(item);
+	} catch {
+		return false;
+	}
+	return textHasSecret(obfuscator, encoded);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
