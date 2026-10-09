@@ -50,10 +50,16 @@ export async function assertInsideWorkspace(cwd: string, filePath: string): Prom
 	}
 }
 
-/** Rename only after both real paths stay inside the workspace. */
+/** The directory entry itself must sit inside the workspace, not only its real target. */
+export async function assertDirectoryEntryInsideWorkspace(cwd: string, filePath: string): Promise<void> {
+	await assertInsideWorkspace(cwd, path.dirname(path.resolve(filePath)));
+}
+
+/** Rename only after both real paths and the source directory entry stay inside the workspace. */
 export async function renameInsideWorkspace(cwd: string, source: string, dest: string): Promise<void> {
 	await assertInsideWorkspace(cwd, source);
 	await assertInsideWorkspace(cwd, dest);
+	await assertDirectoryEntryInsideWorkspace(cwd, source);
 	await fs.mkdir(path.dirname(dest), { recursive: true });
 	await fs.rename(source, dest);
 }

@@ -3,7 +3,11 @@ import { lstat, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/pro
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { LspTool } from "../src/lsp";
-import { assertInsideWorkspace, renameInsideWorkspace } from "../src/lsp/workspace-path";
+import {
+	assertDirectoryEntryInsideWorkspace,
+	assertInsideWorkspace,
+	renameInsideWorkspace,
+} from "../src/lsp/workspace-path";
 import type { ToolSession } from "../src/tools";
 
 describe("assertInsideWorkspace", () => {
@@ -90,4 +94,30 @@ describe("assertInsideWorkspace", () => {
 			await expect(lstat(path.join(workspace, "stolen.txt"))).rejects.toMatchObject({ code: "ENOENT" });
 		},
 	);
+
+	it("refuses to move an outside symlink whose target is inside the workspace", async () => {
+		const root = await mkdtemp(path.join(tmpdir(), "lsp-inward-link-"));
+		const workspace = path.join(root, "repo");
+		await mkdir(workspace);
+		const inside = path.join(workspace, "a.ts");
+		await writeFile(inside, "ok");
+		const outsideLink = path.join(root, "link.ts");
+		await symlink(inside, outsideLink);
+		await expect(renameInsideWorkspace(workspace, outsideLink, path.join(workspace, "new.ts"))).rejects.toThrow(
+			/escapes the workspace/,
+		);
+		await expect(assertDirectoryEntryInsideWorkspace(workspace, outsideLink)).rejects.toThrow(
+			/escapes the workspace/,
+		);
+		expect((await lstat(outsideLink)).isSymbolicLink()).toBe(true);
+		expect(await readFile(inside, "utf8")).toBe("ok");
+		await expect(lstat(path.join(workspace, "new.ts"))).rejects.toMatchObject({ code: "ENOENT" });
+
+		const tool = new LspTool({ cwd: workspace } as ToolSession);
+		await expect(
+			tool.execute("rename-inward", { action: "rename_file", file: outsideLink, new_name: "new.ts" }),
+		).rejects.toThrow(/escapes the workspace/);
+		expect((await lstat(outsideLink)).isSymbolicLink()).toBe(true);
+		expect(await readFile(inside, "utf8")).toBe("ok");
+	});
 });

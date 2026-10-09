@@ -77,7 +77,7 @@ import {
 	symbolKindToIcon,
 	uriToFile,
 } from "./utils";
-import { assertInsideWorkspace, renameInsideWorkspace } from "./workspace-path";
+import { assertDirectoryEntryInsideWorkspace, assertInsideWorkspace, renameInsideWorkspace } from "./workspace-path";
 
 export type { LspServerStatus } from "./client";
 export type { LspToolDetails } from "./types";
@@ -1374,6 +1374,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 			await assertInsideWorkspace(this.session.cwd, source);
 			await assertInsideWorkspace(this.session.cwd, dest);
+			await assertDirectoryEntryInsideWorkspace(this.session.cwd, source);
 
 			const enumerated = await enumerateRenamePairs(source, dest);
 			if (enumerated.exceeded) {
