@@ -43,7 +43,7 @@ function stripInlineShellComment(value: string): string {
  * Strips an unquoted trailing `# comment` from a dotenv value the way Bun's
  * dotenv loader does: an unescaped `#` starts a comment regardless of the
  * preceding character (`a#b` loads as `a`), while `#` inside quotes or after a
- * backslash escape survives. Used only by `parseEnvFile`; shell files use
+ * backslash escape survives. Used for unquoted dotenv values; shell files use
  * `stripInlineShellComment`, whose POSIX rule requires whitespace before `#`.
  */
 function stripInlineDotenvComment(value: string): string {
@@ -117,6 +117,13 @@ export function parseShellEnvFile(filePath: string): Record<string, string> {
  * needs the parser to see the key at all, and an operator environment value
  * cannot equal attacker-written expansion text, so a literal parse stays
  * conservative.
+ *
+ * Quote handling has to match Bun's loader, not a one-line strip. A double-quoted
+ * value may span physical lines. Inside double quotes only the pairs `\n` and `\r`
+ * become newline and carriage return; every other backslash pair keeps its
+ * backslash. Single quotes do not unescape. Text after the closing quote is
+ * discarded. The decoded newline is stored: dropping the key would make the
+ * value Bun loaded into `process.env` look like an operator override.
  */
 export function parseEnvFile(filePath: string): Record<string, string> {
 	try {
@@ -127,31 +134,137 @@ export function parseEnvFile(filePath: string): Record<string, string> {
 	}
 }
 
+/**
+ * Bun treats CR, LF, and CRLF as line breaks, including a carriage return inside
+ * quotes. Normalize before decoding, so a quoted `\r` escape is still a carriage
+ * return rather than another line break.
+ */
+function normalizeDotenvNewlines(content: string): string {
+	return content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+function isInlineWhitespace(char: string | undefined): boolean {
+	return char !== undefined && char !== "\n" && char !== "\r" && /\s/.test(char);
+}
+
+function isEnvKeyStart(char: string | undefined): boolean {
+	return char !== undefined && ((char >= "A" && char <= "Z") || (char >= "a" && char <= "z") || char === "_");
+}
+
+function isEnvKeyContinue(char: string | undefined): boolean {
+	return isEnvKeyStart(char) || (char !== undefined && char >= "0" && char <= "9");
+}
+
+function indexAfterLine(text: string, index: number): number {
+	const end = text.indexOf("\n", index);
+	return end === -1 ? text.length : end + 1;
+}
+
+/**
+ * The closer is the next quote that is not the second character of a backslash
+ * pair. `\"` and `\'` therefore stay inside the value instead of ending it.
+ */
+function findClosingQuote(text: string, start: number, quote: '"' | "'"): number {
+	for (let index = start; index < text.length; index++) {
+		if (text[index] === "\\") {
+			if (index + 1 >= text.length) return -1;
+			index++;
+			continue;
+		}
+		if (text[index] === quote) return index;
+	}
+	return -1;
+}
+
+/** Inside double quotes, only `\n` and `\r` are escapes. Other pairs keep the backslash. */
+function decodeDoubleQuoted(raw: string): string {
+	const out: string[] = [];
+	for (let index = 0; index < raw.length; index++) {
+		const char = raw[index];
+		if (char !== "\\" || index + 1 >= raw.length) {
+			if (char !== undefined) out.push(char);
+			continue;
+		}
+		const next = raw[index + 1];
+		if (next === "n") out.push("\n");
+		else if (next === "r") out.push("\r");
+		else if (next !== undefined) out.push("\\", next);
+		index++;
+	}
+	return out.join("");
+}
+
+function readDotenvValue(text: string, index: number): { text: string; next: number } {
+	const opener = text[index];
+	if (opener === '"' || opener === "'") {
+		const close = findClosingQuote(text, index + 1, opener);
+		if (close !== -1) {
+			const raw = text.slice(index + 1, close);
+			return {
+				text: opener === '"' ? decodeDoubleQuoted(raw) : raw,
+				next: indexAfterLine(text, close + 1),
+			};
+		}
+	}
+	const end = text.indexOf("\n", index);
+	const lineEnd = end === -1 ? text.length : end;
+	return {
+		text: stripInlineDotenvComment(text.slice(index, lineEnd)).trim(),
+		next: end === -1 ? text.length : end + 1,
+	};
+}
+
 /** Parse dotenv content that has already been read from a trusted file. */
 export function parseEnvFileContent(content: string): Record<string, string> {
+	const text = normalizeDotenvNewlines(content);
 	const result: Record<string, string> = {};
-	for (const line of content.split("\n")) {
-		const trimmed = line.trim();
-		// Skip comments and blank lines
-		if (!trimmed || trimmed.startsWith("#")) continue;
-
-		const match = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|:)\s*(.*)$/.exec(trimmed);
-		if (!match) continue;
-
-		const key = match[1];
-		if (!isValidEnvName(key)) continue;
-
-		// Strip an unquoted trailing `# comment` the way Bun's dotenv loader
-		// does (`KEY=v#note` loads as `v`); quoted `#` survives.
-		let value = stripInlineDotenvComment(match[2] ?? "").trim();
-
-		// Remove surrounding quotes (" or ')
-		if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-			value = value.slice(1, -1);
+	const length = text.length;
+	let index = 0;
+	while (index < length) {
+		while (isInlineWhitespace(text[index])) index++;
+		if (index >= length) break;
+		if (text[index] === "\n") {
+			index++;
+			continue;
 		}
-		if (!isSafeEnvValue(value)) continue;
+		if (text[index] === "#") {
+			index = indexAfterLine(text, index);
+			continue;
+		}
 
-		result[key] = value;
+		const lineStart = index;
+		if (text.startsWith("export", index) && isInlineWhitespace(text[index + 6])) {
+			index += 6;
+			while (isInlineWhitespace(text[index])) index++;
+		}
+
+		const keyStart = index;
+		if (!isEnvKeyStart(text[index])) {
+			index = indexAfterLine(text, lineStart);
+			continue;
+		}
+		index++;
+		while (isEnvKeyContinue(text[index])) index++;
+		const key = text.slice(keyStart, index);
+		if (!isValidEnvName(key)) {
+			index = indexAfterLine(text, lineStart);
+			continue;
+		}
+
+		while (isInlineWhitespace(text[index])) index++;
+		const separator = text[index];
+		if (separator !== "=" && separator !== ":") {
+			index = indexAfterLine(text, lineStart);
+			continue;
+		}
+		index++;
+		while (isInlineWhitespace(text[index])) index++;
+
+		const value = readDotenvValue(text, index);
+		index = value.next;
+		// A newline is a real snapshot value. Skipping the key here would fail open.
+		if (!isSafeEnvValue(value.text)) continue;
+		result[key] = value.text;
 	}
 
 	return result;
