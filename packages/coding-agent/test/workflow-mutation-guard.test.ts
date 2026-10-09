@@ -97,6 +97,50 @@ function parseStateCommandJson(stdout: string | undefined): Record<string, unkno
 	return JSON.parse(stdout) as Record<string, unknown>;
 }
 
+const projectTmpdirProbe = path.join(import.meta.dir, "fixtures/workflow-mutation-tmpdir-probe.ts");
+
+async function runProjectTmpdirProbe(input: {
+	cwd: string;
+	target: string;
+	sessionId: string;
+	drop?: "unlink" | "chdir";
+	expectedTmpdir?: string;
+}): Promise<{ blocked: boolean; message?: string }> {
+	const env: Record<string, string> = {};
+	for (const [key, value] of Object.entries(process.env)) {
+		if (value !== undefined && key !== "TMPDIR") env[key] = value;
+	}
+	env.GJC_TMPDIR_PROBE_CWD = input.cwd;
+	env.GJC_TMPDIR_PROBE_PATH = input.target;
+	env.GJC_TMPDIR_PROBE_SESSION = input.sessionId;
+	if (input.drop) env.GJC_TMPDIR_PROBE_DROP = input.drop;
+	if (input.expectedTmpdir !== undefined) env.GJC_TMPDIR_PROBE_EXPECT = input.expectedTmpdir;
+	const proc = Bun.spawn([process.execPath, projectTmpdirProbe], {
+		cwd: input.cwd,
+		env,
+		stdin: "ignore",
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const [stdout, stderr, exitCode] = await Promise.all([
+		new Response(proc.stdout).text(),
+		new Response(proc.stderr).text(),
+		proc.exited,
+	]);
+	if (exitCode !== 0) throw new Error(`tmpdir probe failed (${exitCode}): ${stderr || stdout}`);
+	let parsed: { blocked?: unknown; message?: unknown };
+	try {
+		parsed = JSON.parse(stdout.trim()) as { blocked?: unknown; message?: unknown };
+	} catch {
+		throw new Error(`tmpdir probe did not print JSON: ${stdout}`);
+	}
+	if (typeof parsed.blocked !== "boolean") throw new Error(`tmpdir probe JSON missing blocked: ${stdout}`);
+	if (parsed.message !== undefined && typeof parsed.message !== "string") {
+		throw new Error(`tmpdir probe JSON message was not a string: ${stdout}`);
+	}
+	return { blocked: parsed.blocked, message: parsed.message };
+}
+
 afterEach(async () => {
 	await Promise.all(tempRoots.splice(0).map(root => fs.rm(root, { recursive: true, force: true })));
 });
@@ -1074,55 +1118,40 @@ describe("workflow mutation guard", () => {
 		expect(decision.blocked).toBe(true);
 	});
 
-	it("refuses a planning mutation of a product file through a project TMPDIR inside the workspace", async () => {
-		const workspace = await makeTempRoot();
-		const projectTmp = path.join(workspace, "tmp");
-		const product = path.join(projectTmp, "src", "product.ts");
-		await fs.mkdir(path.dirname(product), { recursive: true });
-		await Bun.write(product, "original\n");
-		await Bun.write(path.join(workspace, ".env"), `TMPDIR=${projectTmp}\n`);
-		await writeActiveDeepInterview(workspace);
+	it("pins a project TMPDIR at import and still allows the real OS temp dir", async () => {
+		// The parent already imported the guard. The child imports it after `.env` exists.
+		for (const drop of ["unlink", "chdir"] as const) {
+			const workspace = await makeTempRoot();
+			await writeActiveDeepInterview(workspace);
+			const projectTmp = path.join(workspace, "tmp");
+			const product = path.join(projectTmp, "src", "product.ts");
+			await fs.mkdir(path.dirname(product), { recursive: true });
+			await Bun.write(product, "original\n");
+			await Bun.write(path.join(workspace, ".env"), `TMPDIR=${projectTmp}\n`);
 
-		const realOsTemp = process.env.TMPDIR?.trim() || os.tmpdir();
-		const previousTmpdir = process.env.TMPDIR;
-		process.env.TMPDIR = projectTmp;
-		try {
-			const inProject = await getWorkflowMutationDecision({
+			const decision = await runProjectTmpdirProbe({
 				cwd: workspace,
+				target: product,
 				sessionId: "session-a",
-				tool: tool("write"),
-				args: { path: product, content: "mutated" },
+				drop,
+				expectedTmpdir: projectTmp,
 			});
-			expect(inProject.blocked).toBe(true);
-			expect(inProject.message).toBe(DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE);
-			expect(await Bun.file(product).text()).toBe("original\n");
-
-			const osScratch = await getWorkflowMutationDecision({
-				cwd: workspace,
-				sessionId: "session-a",
-				tool: tool("write"),
-				args: { path: path.join(realOsTemp, "gjc-plan-os-scratch.md"), content: "scratch" },
-			});
-			expect(osScratch.blocked).toBe(false);
-
-			// A dotenv TMPDIR outside the OS temp dirs must not become scratch either.
-			const declaredOutside = path.join(os.homedir(), ".gjc-plan-not-temp");
-			const outsideProduct = path.join(declaredOutside, "src", "product.ts");
-			await Bun.write(path.join(workspace, ".env"), `TMPDIR=${declaredOutside}\n`);
-			process.env.TMPDIR = declaredOutside;
-			const outside = await getWorkflowMutationDecision({
-				cwd: workspace,
-				sessionId: "session-a",
-				tool: tool("write"),
-				args: { path: outsideProduct, content: "mutated" },
-			});
-			expect(outside.blocked).toBe(true);
-			expect(outside.message).toBe(DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE);
-		} finally {
-			if (previousTmpdir === undefined) delete process.env.TMPDIR;
-			else process.env.TMPDIR = previousTmpdir;
+			expect(decision.blocked, drop).toBe(true);
+			expect(decision.message, drop).toBe(DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE);
+			expect(await Bun.file(product).text(), drop).toBe("original\n");
 		}
-	});
+
+		const workspace = await makeTempRoot();
+		await writeActiveDeepInterview(workspace);
+		const realOsTemp = process.env.TMPDIR?.trim() || os.tmpdir();
+		const scratch = path.join(realOsTemp, `gjc-plan-os-scratch-${process.pid}.md`);
+		const allowed = await runProjectTmpdirProbe({
+			cwd: workspace,
+			target: scratch,
+			sessionId: "session-a",
+		});
+		expect(allowed.blocked).toBe(false);
+	}, 60_000);
 
 	it("blocks .gjc raw paths in deferred ast_edit apply even with no planning skill or forceOverride", async () => {
 		const cwd = await makeTempRoot();

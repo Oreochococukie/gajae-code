@@ -1800,15 +1800,11 @@ function tempEnvNames(): readonly string[] {
 	return process.platform === "win32" ? ["TEMP", "TMP", "TMPDIR"] : ["TMPDIR"];
 }
 
-function projectTempSnapshots(cwd: string): ProjectEnvSnapshot[] {
-	const snapshots = [projectEnvSnapshot(cwd)];
-	try {
-		const processCwd = process.cwd();
-		if (path.resolve(processCwd) !== path.resolve(cwd)) snapshots.push(projectEnvSnapshot(processCwd));
-	} catch {
-		// No process cwd to compare. The session directory snapshot still applies.
-	}
-	return snapshots;
+// The snapshot is the cwd at module import, not a directory created later or a chdir before this module is imported.
+const startupTempSnapshot = projectEnvSnapshot();
+
+function projectTempSnapshots(_cwd: string): ProjectEnvSnapshot[] {
+	return [startupTempSnapshot];
 }
 
 /** macOS account temp directory. `getconf` does not read `TMPDIR`. */
