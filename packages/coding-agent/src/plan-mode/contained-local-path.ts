@@ -76,3 +76,48 @@ export async function resolveContainedLocalPlanPath(localRoot: string, lexicalPa
 		cursor = parent;
 	}
 }
+
+/**
+ * Directory entry to unlink. Containment matches `resolveContainedLocalPlanPath`,
+ * including an in-root symlink target, but the returned path is the source name.
+ * Unlink then removes that name and leaves the target file in place.
+ */
+export async function containedLocalPlanUnlinkPath(localRoot: string, lexicalPath: string): Promise<string> {
+	await resolveContainedLocalPlanPath(localRoot, lexicalPath);
+	let realRoot: string;
+	try {
+		realRoot = await fs.realpath(localRoot);
+	} catch (error) {
+		if (realpathUnresolved(error)) throw new LocalPlanPathError();
+		throw error;
+	}
+	const resolvedLexical = path.resolve(lexicalPath);
+	const parent = path.dirname(resolvedLexical);
+	let realParent: string;
+	try {
+		realParent = await fs.realpath(parent);
+	} catch (error) {
+		if (realpathUnresolved(error)) throw new LocalPlanPathError();
+		throw error;
+	}
+	if (escapesRoot(realRoot, realParent)) throw new LocalPlanPathError();
+	const entry = path.join(realParent, path.basename(resolvedLexical));
+	let stat: Stats;
+	try {
+		stat = await fs.lstat(entry);
+	} catch (error) {
+		if (realpathUnresolved(error)) throw new LocalPlanPathError();
+		throw error;
+	}
+	if (stat.isSymbolicLink()) {
+		let target: string;
+		try {
+			target = await fs.realpath(entry);
+		} catch (error) {
+			if (realpathUnresolved(error)) throw new LocalPlanPathError();
+			throw error;
+		}
+		if (escapesRoot(realRoot, target)) throw new LocalPlanPathError();
+	}
+	return entry;
+}

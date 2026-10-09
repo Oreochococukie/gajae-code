@@ -7,7 +7,11 @@ import { Container, type KeyId, Markdown, Spacer, Text } from "@gajae-code/tui";
 import { isEnoent, prompt } from "@gajae-code/utils";
 import { resolveLocalRoot, resolveLocalUrlToPath } from "../../internal-urls";
 import { humanizePlanTitle, type PlanApprovalDetails, resolvePlanTitle } from "../../plan-mode/approved-plan";
-import { LocalPlanPathError, resolveContainedLocalPlanPath } from "../../plan-mode/contained-local-path";
+import {
+	containedLocalPlanUnlinkPath,
+	LocalPlanPathError,
+	resolveContainedLocalPlanPath,
+} from "../../plan-mode/contained-local-path";
 import planModeApprovedPrompt from "../../prompts/system/plan-mode-approved.md" with { type: "text" };
 import planModeCompactInstructionsPrompt from "../../prompts/system/plan-mode-compact-instructions.md" with {
 	type: "text",
@@ -373,6 +377,7 @@ export class PlanModeController {
 		if (!planFilePath.startsWith("local:") || !finalPlanFilePath.startsWith("local:"))
 			throw new Error("Approved plan source and destination paths must use the local: scheme.");
 		const localRoot = resolveLocalRoot(this.#localProtocolOptions());
+		const sourceLexical = resolveLocalUrlToPath(normalizeLocalScheme(planFilePath), this.#localProtocolOptions());
 		const sourcePath = await this.#containedLocalPath(planFilePath);
 		const destinationPath = await this.#containedLocalPath(finalPlanFilePath);
 		const temporaryLexical = `${destinationPath}.approval-${crypto.randomUUID()}`;
@@ -397,8 +402,8 @@ export class PlanModeController {
 						);
 					throw error;
 				}
-				await fs.unlink(await resolveContainedLocalPlanPath(localRoot, temporaryLexical));
-				await fs.unlink(await this.#containedLocalPath(planFilePath));
+				await fs.unlink(await containedLocalPlanUnlinkPath(localRoot, temporaryLexical));
+				await fs.unlink(await containedLocalPlanUnlinkPath(localRoot, sourceLexical));
 			}
 			const verifiedPath = await this.#containedLocalPath(finalPlanFilePath);
 			if (planSnapshotHash(await Bun.file(verifiedPath).text()) !== planSnapshotHash(planContent))
@@ -407,7 +412,7 @@ export class PlanModeController {
 				);
 		} finally {
 			try {
-				await fs.unlink(await resolveContainedLocalPlanPath(localRoot, temporaryLexical));
+				await fs.unlink(await containedLocalPlanUnlinkPath(localRoot, temporaryLexical));
 			} catch {
 				// Temp cleanup is best-effort. A realpath refusal must not unlink that path.
 			}

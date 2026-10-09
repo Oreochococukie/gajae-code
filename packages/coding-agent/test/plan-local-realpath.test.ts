@@ -14,7 +14,11 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { LocalPlanPathError, resolveContainedLocalPlanPath } from "../src/plan-mode/contained-local-path";
+import {
+	containedLocalPlanUnlinkPath,
+	LocalPlanPathError,
+	resolveContainedLocalPlanPath,
+} from "../src/plan-mode/contained-local-path";
 
 async function withLocalRoot(
 	run: (paths: { root: string; localRoot: string; outside: string }) => Promise<void>,
@@ -74,7 +78,29 @@ describe("resolveContainedLocalPlanPath", () => {
 			).rejects.toThrow("local:// plan path escapes the session local root");
 			expect(await readFile(secret, "utf8")).toBe("secret");
 			expect((await lstat(leak)).isSymbolicLink()).toBe(true);
+			await expect(containedLocalPlanUnlinkPath(localRoot, leak)).rejects.toBeInstanceOf(LocalPlanPathError);
+			expect(await readFile(secret, "utf8")).toBe("secret");
+			expect((await lstat(leak)).isSymbolicLink()).toBe(true);
 			expect(await readdir(outside)).toEqual(["secret.txt"]);
+		});
+	});
+
+	it("unlinks an in-root source symlink and leaves its target intact", async () => {
+		await withLocalRoot(async ({ localRoot }) => {
+			const drafts = path.join(localRoot, "drafts");
+			await mkdir(drafts);
+			const target = path.join(drafts, "spec.md");
+			await writeFile(target, "keep");
+			const source = path.join(localRoot, "PLAN.md");
+			await symlink(path.join("drafts", "spec.md"), source);
+			const entry = await containedLocalPlanUnlinkPath(localRoot, source);
+			const realRoot = await realpath(localRoot);
+			expect(entry).toBe(path.join(realRoot, "PLAN.md"));
+			expect((await lstat(entry)).isSymbolicLink()).toBe(true);
+			await unlink(entry);
+			expect(await readFile(target, "utf8")).toBe("keep");
+			await expect(lstat(source)).rejects.toMatchObject({ code: "ENOENT" });
+			expect((await lstat(target)).isFile()).toBe(true);
 		});
 	});
 
