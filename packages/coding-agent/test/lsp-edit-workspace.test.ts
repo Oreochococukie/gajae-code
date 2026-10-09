@@ -120,4 +120,29 @@ describe("assertInsideWorkspace", () => {
 		expect((await lstat(outsideLink)).isSymbolicLink()).toBe(true);
 		expect(await readFile(inside, "utf8")).toBe("ok");
 	});
+
+	it("refuses hop/.. that resolves through a symlink to an outside directory entry", async () => {
+		const root = await mkdtemp(path.join(tmpdir(), "lsp-hop-"));
+		const workspace = path.join(root, "ws");
+		const outside = path.join(root, "outside");
+		await mkdir(path.join(outside, "subdir"), { recursive: true });
+		await mkdir(workspace);
+		const inside = path.join(workspace, "a.ts");
+		await writeFile(inside, "ok");
+		const outsideLink = path.join(outside, "link.ts");
+		await symlink(inside, outsideLink);
+		await symlink(path.join(outside, "subdir"), path.join(workspace, "hop"));
+		const source = `${workspace}/hop/../link.ts`;
+		await expect(renameInsideWorkspace(workspace, source, path.join(workspace, "new.ts"))).rejects.toThrow(
+			/escapes the workspace/,
+		);
+		expect((await lstat(outsideLink)).isSymbolicLink()).toBe(true);
+		expect(await readFile(inside, "utf8")).toBe("ok");
+		await expect(lstat(path.join(workspace, "new.ts"))).rejects.toMatchObject({ code: "ENOENT" });
+		const tool = new LspTool({ cwd: workspace } as ToolSession);
+		await expect(
+			tool.execute("rename-hop", { action: "rename_file", file: source, new_name: "new.ts" }),
+		).rejects.toThrow(/escapes the workspace/);
+		expect((await lstat(outsideLink)).isSymbolicLink()).toBe(true);
+	});
 });

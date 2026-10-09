@@ -50,9 +50,39 @@ export async function assertInsideWorkspace(cwd: string, filePath: string): Prom
 	}
 }
 
+/**
+ * Real directory that contains the final directory entry. `..` is applied after
+ * following a symlink, so `hop/../link.ts` is not collapsed to a lexical parent.
+ */
+async function directoryContainingEntry(filePath: string): Promise<string> {
+	const absolute = path.isAbsolute(filePath) ? filePath : path.resolve(filePath);
+	const root = path.parse(absolute).root;
+	const parts = absolute.slice(root.length).split(path.sep).filter(Boolean);
+	let cursor = root;
+	for (const part of parts.slice(0, -1)) {
+		if (part === ".") continue;
+		if (part === "..") {
+			const real = await fs.realpath(cursor);
+			cursor = path.dirname(real);
+			continue;
+		}
+		const next = path.join(cursor, part);
+		let stat: Awaited<ReturnType<typeof fs.lstat>>;
+		try {
+			stat = await fs.lstat(next);
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+			cursor = next;
+			continue;
+		}
+		cursor = stat.isSymbolicLink() ? await fs.realpath(next) : next;
+	}
+	return cursor;
+}
+
 /** The directory entry itself must sit inside the workspace, not only its real target. */
 export async function assertDirectoryEntryInsideWorkspace(cwd: string, filePath: string): Promise<void> {
-	await assertInsideWorkspace(cwd, path.dirname(path.resolve(filePath)));
+	await assertInsideWorkspace(cwd, await directoryContainingEntry(filePath));
 }
 
 /** Rename only after both real paths and the source directory entry stay inside the workspace. */
