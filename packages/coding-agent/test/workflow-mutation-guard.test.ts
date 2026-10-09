@@ -1074,6 +1074,56 @@ describe("workflow mutation guard", () => {
 		expect(decision.blocked).toBe(true);
 	});
 
+	it("refuses a planning mutation of a product file through a project TMPDIR inside the workspace", async () => {
+		const workspace = await makeTempRoot();
+		const projectTmp = path.join(workspace, "tmp");
+		const product = path.join(projectTmp, "src", "product.ts");
+		await fs.mkdir(path.dirname(product), { recursive: true });
+		await Bun.write(product, "original\n");
+		await Bun.write(path.join(workspace, ".env"), `TMPDIR=${projectTmp}\n`);
+		await writeActiveDeepInterview(workspace);
+
+		const realOsTemp = process.env.TMPDIR?.trim() || os.tmpdir();
+		const previousTmpdir = process.env.TMPDIR;
+		process.env.TMPDIR = projectTmp;
+		try {
+			const inProject = await getWorkflowMutationDecision({
+				cwd: workspace,
+				sessionId: "session-a",
+				tool: tool("write"),
+				args: { path: product, content: "mutated" },
+			});
+			expect(inProject.blocked).toBe(true);
+			expect(inProject.message).toBe(DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE);
+			expect(await Bun.file(product).text()).toBe("original\n");
+
+			const osScratch = await getWorkflowMutationDecision({
+				cwd: workspace,
+				sessionId: "session-a",
+				tool: tool("write"),
+				args: { path: path.join(realOsTemp, "gjc-plan-os-scratch.md"), content: "scratch" },
+			});
+			expect(osScratch.blocked).toBe(false);
+
+			// A dotenv TMPDIR outside the OS temp dirs must not become scratch either.
+			const declaredOutside = path.join(os.homedir(), ".gjc-plan-not-temp");
+			const outsideProduct = path.join(declaredOutside, "src", "product.ts");
+			await Bun.write(path.join(workspace, ".env"), `TMPDIR=${declaredOutside}\n`);
+			process.env.TMPDIR = declaredOutside;
+			const outside = await getWorkflowMutationDecision({
+				cwd: workspace,
+				sessionId: "session-a",
+				tool: tool("write"),
+				args: { path: outsideProduct, content: "mutated" },
+			});
+			expect(outside.blocked).toBe(true);
+			expect(outside.message).toBe(DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE);
+		} finally {
+			if (previousTmpdir === undefined) delete process.env.TMPDIR;
+			else process.env.TMPDIR = previousTmpdir;
+		}
+	});
+
 	it("blocks .gjc raw paths in deferred ast_edit apply even with no planning skill or forceOverride", async () => {
 		const cwd = await makeTempRoot();
 		await expect(
