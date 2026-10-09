@@ -107,6 +107,28 @@ describe("crash diagnostics path", () => {
 		expect(notice).toContain("«redacted-api-key»");
 	});
 
+	it("keeps a project crash directory ignored after the process cwd changes", async () => {
+		const source = await makeTempDir();
+		const destination = await makeTempDir();
+		const planted = path.join(source, "planted");
+		await fs.writeFile(path.join(source, ".env"), `GJC_CRASH_DIAGNOSTICS_DIR=${planted}\n`);
+		const childEnv: Record<string, string | undefined> = { ...process.env, GJC_CRASH_DIAGNOSTICS: "1" };
+		delete childEnv.GJC_CRASH_DIAGNOSTICS_DIR;
+		const child = Bun.spawn(
+			[process.execPath, path.join(import.meta.dir, "crash-diagnostics-cwd-pin.child.ts"), destination],
+			{ cwd: source, env: childEnv, stdout: "pipe", stderr: "pipe" },
+		);
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+			child.exited,
+		]);
+		expect(stderr, `child exit ${exitCode}\n${stdout}`).toBe("");
+		expect(exitCode).toBe(0);
+		expect(stdout.trim().startsWith(planted)).toBe(false);
+		await expect(fs.stat(planted)).rejects.toThrow();
+	});
+
 	it("ignores a crash directory declared by the environment source when the command cwd differs", async () => {
 		const source = await makeTempDir();
 		const child = await makeTempDir();

@@ -65,6 +65,9 @@ export function crashDiagnosticsEnabled(env: NodeJS.ProcessEnv = process.env): b
 	return value === "1" || value === "true" || value === "yes";
 }
 
+/** Directory whose dotenv Bun had already loaded when this module was evaluated. */
+const environmentSourceCwd = process.cwd();
+
 function projectDeclaresEnv(envSourceCwd: string, name: string, value: string): boolean {
 	const snapshot = projectEnvSnapshot(envSourceCwd);
 	const key = canonicalEnvKey(name);
@@ -78,7 +81,7 @@ function projectDeclaresEnv(envSourceCwd: string, name: string, value: string): 
 
 export function getCrashDiagnosticsDirectory(
 	env: NodeJS.ProcessEnv = process.env,
-	envSourceCwd = process.cwd(),
+	envSourceCwd = environmentSourceCwd,
 ): string {
 	const override = env[CRASH_DIAGNOSTICS_DIR_ENV];
 	if (override && !projectDeclaresEnv(envSourceCwd, CRASH_DIAGNOSTICS_DIR_ENV, override)) return override;
@@ -181,9 +184,9 @@ export async function writeCrashReport(
 ): Promise<CrashReportWriteResult> {
 	const classification = classifyProcessCrash(input);
 	const reportCwd = options.cwd ?? process.cwd();
-	// Bun loads dotenv from the process cwd. A Bash child cwd is only where the
-	// command ran, so it must not decide whether the inherited value is project-owned.
-	const envSourceCwd = options.envSourceCwd ?? process.cwd();
+	// Bun loads dotenv from the cwd at startup. A later `chdir` (`/move`) and a Bash
+	// child cwd keep that provenance instead of treating the inherited value as external.
+	const envSourceCwd = options.envSourceCwd ?? environmentSourceCwd;
 	const report: CrashReport = {
 		schemaVersion: 1,
 		createdAt: (options.now ?? new Date()).toISOString(),
