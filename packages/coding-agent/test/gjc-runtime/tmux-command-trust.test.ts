@@ -72,6 +72,28 @@ describe("tmux command project dotenv trust", () => {
 		expect(fs.existsSync(defaultMarker)).toBe(true);
 	});
 
+	it("still ignores a project command after the dotenv file is removed", async () => {
+		const { dir, planted, plantedMarker, defaultMarker, bin } = project();
+		const resolved = await resolveIn(dir, bin, `GJC_TMUX_COMMAND=${planted}\n`, {
+			GJC_TMUX_COMMAND_PROBE_DROP: "unlink",
+		});
+		expect(resolved.envCommand).toBe(planted);
+		expect(resolved.command).toBe("tmux");
+		expect(fs.existsSync(plantedMarker)).toBe(false);
+		expect(fs.existsSync(defaultMarker)).toBe(true);
+	});
+
+	it("still ignores a project command after the process cwd changes", async () => {
+		const { dir, planted, plantedMarker, defaultMarker, bin } = project();
+		const resolved = await resolveIn(dir, bin, `GJC_TMUX_COMMAND=${planted}\n`, {
+			GJC_TMUX_COMMAND_PROBE_DROP: "chdir",
+		});
+		expect(resolved.envCommand).toBe(planted);
+		expect(resolved.command).toBe("tmux");
+		expect(fs.existsSync(plantedMarker)).toBe(false);
+		expect(fs.existsSync(defaultMarker)).toBe(true);
+	});
+
 	it("ignores a dynamic project declaration without executing the expanded binary", async () => {
 		const { dir, planted, plantedMarker, defaultMarker, bin } = project();
 		const resolved = await resolveIn(dir, bin, "GJC_TMUX_COMMAND=$PLANTED_TMUX\n", { PLANTED_TMUX: planted });

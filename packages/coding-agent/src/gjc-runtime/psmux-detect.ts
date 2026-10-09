@@ -307,6 +307,8 @@ export interface ResolvedTmuxBinary {
 }
 
 const GJC_TMUX_COMMAND_ENV = "GJC_TMUX_COMMAND";
+/** Captured when this module loads, before a later `chdir` or dotenv delete. */
+const startupTmuxCommandSnapshot = projectEnvSnapshot();
 
 /**
  * Operator override only. Bun has already copied the project dotenv into the
@@ -317,7 +319,7 @@ const GJC_TMUX_COMMAND_ENV = "GJC_TMUX_COMMAND";
 function trustedTmuxCommand(env: NodeJS.ProcessEnv): string | undefined {
 	const raw = env[GJC_TMUX_COMMAND_ENV];
 	if (!raw) return undefined;
-	const snapshot = projectEnvSnapshot();
+	const snapshot = startupTmuxCommandSnapshot;
 	const key = canonicalEnvKey(GJC_TMUX_COMMAND_ENV);
 	const declared = snapshot.values[key];
 	const trimmed = raw.trim();
