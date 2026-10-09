@@ -2,7 +2,9 @@ import { describe, expect, it } from "bun:test";
 import { lstat, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { LspTool } from "../src/lsp";
 import { assertInsideWorkspace, renameInsideWorkspace } from "../src/lsp/workspace-path";
+import type { ToolSession } from "../src/tools";
 
 describe("assertInsideWorkspace", () => {
 	it("allows a workspace file and rejects a symlink that leaves it", async () => {
@@ -63,4 +65,29 @@ describe("assertInsideWorkspace", () => {
 		expect(await readFile(outside, "utf8")).toBe("secret");
 		await expect(lstat(path.join(workspace, "stolen.txt"))).rejects.toMatchObject({ code: "ENOENT" });
 	});
+
+	it.skipIf(process.platform === "win32")(
+		"rename_file refuses a symlink source that leaves the workspace",
+		async () => {
+			const root = await mkdtemp(path.join(tmpdir(), "lsp-rename-tool-"));
+			const workspace = path.join(root, "repo");
+			await mkdir(workspace);
+			const outside = path.join(root, "secret.txt");
+			await writeFile(path.join(workspace, "note.txt"), "ok");
+			await writeFile(outside, "secret");
+			await symlink(outside, path.join(workspace, "leak.txt"));
+			const tool = new LspTool({ cwd: workspace } as ToolSession);
+			await expect(
+				tool.execute("rename-escape", {
+					action: "rename_file",
+					file: "leak.txt",
+					new_name: "stolen.txt",
+				}),
+			).rejects.toThrow(/escapes the workspace/);
+			expect(await readFile(outside, "utf8")).toBe("secret");
+			expect(await readFile(path.join(workspace, "note.txt"), "utf8")).toBe("ok");
+			expect((await lstat(path.join(workspace, "leak.txt"))).isSymbolicLink()).toBe(true);
+			await expect(lstat(path.join(workspace, "stolen.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+		},
+	);
 });
