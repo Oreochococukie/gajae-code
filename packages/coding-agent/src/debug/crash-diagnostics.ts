@@ -1,6 +1,8 @@
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { isEnoent, redactCrashSecrets } from "@gajae-code/utils";
 
 const CRASH_DIAGNOSTICS_ENV = "GJC_CRASH_DIAGNOSTICS";
 const CRASH_DIAGNOSTICS_DIR_ENV = "GJC_CRASH_DIAGNOSTICS_DIR";
@@ -64,8 +66,35 @@ export function crashDiagnosticsEnabled(env: NodeJS.ProcessEnv = process.env): b
 	return value === "1" || value === "true" || value === "yes";
 }
 
-export function getCrashDiagnosticsDirectory(env: NodeJS.ProcessEnv = process.env): string {
-	return env[CRASH_DIAGNOSTICS_DIR_ENV] ?? path.join(os.tmpdir(), "gjc-crash-diagnostics");
+function projectDeclaresEnv(cwd: string, name: string, value: string): boolean {
+	let content: string;
+	try {
+		content = fsSync.readFileSync(path.join(cwd, ".env"), "utf8");
+	} catch {
+		return false;
+	}
+	for (const line of content.split("\n")) {
+		const trimmed = line.trim();
+		if (!trimmed || trimmed.startsWith("#")) continue;
+		const match = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(trimmed);
+		if (!match || match[1] !== name) continue;
+		let declared = match[2]?.trim() ?? "";
+		if (
+			(declared.startsWith('"') && declared.endsWith('"')) ||
+			(declared.startsWith("'") && declared.endsWith("'"))
+		) {
+			declared = declared.slice(1, -1);
+		}
+		if (/[$`]/.test(declared)) return true;
+		return declared === value;
+	}
+	return false;
+}
+
+export function getCrashDiagnosticsDirectory(env: NodeJS.ProcessEnv = process.env, cwd = process.cwd()): string {
+	const override = env[CRASH_DIAGNOSTICS_DIR_ENV];
+	if (override && !projectDeclaresEnv(cwd, CRASH_DIAGNOSTICS_DIR_ENV, override)) return override;
+	return path.join(os.tmpdir(), "gjc-crash-diagnostics");
 }
 
 export function classifyProcessCrash(input: CrashClassificationInput): CrashClassification {
@@ -169,8 +198,8 @@ export async function writeCrashReport(
 		pid: process.pid,
 		cwd: options.cwd ?? process.cwd(),
 		...classification,
-		stderrPreview: input.stderr ? trimStartBytes(input.stderr, STDERR_PREVIEW_BYTES) : undefined,
-		spawnError: input.spawnError === undefined ? undefined : stringifyError(input.spawnError),
+		stderrPreview: input.stderr ? redactCrashSecrets(trimStartBytes(input.stderr, STDERR_PREVIEW_BYTES)) : undefined,
+		spawnError: input.spawnError === undefined ? undefined : redactCrashSecrets(stringifyError(input.spawnError)),
 	};
 	const enabled = crashDiagnosticsEnabled(options.env);
 
@@ -179,7 +208,7 @@ export async function writeCrashReport(
 	}
 
 	try {
-		const dir = getCrashDiagnosticsDirectory(options.env);
+		const dir = getCrashDiagnosticsDirectory(options.env, options.cwd ?? process.cwd());
 		await ensurePrivateDiagnosticsDirectory(dir);
 		const filename = `${report.createdAt.replace(/[:.]/g, "-")}-${report.kind}-${report.class}-${process.pid}.json`;
 		const reportPath = path.join(dir, filename);
@@ -197,7 +226,17 @@ export function formatCrashDiagnosticNotice(result: CrashReportWriteResult): str
 }
 
 async function ensurePrivateDiagnosticsDirectory(dir: string): Promise<void> {
+	try {
+		if ((await fs.lstat(dir)).isSymbolicLink()) {
+			throw new Error("Refusing to use a symlink as the crash diagnostics directory");
+		}
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+	}
 	await fs.mkdir(dir, { recursive: true, mode: DIRECTORY_MODE });
+	if ((await fs.lstat(dir)).isSymbolicLink()) {
+		throw new Error("Refusing to use a symlink as the crash diagnostics directory");
+	}
 	await fs.chmod(dir, DIRECTORY_MODE);
 }
 
