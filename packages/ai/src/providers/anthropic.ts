@@ -19,8 +19,9 @@ import {
 	isUnexpectedSocketCloseMessage,
 	logger,
 	readSseEvents,
+	startupProjectEnvSnapshot,
 } from "@gajae-code/utils";
-import { canonicalEnvKey, type ProjectEnvSnapshot, projectEnvSnapshot } from "@gajae-code/utils/env-file";
+import { canonicalEnvKey, type ProjectEnvSnapshot } from "@gajae-code/utils/env-file";
 import {
 	anthropicProviderDiagnosticFromError,
 	anthropicProviderDiagnosticFromSseErrorData,
@@ -1323,7 +1324,7 @@ function resolveFoundryTlsOptions(model: Model<"anthropic-messages">): FoundryTl
 	if (model.provider !== "anthropic") return undefined;
 	if (!isFoundryEnabled()) return undefined;
 
-	const projectEnv = projectEnvSnapshot();
+	const projectEnv = startupProjectEnvSnapshot();
 	const ca = resolvePemValue(trustedFoundryTlsValue("NODE_EXTRA_CA_CERTS", projectEnv), "NODE_EXTRA_CA_CERTS");
 	const cert = resolvePemValue(
 		trustedFoundryTlsValue("CLAUDE_CODE_CLIENT_CERT", projectEnv),

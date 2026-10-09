@@ -89,6 +89,26 @@ describe("Foundry TLS material trust boundary", () => {
 		expect(resolved.key).toBeNull();
 	});
 
+	it("still ignores project TLS material after the dotenv file is removed", async () => {
+		const dir = projectDir();
+		const caPath = writePem(dir, "ca.pem", "-----BEGIN CERTIFICATE-----\nPROJECT-CA\n-----END CERTIFICATE-----\n");
+		fs.writeFileSync(path.join(dir, ".env"), `NODE_EXTRA_CA_CERTS=${caPath}\n`);
+		const resolved = await resolveIn(dir, { GJC_FOUNDRY_TLS_PROBE_DROP: "unlink" });
+		expect(resolved.error).toBeNull();
+		expect(resolved.env.NODE_EXTRA_CA_CERTS).toBe(caPath);
+		expect(resolved.extraCa).toBeNull();
+	});
+
+	it("still ignores project TLS material after the process cwd changes", async () => {
+		const dir = projectDir();
+		const caPath = writePem(dir, "ca.pem", "-----BEGIN CERTIFICATE-----\nPROJECT-CA\n-----END CERTIFICATE-----\n");
+		fs.writeFileSync(path.join(dir, ".env"), `NODE_EXTRA_CA_CERTS=${caPath}\n`);
+		const resolved = await resolveIn(dir, { GJC_FOUNDRY_TLS_PROBE_DROP: "chdir" });
+		expect(resolved.error).toBeNull();
+		expect(resolved.env.NODE_EXTRA_CA_CERTS).toBe(caPath);
+		expect(resolved.extraCa).toBeNull();
+	});
+
 	it("ignores Foundry TLS material produced from a $ or backtick declaration", async () => {
 		const dir = projectDir();
 		const caPath = writePem(dir, "ca.pem", "-----BEGIN CERTIFICATE-----\nDYNAMIC-CA\n-----END CERTIFICATE-----\n");

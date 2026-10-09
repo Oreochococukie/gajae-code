@@ -1,6 +1,8 @@
 // Prints the Foundry TLS material `buildAnthropicClientOptions()` actually
 // installs. Spawned with a controlled cwd so a planted project `.env` is what
 // this process loads.
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as tls from "node:tls";
 import { buildAnthropicClientOptions } from "@gajae-code/ai/providers/anthropic";
 import type { Model } from "@gajae-code/ai/types";
@@ -28,6 +30,13 @@ interface TlsShape {
 	ca?: string | string[];
 	cert?: string;
 	key?: string;
+}
+
+const drop = process.env.GJC_FOUNDRY_TLS_PROBE_DROP;
+if (drop === "unlink") {
+	fs.rmSync(".env", { force: true });
+} else if (drop === "chdir") {
+	process.chdir(os.tmpdir());
 }
 
 const env = {
