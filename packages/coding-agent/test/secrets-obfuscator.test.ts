@@ -6,8 +6,9 @@ import { describe, expect, it, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { AssistantMessage } from "@gajae-code/ai/core";
 import { createSecretObfuscator, loadSecrets } from "../src/secrets";
-import { deobfuscateSessionContext, SecretObfuscator } from "../src/secrets/obfuscator";
+import { deobfuscateSessionContext, obfuscateMessages, SecretObfuscator } from "../src/secrets/obfuscator";
 import { compileSecretRegex } from "../src/secrets/regex";
 import {
 	associateSessionMessageEntryId,
@@ -608,5 +609,147 @@ describe("SecretObfuscator keyed deterministic replacement", () => {
 			expect(count).toBeGreaterThan(expected * 0.5);
 			expect(count).toBeLessThan(expected * 1.5);
 		}
+	});
+});
+
+describe("obfuscateMessages", () => {
+	it("obfuscates a tool-call argument that contains the configured secret, and still obfuscates text blocks", () => {
+		const secret = "configured-secret-value";
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }], TEST_KEY);
+		const text = { type: "text" as const, text: `visible ${secret}` };
+		const thinking = {
+			type: "thinking" as const,
+			thinking: `plan ${secret}`,
+			thinkingSignature: "sig-keep",
+			summaryText: `summary ${secret}`,
+			rawText: secret,
+		};
+		const redacted = { type: "redactedThinking" as const, data: `blob ${secret}` };
+		const toolCall = {
+			type: "toolCall" as const,
+			id: "call-1",
+			name: "bash",
+			arguments: {
+				command: `echo ${secret}`,
+				retries: 1,
+				nested: { token: secret, ok: true },
+				items: ["keep", secret],
+			},
+		};
+		const assistant: AssistantMessage = {
+			role: "assistant",
+			content: [text, thinking, redacted, toolCall],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "test-model",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 1,
+		};
+		const image = { type: "image" as const, data: secret, mimeType: "image/png" };
+		const user = {
+			role: "user" as const,
+			content: [{ type: "text" as const, text: `user ${secret}` }, image],
+			timestamp: 2,
+		};
+		const unchanged = {
+			role: "user" as const,
+			content: [{ type: "text" as const, text: "no secret here" }],
+			timestamp: 3,
+		};
+
+		const [obfuscatedAssistant, obfuscatedUser, obfuscatedUnchanged] = obfuscateMessages(obfuscator, [
+			assistant,
+			user,
+			unchanged,
+		]);
+
+		expect(obfuscatedUnchanged).toBe(unchanged);
+		if (obfuscatedAssistant.role !== "assistant") throw new Error("expected assistant message");
+		const [obfuscatedText, obfuscatedThinking, obfuscatedRedacted, obfuscatedCall] = obfuscatedAssistant.content;
+		if (obfuscatedText?.type !== "text") throw new Error("expected text block");
+		expect(obfuscatedText.text).not.toContain(secret);
+		expect(obfuscatedText.text).toContain("#GJC1_");
+
+		if (obfuscatedCall?.type !== "toolCall") throw new Error("expected tool call");
+		expect(JSON.stringify(obfuscatedCall.arguments)).not.toContain(secret);
+		expect(obfuscatedCall.arguments.retries).toBe(1);
+		expect(obfuscatedCall.arguments.nested.ok).toBe(true);
+		expect(obfuscatedCall.arguments.items[0]).toBe("keep");
+		expect(obfuscatedCall.id).toBe("call-1");
+		expect(obfuscatedCall.name).toBe("bash");
+
+		if (obfuscatedThinking?.type !== "thinking") throw new Error("expected thinking block");
+		expect(obfuscatedThinking.thinking).not.toContain(secret);
+		expect(obfuscatedThinking.summaryText).not.toContain(secret);
+		expect(obfuscatedThinking.rawText).not.toContain(secret);
+		expect(obfuscatedThinking.thinkingSignature).toBe("sig-keep");
+		expect(obfuscatedThinking.type).toBe("thinking");
+
+		if (obfuscatedRedacted?.type !== "redactedThinking") throw new Error("expected redacted thinking block");
+		expect(obfuscatedRedacted.data).not.toContain(secret);
+
+		expect(obfuscator.deobfuscateObject(obfuscatedAssistant.content)).toEqual(assistant.content);
+
+		if (obfuscatedUser.role !== "user" || !Array.isArray(obfuscatedUser.content)) {
+			throw new Error("expected user content blocks");
+		}
+		const [obfuscatedUserText, obfuscatedImage] = obfuscatedUser.content;
+		if (obfuscatedUserText?.type !== "text") throw new Error("expected user text block");
+		expect(obfuscatedUserText.text).not.toContain(secret);
+		expect(obfuscatedImage).toBe(image);
+		expect(image.data).toBe(secret);
+	});
+
+	it("keeps an own __proto__ argument key through obfuscation and deobfuscation", () => {
+		const secret = "configured-secret-value";
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }], TEST_KEY);
+		const argumentsObject: Record<string, unknown> = {};
+		Object.defineProperty(argumentsObject, "__proto__", {
+			value: { token: secret },
+			enumerable: true,
+			writable: true,
+			configurable: true,
+		});
+		const toolCall = {
+			type: "toolCall" as const,
+			id: "call-proto",
+			name: "bash",
+			arguments: argumentsObject,
+		};
+		const assistant: AssistantMessage = {
+			role: "assistant",
+			content: [toolCall],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "test-model",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 1,
+		};
+		const [obfuscated] = obfuscateMessages(obfuscator, [assistant]);
+		if (obfuscated?.role !== "assistant") throw new Error("expected assistant message");
+		const call = obfuscated.content[0];
+		if (call?.type !== "toolCall") throw new Error("expected tool call");
+		expect(Object.hasOwn(call.arguments, "__proto__")).toBe(true);
+		expect(JSON.stringify(call.arguments)).not.toContain(secret);
+		const restored = obfuscator.deobfuscateObject(call.arguments);
+		expect(Object.hasOwn(restored, "__proto__")).toBe(true);
+		const own = Object.getOwnPropertyDescriptor(restored, "__proto__")?.value as { token?: string };
+		expect(own.token).toBe(secret);
 	});
 });

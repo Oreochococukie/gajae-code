@@ -373,7 +373,7 @@ export function deobfuscateSessionContext(
 // Message obfuscation (outbound to LLM)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** Obfuscate all text content in LLM messages (for outbound interception). */
+/** Obfuscate text, thinking string leaves, and tool-call arguments. Image payloads are not scanned. */
 export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Message[]): Message[] {
 	return messages.map(msg => {
 		if (!Array.isArray(msg.content)) return msg;
@@ -386,12 +386,45 @@ export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Messag
 					changed = true;
 					return { ...block, text: obfuscated } as TextContent;
 				}
+				return block;
+			}
+			if (block.type === "thinking" || block.type === "redactedThinking") {
+				const obfuscated = obfuscateStringLeaves(obfuscator, block);
+				if (obfuscated !== block) {
+					changed = true;
+					return obfuscated;
+				}
+				return block;
+			}
+			if (block.type === "toolCall") {
+				const obfuscatedArguments = deepWalkStrings(block.arguments, text => obfuscator.obfuscate(text));
+				if (obfuscatedArguments !== block.arguments) {
+					changed = true;
+					return { ...block, arguments: obfuscatedArguments };
+				}
 			}
 			return block;
 		});
 
 		return changed ? ({ ...msg, content } as typeof msg) : msg;
 	});
+}
+
+/** Rewrite string leaves on a content block, leaving its `type` discriminant intact. */
+function obfuscateStringLeaves<T extends { type: string }>(obfuscator: SecretObfuscator, block: T): T {
+	let changed = false;
+	const result: Record<string, unknown> = {};
+	for (const key of Object.keys(block)) {
+		const current = (block as Record<string, unknown>)[key];
+		if (key === "type") {
+			result[key] = current;
+			continue;
+		}
+		const transformed = deepWalkStrings(current, text => obfuscator.obfuscate(text));
+		if (transformed !== current) changed = true;
+		result[key] = transformed;
+	}
+	return (changed ? result : block) as T;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -429,7 +462,12 @@ function deepWalkStrings<T>(obj: T, transform: (s: string) => string): T {
 			const value = (obj as Record<string, unknown>)[key];
 			const transformed = deepWalkStrings(value, transform);
 			if (transformed !== value) changed = true;
-			result[key] = transformed;
+			Object.defineProperty(result, key, {
+				value: transformed,
+				enumerable: true,
+				writable: true,
+				configurable: true,
+			});
 		}
 		return (changed ? result : obj) as T;
 	}
