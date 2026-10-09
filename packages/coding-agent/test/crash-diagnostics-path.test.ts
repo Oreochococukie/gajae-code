@@ -32,6 +32,7 @@ describe("crash diagnostics path", () => {
 			{ kind: "bash", exitCode: 1, stderr: "boom" },
 			{
 				cwd,
+				envSourceCwd: cwd,
 				env: { GJC_CRASH_DIAGNOSTICS: "1", GJC_CRASH_DIAGNOSTICS_DIR: planted } as NodeJS.ProcessEnv,
 				now: new Date("2026-06-04T00:00:03.000Z"),
 			},
@@ -43,6 +44,7 @@ describe("crash diagnostics path", () => {
 			{ kind: "bash", exitCode: 1, stderr: "boom" },
 			{
 				cwd,
+				envSourceCwd: cwd,
 				env: { GJC_CRASH_DIAGNOSTICS: "1", GJC_CRASH_DIAGNOSTICS_DIR: link } as NodeJS.ProcessEnv,
 			},
 		);
@@ -73,6 +75,7 @@ describe("crash diagnostics path", () => {
 			{ kind: "bash", exitCode: 1, stderr: "boom" },
 			{
 				cwd,
+				envSourceCwd: cwd,
 				env: { GJC_CRASH_DIAGNOSTICS: "1", GJC_CRASH_DIAGNOSTICS_DIR: planted } as NodeJS.ProcessEnv,
 				now: new Date("2026-06-04T00:00:05.000Z"),
 			},
@@ -102,5 +105,64 @@ describe("crash diagnostics path", () => {
 		const notice = formatCrashDiagnosticNotice(crashed);
 		expect(notice).not.toContain(secret);
 		expect(notice).toContain("«redacted-api-key»");
+	});
+
+	it("ignores a crash directory declared by the environment source when the command cwd differs", async () => {
+		const source = await makeTempDir();
+		const child = await makeTempDir();
+		const planted = path.join(source, "planted");
+		await fs.writeFile(path.join(source, ".env"), `GJC_CRASH_DIAGNOSTICS_DIR=${planted}\n`);
+		const fromChild = await writeCrashReport(
+			{ kind: "bash", exitCode: 1, stderr: "boom" },
+			{
+				cwd: child,
+				envSourceCwd: source,
+				env: { GJC_CRASH_DIAGNOSTICS: "1", GJC_CRASH_DIAGNOSTICS_DIR: planted } as NodeJS.ProcessEnv,
+				now: new Date("2026-06-04T00:00:07.000Z"),
+			},
+		);
+		expect(fromChild.path === null || !fromChild.path.startsWith(planted)).toBe(true);
+		await expect(fs.stat(planted)).rejects.toThrow();
+	});
+
+	it("ignores a crash directory declared in the NODE_ENV dotenv layer", async () => {
+		const source = await makeTempDir();
+		const planted = path.join(source, "planted");
+		const previous = process.env.NODE_ENV;
+		process.env.NODE_ENV = "development";
+		try {
+			await fs.writeFile(path.join(source, ".env.development"), `GJC_CRASH_DIAGNOSTICS_DIR=${planted}\n`);
+			const fromLayer = await writeCrashReport(
+				{ kind: "bash", exitCode: 1, stderr: "boom" },
+				{
+					cwd: source,
+					envSourceCwd: source,
+					env: { GJC_CRASH_DIAGNOSTICS: "1", GJC_CRASH_DIAGNOSTICS_DIR: planted } as NodeJS.ProcessEnv,
+					now: new Date("2026-06-04T00:00:08.000Z"),
+				},
+			);
+			expect(fromLayer.path === null || !fromLayer.path.startsWith(planted)).toBe(true);
+			await expect(fs.stat(planted)).rejects.toThrow();
+		} finally {
+			if (previous === undefined) delete process.env.NODE_ENV;
+			else process.env.NODE_ENV = previous;
+		}
+	});
+
+	it("scrubs a bearer token before the stderr preview drops its marker", async () => {
+		const dir = await makeTempDir();
+		const token = "A".repeat(32);
+		const stderr = `Bearer ${token}${"x".repeat(4096)}`;
+		const crashed = await writeCrashReport(
+			{ kind: "lsp", exitCode: 1, stderr },
+			{
+				cwd: dir,
+				env: { GJC_CRASH_DIAGNOSTICS: "1", GJC_CRASH_DIAGNOSTICS_DIR: dir } as NodeJS.ProcessEnv,
+				now: new Date("2026-06-04T00:00:09.000Z"),
+			},
+		);
+		const report = JSON.parse(await Bun.file(crashed.path as string).text()) as { stderrPreview?: string };
+		expect(report.stderrPreview).not.toContain(token);
+		expect(report.stderrPreview).toContain("«redacted-auth»");
 	});
 });

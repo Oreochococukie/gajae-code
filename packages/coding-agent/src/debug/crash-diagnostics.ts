@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { isEnoent, parseEnvFile, redactCrashSecrets } from "@gajae-code/utils";
+import { canonicalEnvKey, isEnoent, projectEnvSnapshot, redactCrashSecrets } from "@gajae-code/utils";
 
 const CRASH_DIAGNOSTICS_ENV = "GJC_CRASH_DIAGNOSTICS";
 const CRASH_DIAGNOSTICS_DIR_ENV = "GJC_CRASH_DIAGNOSTICS_DIR";
@@ -65,19 +65,23 @@ export function crashDiagnosticsEnabled(env: NodeJS.ProcessEnv = process.env): b
 	return value === "1" || value === "true" || value === "yes";
 }
 
-function projectDeclaresEnv(cwd: string, name: string, value: string): boolean {
-	const declared = parseEnvFile(path.join(cwd, ".env"))[name];
+function projectDeclaresEnv(envSourceCwd: string, name: string, value: string): boolean {
+	const snapshot = projectEnvSnapshot(envSourceCwd);
+	const key = canonicalEnvKey(name);
+	// A declaration Bun would expand is still a project declaration. The live
+	// value cannot be compared with the literal text.
+	if (snapshot.dynamic.has(key)) return true;
+	const declared = snapshot.values[key];
 	if (declared === undefined) return false;
-	// Bun expands `$` and backticks before the value reaches `process.env`.
-	// The literal project text cannot equal that result, but it is still a
-	// project declaration and must not be treated as an external override.
-	if (/[$`]/.test(declared)) return true;
 	return declared === value;
 }
 
-export function getCrashDiagnosticsDirectory(env: NodeJS.ProcessEnv = process.env, cwd = process.cwd()): string {
+export function getCrashDiagnosticsDirectory(
+	env: NodeJS.ProcessEnv = process.env,
+	envSourceCwd = process.cwd(),
+): string {
 	const override = env[CRASH_DIAGNOSTICS_DIR_ENV];
-	if (override && !projectDeclaresEnv(cwd, CRASH_DIAGNOSTICS_DIR_ENV, override)) return override;
+	if (override && !projectDeclaresEnv(envSourceCwd, CRASH_DIAGNOSTICS_DIR_ENV, override)) return override;
 	return path.join(os.tmpdir(), "gjc-crash-diagnostics");
 }
 
@@ -173,16 +177,20 @@ export function classifyProcessCrash(input: CrashClassificationInput): CrashClas
 
 export async function writeCrashReport(
 	input: CrashClassificationInput,
-	options: { cwd?: string; env?: NodeJS.ProcessEnv; now?: Date } = {},
+	options: { cwd?: string; env?: NodeJS.ProcessEnv; envSourceCwd?: string; now?: Date } = {},
 ): Promise<CrashReportWriteResult> {
 	const classification = classifyProcessCrash(input);
+	const reportCwd = options.cwd ?? process.cwd();
+	// Bun loads dotenv from the process cwd. A Bash child cwd is only where the
+	// command ran, so it must not decide whether the inherited value is project-owned.
+	const envSourceCwd = options.envSourceCwd ?? process.cwd();
 	const report: CrashReport = {
 		schemaVersion: 1,
 		createdAt: (options.now ?? new Date()).toISOString(),
 		pid: process.pid,
-		cwd: options.cwd ?? process.cwd(),
+		cwd: reportCwd,
 		...classification,
-		stderrPreview: input.stderr ? redactCrashSecrets(trimStartBytes(input.stderr, STDERR_PREVIEW_BYTES)) : undefined,
+		stderrPreview: input.stderr ? trimStartBytes(redactCrashSecrets(input.stderr), STDERR_PREVIEW_BYTES) : undefined,
 		spawnError: input.spawnError === undefined ? undefined : redactCrashSecrets(stringifyError(input.spawnError)),
 	};
 	const enabled = crashDiagnosticsEnabled(options.env);
@@ -192,7 +200,7 @@ export async function writeCrashReport(
 	}
 
 	try {
-		const dir = getCrashDiagnosticsDirectory(options.env, options.cwd ?? process.cwd());
+		const dir = getCrashDiagnosticsDirectory(options.env, envSourceCwd);
 		await ensurePrivateDiagnosticsDirectory(dir);
 		const filename = `${report.createdAt.replace(/[:.]/g, "-")}-${report.kind}-${report.class}-${process.pid}.json`;
 		const reportPath = path.join(dir, filename);
