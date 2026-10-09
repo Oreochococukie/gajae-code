@@ -47,13 +47,22 @@ export async function resolveAstEditPreviewWritePaths(
 	} catch {
 		// Missing cwd has no canonical spelling; keep the lexical root.
 	}
-	const resolved = await Promise.all(
-		previewedPaths.map(async previewed => {
-			const real = await canonicalizeAstEditWritePath(path.resolve(resolvedCwd, previewed));
-			if (!isInside(realCwd, real)) return real;
-			const relative = path.relative(realCwd, real);
-			return relative === "" ? resolvedCwd : path.resolve(resolvedCwd, relative);
-		}),
-	);
+	const resolved: string[] = [];
+	for (const previewed of previewedPaths) {
+		const lexical = path.resolve(resolvedCwd, previewed);
+		const real = await canonicalizeAstEditWritePath(lexical);
+		const relative = path.relative(realCwd, real);
+		const canonical =
+			isInside(realCwd, real) && relative !== ""
+				? path.resolve(resolvedCwd, relative)
+				: isInside(realCwd, real)
+					? resolvedCwd
+					: real;
+		// The guard matches `.gjc` lexically. Keep the preview spelling so a
+		// symlinked `.gjc` directory is still recognized, and add the canonical
+		// spelling so `src` → `.gjc` is recognized too.
+		resolved.push(previewed);
+		if (path.resolve(canonical) !== lexical) resolved.push(canonical);
+	}
 	return resolved;
 }

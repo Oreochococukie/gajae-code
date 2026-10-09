@@ -34,9 +34,9 @@ describe("ast_edit apply .gjc realpath", () => {
 			await fs.symlink(".gjc", path.join(cwd, "src"), "dir");
 
 			const realPaths = await resolveAstEditPreviewWritePaths(cwd, ["src/agent-state.ts"]);
-			expect(realPaths).toEqual([path.resolve(cwd, ".gjc", "agent-state.ts")]);
+			expect(realPaths).toEqual(["src/agent-state.ts", path.resolve(cwd, ".gjc", "agent-state.ts")]);
 			const missing = await resolveAstEditPreviewWritePaths(cwd, ["src/new-state.ts"]);
-			expect(missing).toEqual([path.resolve(cwd, ".gjc", "new-state.ts")]);
+			expect(missing).toEqual(["src/new-state.ts", path.resolve(cwd, ".gjc", "new-state.ts")]);
 
 			const queue = new ToolChoiceQueue();
 			const tools = await createTools(
@@ -63,6 +63,48 @@ describe("ast_edit apply .gjc realpath", () => {
 
 			expect(Buffer.compare(await fs.readFile(await fs.realpath(realFile)), original)).toBe(0);
 			await expect(fs.access(path.join(workspace, ".gjc", "new-state.ts"))).rejects.toThrow();
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
+	it("refuses a direct .gjc preview when .gjc is a symlink to an in-workspace directory", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "ast-edit-gjc-link-"));
+		try {
+			const cwd = path.join(root, "workspace");
+			const backing = path.join(cwd, "state");
+			await fs.mkdir(backing, { recursive: true });
+			await fs.symlink("state", path.join(cwd, ".gjc"), "dir");
+			const realFile = path.join(backing, "agent-state.ts");
+			const original = Buffer.from("legacyWrap(x, value)\n");
+			await Bun.write(realFile, original);
+
+			const realPaths = await resolveAstEditPreviewWritePaths(cwd, [".gjc/agent-state.ts"]);
+			expect(realPaths).toEqual([".gjc/agent-state.ts", path.resolve(cwd, "state", "agent-state.ts")]);
+
+			const queue = new ToolChoiceQueue();
+			const tools = await createTools(
+				createTestSession(cwd, {
+					getToolChoiceQueue: () => queue,
+					buildToolChoice: () => ({ type: "tool" as const, name: "resolve" }),
+				}),
+			);
+			const tool = tools.find(entry => entry.name === "ast_edit");
+			expect(tool).toBeDefined();
+
+			const preview = await tool!.execute("ast-edit-gjc-symlink-root", {
+				ops: [{ pat: "legacyWrap($A, $B)", out: "modernWrap($A, $B)" }],
+				paths: [".gjc/agent-state.ts"],
+			});
+			expect((preview.details as { totalReplacements?: number } | undefined)?.totalReplacements).toBe(1);
+
+			queue.nextToolChoice();
+			const invoker = queue.peekInFlightInvoker();
+			expect(invoker).toBeDefined();
+			await expect(invoker!({ action: "apply", reason: "apply through a symlinked .gjc" })).rejects.toThrow(
+				WORKFLOW_STATE_MUTATION_BLOCK_MESSAGE,
+			);
+			expect(Buffer.compare(await fs.readFile(realFile), original)).toBe(0);
 		} finally {
 			await fs.rm(root, { recursive: true, force: true });
 		}
