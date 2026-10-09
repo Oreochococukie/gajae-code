@@ -10,10 +10,15 @@ async function probe(repo: string, home: string, env: Record<string, string | un
 		script,
 		`import { getGithubCacheDbPath } from ${JSON.stringify(source)};\nconsole.log(getGithubCacheDbPath());\n`,
 	);
-	const childEnv = { ...process.env, HOME: home, ...env };
+	const childEnv: Record<string, string | undefined> = { ...process.env, HOME: home, ...env };
 	delete childEnv.GJC_GITHUB_CACHE_DB;
 	if (env.GJC_GITHUB_CACHE_DB) childEnv.GJC_GITHUB_CACHE_DB = env.GJC_GITHUB_CACHE_DB;
-	const proc = Bun.spawn(["bun", script], { cwd: repo, env: childEnv, stdout: "pipe", stderr: "pipe" });
+	const proc = Bun.spawn(["bun", script], {
+		cwd: repo,
+		env: childEnv,
+		stdout: "pipe",
+		stderr: "pipe",
+	});
 	const out = await new Response(proc.stdout).text();
 	const err = await new Response(proc.stderr).text();
 	const code = await proc.exited;
