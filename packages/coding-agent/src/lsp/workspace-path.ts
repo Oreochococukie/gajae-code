@@ -6,8 +6,10 @@ function isEnoent(error: unknown): boolean {
 	return (error as NodeJS.ErrnoException).code === "ENOENT";
 }
 
+/** `path.relative` keeps workspace `/` contained. A `//` string prefix does not. */
 function escapes(root: string, candidate: string): boolean {
-	return candidate !== root && !candidate.startsWith(`${root}${path.sep}`);
+	const relative = path.relative(root, candidate);
+	return relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
 }
 
 /** Resolve a missing path through the nearest existing ancestor. */
@@ -43,6 +45,9 @@ async function canonicalize(filePath: string): Promise<string> {
 }
 
 export async function assertInsideWorkspace(cwd: string, filePath: string): Promise<void> {
+	if (cwd.length === 0 || filePath.length === 0) {
+		throw new ToolError(`LSP edit escapes the workspace: ${filePath}`);
+	}
 	const root = await fs.realpath(cwd);
 	const candidate = await canonicalize(filePath);
 	if (escapes(root, candidate)) {
@@ -62,8 +67,12 @@ async function directoryContainingEntry(filePath: string): Promise<string> {
 	for (const part of parts.slice(0, -1)) {
 		if (part === ".") continue;
 		if (part === "..") {
-			const real = await fs.realpath(cursor);
-			cursor = path.dirname(real);
+			try {
+				cursor = path.dirname(await fs.realpath(cursor));
+			} catch (error) {
+				if (!isEnoent(error)) throw error;
+				cursor = path.dirname(cursor);
+			}
 			continue;
 		}
 		const next = path.join(cursor, part);
@@ -85,11 +94,21 @@ export async function assertDirectoryEntryInsideWorkspace(cwd: string, filePath:
 	await assertInsideWorkspace(cwd, await directoryContainingEntry(filePath));
 }
 
-/** Rename only after both real paths and the source directory entry stay inside the workspace. */
+/** Real content and the directory entry that names it must both stay inside the workspace. */
+export async function assertWorkspaceTarget(cwd: string, filePath: string): Promise<void> {
+	await assertInsideWorkspace(cwd, filePath);
+	await assertDirectoryEntryInsideWorkspace(cwd, filePath);
+}
+
+/** Both rename endpoints, including the directory entries `rename` will move or create. */
+export async function assertRenamePaths(cwd: string, source: string, dest: string): Promise<void> {
+	await assertWorkspaceTarget(cwd, source);
+	await assertWorkspaceTarget(cwd, dest);
+}
+
+/** Rename only after both real paths and both directory entries stay inside the workspace. */
 export async function renameInsideWorkspace(cwd: string, source: string, dest: string): Promise<void> {
-	await assertInsideWorkspace(cwd, source);
-	await assertInsideWorkspace(cwd, dest);
-	await assertDirectoryEntryInsideWorkspace(cwd, source);
+	await assertRenamePaths(cwd, source, dest);
 	await fs.mkdir(path.dirname(dest), { recursive: true });
 	await fs.rename(source, dest);
 }

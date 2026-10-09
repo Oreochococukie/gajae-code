@@ -1,8 +1,13 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import { lstat, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { LspTool } from "../src/lsp";
+import * as lspClient from "../src/lsp/client";
+import * as lspConfig from "../src/lsp/config";
+import { applyWorkspaceEdit } from "../src/lsp/edits";
+import type { LspClient, ServerConfig } from "../src/lsp/types";
+import { fileToUri } from "../src/lsp/utils";
 import {
 	assertDirectoryEntryInsideWorkspace,
 	assertInsideWorkspace,
@@ -144,5 +149,305 @@ describe("assertInsideWorkspace", () => {
 			tool.execute("rename-hop", { action: "rename_file", file: source, new_name: "new.ts" }),
 		).rejects.toThrow(/escapes the workspace/);
 		expect((await lstat(outsideLink)).isSymbolicLink()).toBe(true);
+	});
+
+	it("allows a normal file when the workspace is the filesystem root", async () => {
+		const dir = await mkdtemp(path.join(tmpdir(), "lsp-root-"));
+		const file = path.join(dir, "a.txt");
+		await writeFile(file, "ok");
+		await expect(assertInsideWorkspace(path.parse(file).root, file)).resolves.toBeUndefined();
+	});
+
+	it("rejects an empty path", async () => {
+		const workspace = await mkdtemp(path.join(tmpdir(), "lsp-empty-"));
+		await expect(assertInsideWorkspace(workspace, "")).rejects.toThrow(/escapes the workspace/);
+		await expect(assertInsideWorkspace("", path.join(workspace, "a.txt"))).rejects.toThrow(/escapes the workspace/);
+	});
+
+	it("renames a path whose .. walks through a missing directory", async () => {
+		const workspace = await mkdtemp(path.join(tmpdir(), "lsp-dotdot-"));
+		const source = path.join(workspace, "a.ts");
+		await writeFile(source, "ok");
+		const viaMissing = path.join(workspace, "missing", "..", "a.ts");
+		const dest = path.join(workspace, "b.ts");
+		await expect(renameInsideWorkspace(workspace, viaMissing, dest)).resolves.toBeUndefined();
+		expect(await readFile(dest, "utf8")).toBe("ok");
+		await expect(lstat(source)).rejects.toMatchObject({ code: "ENOENT" });
+	});
+
+	it("renames into a directory that does not exist yet", async () => {
+		const workspace = await mkdtemp(path.join(tmpdir(), "lsp-nested-"));
+		const source = path.join(workspace, "a.ts");
+		await writeFile(source, "ok");
+		const dest = path.join(workspace, "nested", "b.ts");
+		await expect(renameInsideWorkspace(workspace, source, dest)).resolves.toBeUndefined();
+		expect(await readFile(dest, "utf8")).toBe("ok");
+	});
+});
+
+function stubLspClient(cwd: string, server: ServerConfig): LspClient {
+	return {
+		name: "test-lsp",
+		cwd,
+		config: server,
+		proc: {
+			stdin: { write() {}, flush: async () => {} },
+		} as unknown as LspClient["proc"],
+		requestId: 0,
+		diagnostics: new Map(),
+		diagnosticsVersion: 0,
+		openFiles: new Map(),
+		pendingRequests: new Map(),
+		messageBuffer: new Uint8Array(),
+		isReading: false,
+		lastActivity: Date.now(),
+		writeQueue: Promise.resolve(),
+		activeProgressTokens: new Set(),
+		projectLoaded: Promise.resolve(),
+		resolveProjectLoaded: () => {},
+	};
+}
+
+describe("rename_file server edits", () => {
+	it("does not write an earlier edit when a later willRenameFiles target leaves the workspace", async () => {
+		const root = await mkdtemp(path.join(tmpdir(), "lsp-preflight-"));
+		const workspace = path.join(root, "repo");
+		await mkdir(workspace);
+		const source = path.join(workspace, "old.ts");
+		const dest = path.join(workspace, "new.ts");
+		const inside = path.join(workspace, "consumer.ts");
+		const outside = path.join(root, "secret.ts");
+		await writeFile(source, "export const value = 1;\n");
+		await writeFile(inside, "alpha\n");
+		await writeFile(outside, "secret\n");
+		const server: ServerConfig = { command: "test-lsp", fileTypes: ["ts"], rootMarkers: [] };
+		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+			servers: { "test-lsp": server },
+			idleTimeoutMs: undefined,
+		});
+		vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(stubLspClient(workspace, server));
+		vi.spyOn(lspClient, "sendRequest").mockResolvedValue({
+			changes: {
+				[fileToUri(inside)]: [
+					{
+						range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } },
+						newText: "betaX",
+					},
+				],
+				[fileToUri(outside)]: [
+					{
+						range: { start: { line: 0, character: 0 }, end: { line: 0, character: 6 } },
+						newText: "pwnedX",
+					},
+				],
+			},
+		});
+		vi.spyOn(lspClient, "sendNotification").mockResolvedValue();
+		try {
+			const tool = new LspTool({ cwd: workspace } as ToolSession);
+			await expect(
+				tool.execute("rename-preflight", {
+					action: "rename_file",
+					file: source,
+					new_name: dest,
+					timeout: 5,
+				}),
+			).rejects.toThrow(/escapes the workspace/);
+			expect(await readFile(inside, "utf8")).toBe("alpha\n");
+			expect(await readFile(outside, "utf8")).toBe("secret\n");
+			expect(await readFile(source, "utf8")).toBe("export const value = 1;\n");
+			await expect(lstat(dest)).rejects.toMatchObject({ code: "ENOENT" });
+		} finally {
+			vi.restoreAllMocks();
+		}
+	});
+
+	it("applies every in-workspace willRenameFiles edit after all targets pass", async () => {
+		const workspace = await mkdtemp(path.join(tmpdir(), "lsp-preflight-ok-"));
+		const source = path.join(workspace, "old.ts");
+		const dest = path.join(workspace, "new.ts");
+		const first = path.join(workspace, "a.ts");
+		const second = path.join(workspace, "b.ts");
+		await writeFile(source, "export const value = 1;\n");
+		await writeFile(first, "alpha\n");
+		await writeFile(second, "gamma\n");
+		const server: ServerConfig = { command: "test-lsp", fileTypes: ["ts"], rootMarkers: [] };
+		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+			servers: { "test-lsp": server },
+			idleTimeoutMs: undefined,
+		});
+		vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(stubLspClient(workspace, server));
+		vi.spyOn(lspClient, "sendRequest").mockResolvedValue({
+			changes: {
+				[fileToUri(first)]: [
+					{
+						range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } },
+						newText: "betaX",
+					},
+				],
+				[fileToUri(second)]: [
+					{
+						range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } },
+						newText: "delta",
+					},
+				],
+			},
+		});
+		vi.spyOn(lspClient, "sendNotification").mockResolvedValue();
+		try {
+			const tool = new LspTool({ cwd: workspace } as ToolSession);
+			await tool.execute("rename-preflight-ok", {
+				action: "rename_file",
+				file: source,
+				new_name: dest,
+				timeout: 5,
+			});
+			expect(await readFile(first, "utf8")).toBe("betaX\n");
+			expect(await readFile(second, "utf8")).toBe("delta\n");
+			await expect(lstat(source)).rejects.toMatchObject({ code: "ENOENT" });
+			expect(await readFile(dest, "utf8")).toBe("export const value = 1;\n");
+		} finally {
+			vi.restoreAllMocks();
+		}
+	});
+});
+
+describe("applyWorkspaceEdit containment", () => {
+	it("does not apply an earlier text edit when a later target leaves the workspace", async () => {
+		const root = await mkdtemp(path.join(tmpdir(), "lsp-ws-edit-"));
+		const workspace = path.join(root, "repo");
+		await mkdir(workspace);
+		const inside = path.join(workspace, "a.ts");
+		const outside = path.join(root, "secret.ts");
+		await writeFile(inside, "alpha\n");
+		await writeFile(outside, "secret\n");
+		await expect(
+			applyWorkspaceEdit(
+				{
+					changes: {
+						[fileToUri(inside)]: [
+							{
+								range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } },
+								newText: "betaX",
+							},
+						],
+						[fileToUri(outside)]: [
+							{
+								range: { start: { line: 0, character: 0 }, end: { line: 0, character: 6 } },
+								newText: "pwnedX",
+							},
+						],
+					},
+				},
+				workspace,
+			),
+		).rejects.toThrow(/escapes the workspace/);
+		expect(await readFile(inside, "utf8")).toBe("alpha\n");
+		expect(await readFile(outside, "utf8")).toBe("secret\n");
+	});
+
+	it("does not create an earlier file when a later delete leaves the workspace", async () => {
+		const root = await mkdtemp(path.join(tmpdir(), "lsp-ws-res-"));
+		const workspace = path.join(root, "repo");
+		await mkdir(workspace);
+		const created = path.join(workspace, "created.ts");
+		const outside = path.join(root, "secret.ts");
+		await writeFile(outside, "secret\n");
+		await expect(
+			applyWorkspaceEdit(
+				{
+					documentChanges: [
+						{ kind: "create", uri: fileToUri(created) },
+						{ kind: "delete", uri: fileToUri(outside) },
+					],
+				},
+				workspace,
+			),
+		).rejects.toThrow(/escapes the workspace/);
+		await expect(lstat(created)).rejects.toMatchObject({ code: "ENOENT" });
+		expect(await readFile(outside, "utf8")).toBe("secret\n");
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"does not create an earlier file when a later rename leaves the workspace",
+		async () => {
+			const root = await mkdtemp(path.join(tmpdir(), "lsp-ws-rename-"));
+			const workspace = path.join(root, "repo");
+			await mkdir(workspace);
+			const created = path.join(workspace, "created.ts");
+			const inside = path.join(workspace, "a.ts");
+			await writeFile(inside, "ok");
+			const outsideLink = path.join(root, "link.ts");
+			await symlink(inside, outsideLink);
+			await expect(
+				applyWorkspaceEdit(
+					{
+						documentChanges: [
+							{ kind: "create", uri: fileToUri(created) },
+							{
+								kind: "rename",
+								oldUri: fileToUri(outsideLink),
+								newUri: fileToUri(path.join(workspace, "moved.ts")),
+							},
+						],
+					},
+					workspace,
+				),
+			).rejects.toThrow(/escapes the workspace/);
+			await expect(lstat(created)).rejects.toMatchObject({ code: "ENOENT" });
+			expect((await lstat(outsideLink)).isSymbolicLink()).toBe(true);
+			expect(await readFile(inside, "utf8")).toBe("ok");
+		},
+	);
+
+	it("creates and renames inside the workspace after every target passes", async () => {
+		const workspace = await mkdtemp(path.join(tmpdir(), "lsp-ws-rename-ok-"));
+		const source = path.join(workspace, "a.ts");
+		await writeFile(source, "ok");
+		const dest = path.join(workspace, "nested", "b.ts");
+		const created = path.join(workspace, "c.ts");
+		const applied = await applyWorkspaceEdit(
+			{
+				documentChanges: [
+					{ kind: "create", uri: fileToUri(created) },
+					{ kind: "rename", oldUri: fileToUri(source), newUri: fileToUri(dest) },
+				],
+			},
+			workspace,
+		);
+		expect(await readFile(created, "utf8")).toBe("");
+		expect(await readFile(dest, "utf8")).toBe("ok");
+		await expect(lstat(source)).rejects.toMatchObject({ code: "ENOENT" });
+		expect(applied).toHaveLength(2);
+	});
+
+	it("applies every in-workspace text edit after all targets pass", async () => {
+		const workspace = await mkdtemp(path.join(tmpdir(), "lsp-ws-ok-"));
+		const first = path.join(workspace, "a.ts");
+		const second = path.join(workspace, "b.ts");
+		await writeFile(first, "alpha\n");
+		await writeFile(second, "gamma\n");
+		const applied = await applyWorkspaceEdit(
+			{
+				changes: {
+					[fileToUri(first)]: [
+						{
+							range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } },
+							newText: "betaX",
+						},
+					],
+					[fileToUri(second)]: [
+						{
+							range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } },
+							newText: "delta",
+						},
+					],
+				},
+			},
+			workspace,
+		);
+		expect(await readFile(first, "utf8")).toBe("betaX\n");
+		expect(await readFile(second, "utf8")).toBe("delta\n");
+		expect(applied).toHaveLength(2);
 	});
 });

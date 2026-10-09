@@ -28,11 +28,11 @@ import {
 import { getLinterClient } from "./clients";
 import { getServersForFile, type LspConfig, loadConfig } from "./config";
 import {
-	applyTextEdits,
 	applyTextEditsToString,
 	applyWorkspaceEdit,
 	flattenWorkspaceTextEdits,
 	rangesOverlap,
+	stageTextEdits,
 } from "./edits";
 import { detectLspmux } from "./lspmux";
 import { renderCall, renderResult } from "./render";
@@ -77,7 +77,7 @@ import {
 	symbolKindToIcon,
 	uriToFile,
 } from "./utils";
-import { assertDirectoryEntryInsideWorkspace, assertInsideWorkspace, renameInsideWorkspace } from "./workspace-path";
+import { assertRenamePaths, assertWorkspaceTarget, renameInsideWorkspace } from "./workspace-path";
 
 export type { LspServerStatus } from "./client";
 export type { LspToolDetails } from "./types";
@@ -1372,9 +1372,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				};
 			}
 
-			await assertInsideWorkspace(this.session.cwd, source);
-			await assertInsideWorkspace(this.session.cwd, dest);
-			await assertDirectoryEntryInsideWorkspace(this.session.cwd, source);
+			await assertRenamePaths(this.session.cwd, source, dest);
 
 			const enumerated = await enumerateRenamePairs(source, dest);
 			if (enumerated.exceeded) {
@@ -1530,10 +1528,23 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				}
 			}
 
+			const acceptedEdits: Array<{ filePath: string; bucket: AcceptedBucket }> = [];
 			for (const [uri, bucket] of acceptedByUri) {
 				const filePath = uriToFile(uri);
-				await assertInsideWorkspace(this.session.cwd, filePath);
-				await applyTextEdits(filePath, bucket.edits);
+				await assertWorkspaceTarget(this.session.cwd, filePath);
+				acceptedEdits.push({ filePath, bucket });
+			}
+			const stagedEdits: Array<{ filePath: string; bucket: AcceptedBucket; next: string }> = [];
+			for (const { filePath, bucket } of acceptedEdits) {
+				stagedEdits.push({
+					filePath,
+					bucket,
+					next: await stageTextEdits(filePath, bucket.edits),
+				});
+			}
+
+			for (const { filePath, bucket, next } of stagedEdits) {
+				await Bun.write(filePath, next);
 				const rel = formatPathRelativeToCwd(filePath, this.session.cwd);
 				summary.push(`  ${bucket.primaryServer}: applied ${bucket.edits.length} edit(s) to ${rel}`);
 				if (bucket.discarded > 0) {
