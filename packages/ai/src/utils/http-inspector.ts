@@ -26,7 +26,16 @@ type ErrorWithStatus = {
 	status?: unknown;
 };
 
-const SENSITIVE_HEADERS = ["authorization", "x-api-key", "api-key", "cookie", "set-cookie", "proxy-authorization"];
+const SENSITIVE_HEADERS = [
+	"authorization",
+	"x-api-key",
+	"api-key",
+	"cookie",
+	"set-cookie",
+	"proxy-authorization",
+	"x-goog-api-key",
+	"cf-aig-authorization",
+];
 
 /**
  * Connection-level failure codes, meaning the request never reached the

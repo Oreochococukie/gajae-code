@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getConfigRootDir, setAgentDir } from "@gajae-code/utils";
 import {
+	appendRawHttpRequestDumpFor400,
 	appendTransportFailureContext,
 	finalizeErrorMessage,
 	formatModelUnavailableGuidance,
@@ -137,6 +138,45 @@ describe("HTTP 400 request dump sanitization", () => {
 		expect(saved.match(/xxxxxxxxxxxxxxxx/g)?.length).toBe(53_125);
 		expect(Buffer.byteLength(saved)).toBeLessThan(900_000);
 		expect(saved).toContain('"disposition": "send-all"');
+	});
+
+	it("redacts Google and Cloudflare auth headers before writing the HTTP 400 dump", async () => {
+		await useTempAgentDir();
+		const authorizationSecret = "synthetic-authorization-secret";
+		const apiKeySecret = "synthetic-x-api-key-secret";
+		const googApiKeySecret = "synthetic-x-goog-api-key-secret";
+		const cloudflareSecret = "synthetic-cf-aig-authorization-secret";
+		const dump: RawHttpRequestDump = {
+			provider: "google",
+			api: "google-generative-ai",
+			model: "gemini-2.5-pro",
+			method: "POST",
+			url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent",
+			headers: {
+				authorization: `Bearer ${authorizationSecret}`,
+				"x-api-key": apiKeySecret,
+				"x-goog-api-key": googApiKeySecret,
+				"cf-aig-authorization": `Bearer ${cloudflareSecret}`,
+			},
+		};
+		const error = Object.assign(new Error("synthetic provider rejection"), { status: 400 });
+
+		const message = await appendRawHttpRequestDumpFor400("synthetic provider rejection", error, dump);
+		const filePath = /raw-http-request=(.+)$/m.exec(message)?.[1];
+		if (filePath === undefined) {
+			throw new Error(`expected a raw HTTP dump path, got: ${message}`);
+		}
+		const saved = await fs.readFile(filePath, "utf-8");
+		const parsed = JSON.parse(saved) as { headers?: Record<string, string> };
+
+		expect(parsed.headers?.authorization).toBe("[redacted]");
+		expect(parsed.headers?.["x-api-key"]).toBe("[redacted]");
+		expect(parsed.headers?.["x-goog-api-key"]).toBe("[redacted]");
+		expect(parsed.headers?.["cf-aig-authorization"]).toBe("[redacted]");
+		expect(saved).not.toContain(authorizationSecret);
+		expect(saved).not.toContain(apiKeySecret);
+		expect(saved).not.toContain(googApiKeySecret);
+		expect(saved).not.toContain(cloudflareSecret);
 	});
 });
 
