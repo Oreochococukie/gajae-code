@@ -620,11 +620,10 @@ describe("obfuscateMessages", () => {
 		const thinking = {
 			type: "thinking" as const,
 			thinking: `plan ${secret}`,
-			thinkingSignature: "sig-keep",
 			summaryText: `summary ${secret}`,
 			rawText: secret,
 		};
-		const redacted = { type: "redactedThinking" as const, data: `blob ${secret}` };
+		const redacted = { type: "redactedThinking" as const, data: "opaque-without-secret" };
 		const toolCall = {
 			type: "toolCall" as const,
 			id: "call-1",
@@ -690,11 +689,11 @@ describe("obfuscateMessages", () => {
 		expect(obfuscatedThinking.thinking).not.toContain(secret);
 		expect(obfuscatedThinking.summaryText).not.toContain(secret);
 		expect(obfuscatedThinking.rawText).not.toContain(secret);
-		expect(obfuscatedThinking.thinkingSignature).toBe("sig-keep");
+		expect(obfuscatedThinking.thinkingSignature).toBeUndefined();
 		expect(obfuscatedThinking.type).toBe("thinking");
 
 		if (obfuscatedRedacted?.type !== "redactedThinking") throw new Error("expected redacted thinking block");
-		expect(obfuscatedRedacted.data).not.toContain(secret);
+		expect(obfuscatedRedacted).toBe(redacted);
 
 		expect(obfuscator.deobfuscateObject(obfuscatedAssistant.content)).toEqual(assistant.content);
 
@@ -751,5 +750,98 @@ describe("obfuscateMessages", () => {
 		expect(Object.hasOwn(restored, "__proto__")).toBe(true);
 		const own = Object.getOwnPropertyDescriptor(restored, "__proto__")?.value as { token?: string };
 		expect(own.token).toBe(secret);
+	});
+
+	it("omits signed Anthropic and OpenAI thinking, and opaque redacted thinking, when a secret is present", () => {
+		const secret = "configured-secret-value";
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }], TEST_KEY);
+		const usage = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const anthropicSignature = "anthropic-sig-keep";
+		const openaiSignature = JSON.stringify({ id: "rs_1", encrypted_content: `cipher ${secret}` });
+		const toolCall = {
+			type: "toolCall" as const,
+			id: "call-replay",
+			name: "bash",
+			arguments: { command: "echo ok" },
+		};
+		const anthropic: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{
+					type: "thinking",
+					thinking: `plan ${secret}`,
+					thinkingSignature: anthropicSignature,
+				},
+				{ type: "redactedThinking", data: `blob ${secret}` },
+				toolCall,
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "test-model",
+			usage,
+			stopReason: "toolUse",
+			timestamp: 1,
+		};
+		const openai: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{
+					type: "thinking",
+					thinking: "clean reasoning",
+					thinkingSignature: openaiSignature,
+					itemId: "item-1",
+				},
+			],
+			api: "openai-responses",
+			provider: "openai",
+			model: "test-model",
+			usage,
+			stopReason: "stop",
+			timestamp: 2,
+		};
+		const cleanSigned: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{
+					type: "thinking",
+					thinking: "no secret here",
+					thinkingSignature: "sig-unchanged",
+				},
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "test-model",
+			usage,
+			stopReason: "stop",
+			timestamp: 3,
+		};
+
+		const [obfuscatedAnthropic, obfuscatedOpenai, obfuscatedClean] = obfuscateMessages(obfuscator, [
+			anthropic,
+			openai,
+			cleanSigned,
+		]);
+
+		if (obfuscatedAnthropic?.role !== "assistant") throw new Error("expected anthropic assistant");
+		expect(
+			obfuscatedAnthropic.content.some(block => block.type === "thinking" || block.type === "redactedThinking"),
+		).toBe(false);
+		expect(JSON.stringify(obfuscatedAnthropic.content)).not.toContain(secret);
+		expect(JSON.stringify(obfuscatedAnthropic.content)).not.toContain(anthropicSignature);
+		expect(obfuscatedAnthropic.content).toEqual([toolCall]);
+
+		if (obfuscatedOpenai?.role !== "assistant") throw new Error("expected openai assistant");
+		expect(obfuscatedOpenai.content).toEqual([]);
+		expect(JSON.stringify(obfuscatedOpenai)).not.toContain(secret);
+		expect(JSON.stringify(obfuscatedOpenai)).not.toContain("rs_1");
+
+		expect(obfuscatedClean).toBe(cleanSigned);
 	});
 });

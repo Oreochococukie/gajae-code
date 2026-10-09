@@ -373,58 +373,99 @@ export function deobfuscateSessionContext(
 // Message obfuscation (outbound to LLM)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** Obfuscate text, thinking string leaves, and tool-call arguments. Image payloads are not scanned. */
+/**
+ * Obfuscate text and tool-call arguments. Unsigned thinking text is redacted.
+ * A thinking or redacted-thinking block that carries provider integrity data
+ * (Anthropic `thinkingSignature`, OpenAI reasoning-item `thinkingSignature` /
+ * `itemId`, or opaque `redactedThinking.data`) is omitted when a configured
+ * secret occurs in it. Those bytes are not rewritten under the old signature.
+ * Image payloads are not scanned.
+ */
 export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Message[]): Message[] {
 	return messages.map(msg => {
 		if (!Array.isArray(msg.content)) return msg;
 
 		let changed = false;
-		const content = msg.content.map(block => {
+		const content: object[] = [];
+		for (const block of msg.content) {
 			if (block.type === "text") {
 				const obfuscated = obfuscator.obfuscate(block.text);
 				if (obfuscated !== block.text) {
 					changed = true;
-					return { ...block, text: obfuscated } as TextContent;
+					content.push({ ...block, text: obfuscated } as TextContent);
+				} else {
+					content.push(block);
 				}
-				return block;
+				continue;
 			}
-			if (block.type === "thinking" || block.type === "redactedThinking") {
-				const obfuscated = obfuscateStringLeaves(obfuscator, block);
-				if (obfuscated !== block) {
+			if (block.type === "thinking") {
+				const next = redactUnsignedThinking(obfuscator, block);
+				if (next === undefined) {
 					changed = true;
-					return obfuscated;
+					continue;
 				}
-				return block;
+				if (next !== block) changed = true;
+				content.push(next);
+				continue;
+			}
+			if (block.type === "redactedThinking") {
+				if (textHasSecret(obfuscator, block.data)) {
+					changed = true;
+					continue;
+				}
+				content.push(block);
+				continue;
 			}
 			if (block.type === "toolCall") {
 				const obfuscatedArguments = deepWalkStrings(block.arguments, text => obfuscator.obfuscate(text));
 				if (obfuscatedArguments !== block.arguments) {
 					changed = true;
-					return { ...block, arguments: obfuscatedArguments };
+					content.push({ ...block, arguments: obfuscatedArguments });
+					continue;
 				}
 			}
-			return block;
-		});
+			content.push(block);
+		}
 
 		return changed ? ({ ...msg, content } as typeof msg) : msg;
 	});
 }
 
-/** Rewrite string leaves on a content block, leaving its `type` discriminant intact. */
-function obfuscateStringLeaves<T extends { type: string }>(obfuscator: SecretObfuscator, block: T): T {
-	let changed = false;
-	const result: Record<string, unknown> = {};
-	for (const key of Object.keys(block)) {
-		const current = (block as Record<string, unknown>)[key];
-		if (key === "type") {
-			result[key] = current;
-			continue;
-		}
-		const transformed = deepWalkStrings(current, text => obfuscator.obfuscate(text));
-		if (transformed !== current) changed = true;
-		result[key] = transformed;
-	}
-	return (changed ? result : block) as T;
+function textHasSecret(obfuscator: SecretObfuscator, value: string | undefined): boolean {
+	return value !== undefined && obfuscator.obfuscate(value) !== value;
+}
+
+/**
+ * Signed thinking is replayed with its signature. Rewriting the text and
+ * keeping that signature makes Anthropic reject the turn and makes OpenAI
+ * parse a stale reasoning item. Omit the block instead. Unsigned thinking
+ * has no integrity metadata, so only its semantic strings are redacted.
+ */
+function redactUnsignedThinking<
+	T extends {
+		type: "thinking";
+		thinking: string;
+		thinkingSignature?: string;
+		itemId?: string;
+		summaryText?: string;
+		rawText?: string;
+	},
+>(obfuscator: SecretObfuscator, block: T): T | undefined {
+	const signed = block.thinkingSignature !== undefined || block.itemId !== undefined;
+	const secretInIntegrity =
+		textHasSecret(obfuscator, block.thinkingSignature) || textHasSecret(obfuscator, block.itemId);
+	const secretInText =
+		textHasSecret(obfuscator, block.thinking) ||
+		textHasSecret(obfuscator, block.summaryText) ||
+		textHasSecret(obfuscator, block.rawText);
+	if (secretInIntegrity || (signed && secretInText)) return undefined;
+	if (!secretInText) return block;
+	return {
+		...block,
+		thinking: obfuscator.obfuscate(block.thinking),
+		...(block.summaryText !== undefined ? { summaryText: obfuscator.obfuscate(block.summaryText) } : {}),
+		...(block.rawText !== undefined ? { rawText: obfuscator.obfuscate(block.rawText) } : {}),
+	};
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
