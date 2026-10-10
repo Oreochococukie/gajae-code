@@ -715,6 +715,140 @@ describe("rename_file server edits", () => {
 			await expect(lstat(path.join(outside, "new.txt"))).rejects.toMatchObject({ code: "ENOENT" });
 		},
 	);
+
+	it.skipIf(process.platform === "win32")(
+		"rename_file does not follow an alias after an earlier delete removes it",
+		async () => {
+			const root = await mkdtemp(path.join(tmpdir(), "lsp-del-alias-"));
+			const workspace = path.join(root, "ws");
+			await mkdir(path.join(workspace, "deep", "safe"), { recursive: true });
+			await mkdir(path.join(workspace, "deep", "src"), { recursive: true });
+			await mkdir(path.join(workspace, "safe"), { recursive: true });
+			const outside = path.join(root, "safe");
+			await mkdir(outside);
+			await writeFile(path.join(workspace, "note.txt"), "keep");
+			const alias = path.join(workspace, "alias");
+			await symlink(path.join(workspace, "deep", "safe"), alias);
+			const link = path.join(workspace, "deep", "src", "link");
+			await symlink("../../safe", link);
+			await withRenameServer(
+				workspace,
+				{
+					documentChanges: [
+						{ kind: "delete", uri: fileToUri(alias) },
+						{ kind: "rename", oldUri: fileToUri(link), newUri: fileToUri(path.join(workspace, "alias", "link")) },
+						{ kind: "create", uri: fileToUri(path.join(workspace, "alias", "link", "new.txt")) },
+					],
+				},
+				async tool => {
+					await expect(
+						tool.execute("rename-del-alias", {
+							action: "rename_file",
+							file: path.join(workspace, "note.txt"),
+							new_name: path.join(workspace, "note2.txt"),
+							timeout: 5,
+						}),
+					).rejects.toThrow(/escapes the workspace/);
+				},
+			);
+			expect((await lstat(alias)).isSymbolicLink()).toBe(true);
+			expect((await lstat(link)).isSymbolicLink()).toBe(true);
+			await expect(lstat(path.join(outside, "new.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+			expect(await readFile(path.join(workspace, "note.txt"), "utf8")).toBe("keep");
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"rename_file moves the symlink entry when missing/.. names an alias",
+		async () => {
+			const root = await mkdtemp(path.join(tmpdir(), "lsp-alias-operand-"));
+			const workspace = path.join(root, "ws");
+			const dir = path.join(workspace, "deep", "dir");
+			await mkdir(dir, { recursive: true });
+			await mkdir(path.join(workspace, "safe"), { recursive: true });
+			const outside = path.join(root, "safe");
+			await mkdir(outside);
+			await writeFile(path.join(workspace, "note.txt"), "keep");
+			const alias = path.join(workspace, "alias");
+			await symlink(dir, alias);
+			await symlink("../../safe", path.join(dir, "hop"));
+			const viaMissing = `${workspace}${path.sep}missing${path.sep}..${path.sep}alias`;
+			expect(viaMissing.includes(`${path.sep}missing${path.sep}..${path.sep}`)).toBe(true);
+			await withRenameServer(
+				workspace,
+				{
+					documentChanges: [
+						{ kind: "rename", oldUri: viaMissing, newUri: fileToUri(path.join(workspace, "moved")) },
+						{ kind: "create", uri: fileToUri(path.join(workspace, "moved", "hop", "new.txt")) },
+					],
+				},
+				async tool => {
+					await tool.execute("rename-alias-operand", {
+						action: "rename_file",
+						file: path.join(workspace, "note.txt"),
+						new_name: path.join(workspace, "note2.txt"),
+						timeout: 5,
+					});
+				},
+			);
+			expect((await lstat(dir)).isDirectory()).toBe(true);
+			expect((await lstat(path.join(workspace, "moved"))).isSymbolicLink()).toBe(true);
+			await expect(lstat(alias)).rejects.toMatchObject({ code: "ENOENT" });
+			await expect(lstat(path.join(outside, "new.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+			expect(await readFile(path.join(workspace, "safe", "new.txt"), "utf8")).toBe("");
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"rename_file does not read an alias from a directory after that alias was moved away",
+		async () => {
+			const root = await mkdtemp(path.join(tmpdir(), "lsp-stale-ancestor-"));
+			const workspace = path.join(root, "ws");
+			await mkdir(path.join(workspace, "a"), { recursive: true });
+			await mkdir(path.join(workspace, "x", "y", "z"), { recursive: true });
+			await mkdir(path.join(workspace, "src", "deep", "more"), { recursive: true });
+			await mkdir(path.join(workspace, "safe"), { recursive: true });
+			const outside = path.join(root, "safe");
+			await mkdir(outside);
+			await writeFile(path.join(workspace, "note.txt"), "keep");
+			const alias = path.join(workspace, "a", "alias");
+			await symlink(path.join(workspace, "x", "y", "z"), alias);
+			const link = path.join(workspace, "src", "deep", "more", "link");
+			await symlink("../../../safe", link);
+			await withRenameServer(
+				workspace,
+				{
+					documentChanges: [
+						{ kind: "rename", oldUri: fileToUri(alias), newUri: fileToUri(path.join(workspace, "park")) },
+						{
+							kind: "rename",
+							oldUri: fileToUri(path.join(workspace, "a")),
+							newUri: fileToUri(path.join(workspace, "b")),
+						},
+						{
+							kind: "rename",
+							oldUri: fileToUri(link),
+							newUri: fileToUri(path.join(workspace, "b", "alias", "link")),
+						},
+						{ kind: "create", uri: fileToUri(path.join(workspace, "b", "alias", "link", "new.txt")) },
+					],
+				},
+				async tool => {
+					await expect(
+						tool.execute("rename-stale-ancestor", {
+							action: "rename_file",
+							file: path.join(workspace, "note.txt"),
+							new_name: path.join(workspace, "note2.txt"),
+							timeout: 5,
+						}),
+					).rejects.toThrow(/escapes the workspace/);
+				},
+			);
+			expect((await lstat(alias)).isSymbolicLink()).toBe(true);
+			await expect(lstat(path.join(outside, "new.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+			expect(await readFile(path.join(workspace, "note.txt"), "utf8")).toBe("keep");
+		},
+	);
 });
 
 describe("applyWorkspaceEdit containment", () => {

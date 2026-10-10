@@ -78,13 +78,22 @@ function isSameOrInside(child: string, parent: string): boolean {
 
 type Move = { from: string; to: string; linkText: string | null };
 
-function liveLocation(postPath: string, moves: Move[]): string {
+/** Where a virtual path still sits on disk. Null when an earlier move took that entry away. */
+function diskLocation(postPath: string, moves: Move[]): string | null {
 	let current = postPath;
 	for (let i = moves.length - 1; i >= 0; i--) {
 		const move = moves[i];
-		if (isSameOrInside(current, move.to)) current = move.from + current.slice(move.to.length);
+		if (isSameOrInside(current, move.to)) {
+			current = move.from + current.slice(move.to.length);
+			continue;
+		}
+		if (current === move.from || isSameOrInside(current, move.from)) return null;
 	}
 	return current;
+}
+
+function isDeleted(postPath: string, deleted: string[]): boolean {
+	return deleted.some(entry => postPath === entry || isSameOrInside(postPath, entry));
 }
 
 function isMovedAway(postPath: string, moves: Move[]): boolean {
@@ -101,7 +110,7 @@ function absoluteLink(linkText: string, parent: string): string {
 	return path.isAbsolute(text) ? text : joinRaw(parent, text);
 }
 
-async function symlinkText(postPath: string, moves: Move[]): Promise<string | null> {
+async function symlinkText(postPath: string, moves: Move[], deleted: string[]): Promise<string | null> {
 	for (let i = moves.length - 1; i >= 0; i--) {
 		const move = moves[i];
 		if (move.to === postPath) return move.linkText;
@@ -109,11 +118,13 @@ async function symlinkText(postPath: string, moves: Move[]): Promise<string | nu
 		if (isSameOrInside(postPath, move.to)) break;
 		if (move.from === postPath || isSameOrInside(postPath, move.from)) return null;
 	}
-	if (isMovedAway(postPath, moves)) return null;
+	if (isMovedAway(postPath, moves) || isDeleted(postPath, deleted)) return null;
+	const disk = diskLocation(postPath, moves);
+	if (disk === null) return null;
 	try {
-		const stat = await fs.lstat(liveLocation(postPath, moves));
+		const stat = await fs.lstat(disk);
 		if (!stat.isSymbolicLink()) return null;
-		return await fs.readlink(liveLocation(postPath, moves));
+		return await fs.readlink(disk);
 	} catch (error) {
 		if (isEnoent(error)) return null;
 		throw error;
@@ -121,7 +132,7 @@ async function symlinkText(postPath: string, moves: Move[]): Promise<string | nu
 }
 
 /** Where `filePath` will sit after `moves`, following relative symlinks from their new parents. */
-async function locate(filePath: string, moves: Move[], depth: number): Promise<string> {
+async function locate(filePath: string, moves: Move[], deleted: string[], depth: number): Promise<string> {
 	if (depth > 40) throw new ToolError(`LSP edit escapes the workspace: ${filePath}`);
 	const { root, parts } = splitAbsolute(filePath);
 	let cursor = root || path.sep;
@@ -129,30 +140,34 @@ async function locate(filePath: string, moves: Move[], depth: number): Promise<s
 		const part = parts[i];
 		if (part === ".") continue;
 		if (part === "..") {
-			const link = await symlinkText(cursor, moves);
+			const link = await symlinkText(cursor, moves, deleted);
 			if (link !== null) {
-				cursor = parentDir(await locate(absoluteLink(link, parentDir(cursor)), moves, depth + 1));
+				cursor = parentDir(await locate(absoluteLink(link, parentDir(cursor)), moves, deleted, depth + 1));
 			} else if (moves.some(move => isSameOrInside(cursor, move.to))) {
 				// A renamed directory's `..` is its new parent, not the old one still on disk.
 				cursor = parentDir(cursor);
 			} else {
-				const live = isMovedAway(cursor, moves) ? cursor : liveLocation(cursor, moves);
-				try {
-					cursor = parentDir(await fs.realpath(live));
-				} catch (error) {
-					if (!isEnoent(error)) throw error;
+				const disk = diskLocation(cursor, moves);
+				if (disk === null || isDeleted(cursor, deleted)) {
 					cursor = parentDir(cursor);
+				} else {
+					try {
+						cursor = parentDir(await fs.realpath(disk));
+					} catch (error) {
+						if (!isEnoent(error)) throw error;
+						cursor = parentDir(cursor);
+					}
 				}
 			}
 			continue;
 		}
 		const next = joinRaw(cursor, part);
-		const link = await symlinkText(next, moves);
+		const link = await symlinkText(next, moves, deleted);
 		if (link !== null) {
 			const rest = parts
 				.slice(i + 1)
 				.reduce((acc, piece) => joinRaw(acc, piece), absoluteLink(link, parentDir(next)));
-			return locate(rest, moves, depth + 1);
+			return locate(rest, moves, deleted, depth + 1);
 		}
 		cursor = next;
 	}
@@ -220,7 +235,7 @@ export async function assertInsideWorkspace(cwd: string, filePath: string): Prom
 async function directoryContainingEntry(filePath: string, cwd: string): Promise<string> {
 	const absolute = lexicalAbsolute(filePath, cwd);
 	const { root, parts } = splitAbsolute(absolute);
-	return locate(joinRoot(root, parts.slice(0, -1)), [], 0);
+	return locate(joinRoot(root, parts.slice(0, -1)), [], [], 0);
 }
 
 /** The directory entry itself must sit inside the workspace, not only its real target. */
@@ -246,11 +261,12 @@ export type PlannedResource =
 	| { kind: "delete"; filePath: string };
 
 /** Parent symlinks and `.` applied, final component not followed, so `alias/link` and `link` match. */
-async function entryIdentity(filePath: string, cwd: string, moves: Move[]): Promise<string> {
+async function entryIdentity(filePath: string, cwd: string, moves: Move[], deleted: string[]): Promise<string> {
 	const absolute = identityPath(filePath, cwd);
 	const { root, parts } = splitAbsolute(absolute);
 	if (parts.length === 0) return root || path.sep;
-	const parent = parts.length === 1 ? root || path.sep : await locate(joinRoot(root, parts.slice(0, -1)), moves, 0);
+	const parent =
+		parts.length === 1 ? root || path.sep : await locate(joinRoot(root, parts.slice(0, -1)), moves, deleted, 0);
 	return joinRaw(parent, parts[parts.length - 1]);
 }
 
@@ -262,31 +278,40 @@ export async function assertBatchStaysInside(cwd: string, ops: PlannedResource[]
 	if (ops.length === 0) return;
 	const workspaceRoot = await fs.realpath(cwd);
 	const moves: Move[] = [];
+	const deleted: string[] = [];
 	const check = async (filePath: string) => {
 		const absolute = identityPath(filePath, cwd);
 		const { root, parts } = splitAbsolute(absolute);
-		const parent = parts.length <= 1 ? root || path.sep : await locate(joinRoot(root, parts.slice(0, -1)), moves, 0);
+		const parent =
+			parts.length <= 1 ? root || path.sep : await locate(joinRoot(root, parts.slice(0, -1)), moves, deleted, 0);
 		if (escapes(workspaceRoot, await canonicalize(parent))) {
 			throw new ToolError(`LSP edit escapes the workspace: ${filePath}`);
 		}
-		const located = await locate(absolute, moves, 0);
+		const located = await locate(absolute, moves, deleted, 0);
 		if (escapes(workspaceRoot, await canonicalize(located))) {
 			throw new ToolError(`LSP edit escapes the workspace: ${filePath}`);
 		}
 	};
 	for (const op of ops) {
+		if (op.kind === "delete") {
+			await check(op.filePath);
+			deleted.push(await entryIdentity(op.filePath, cwd, moves, deleted));
+			continue;
+		}
 		if (op.kind === "rename") {
 			await check(op.oldPath);
 			await check(op.newPath);
-			const from = await entryIdentity(op.oldPath, cwd, moves);
-			const to = await entryIdentity(op.newPath, cwd, moves);
+			const from = await entryIdentity(op.oldPath, cwd, moves, deleted);
+			const to = await entryIdentity(op.newPath, cwd, moves, deleted);
 			let linkText: string | null = null;
-			try {
-				const live = liveLocation(from, moves);
-				const stat = await fs.lstat(live);
-				if (stat.isSymbolicLink()) linkText = await fs.readlink(live);
-			} catch (error) {
-				if (!isEnoent(error)) throw error;
+			const live = diskLocation(from, moves);
+			if (live !== null) {
+				try {
+					const stat = await fs.lstat(live);
+					if (stat.isSymbolicLink()) linkText = await fs.readlink(live);
+				} catch (error) {
+					if (!isEnoent(error)) throw error;
+				}
 			}
 			moves.push({ from, to, linkText });
 			continue;
@@ -305,6 +330,14 @@ export async function workspaceOperand(cwd: string, filePath: string): Promise<s
 	try {
 		await fs.lstat(absolute);
 		return absolute;
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+	}
+	// A collapsed `missing/..` names the directory entry. realpath would move the symlink target.
+	const collapsed = path.resolve(absolute);
+	try {
+		await fs.lstat(collapsed);
+		return collapsed;
 	} catch (error) {
 		if (!isEnoent(error)) throw error;
 		return canonicalize(absolute);
