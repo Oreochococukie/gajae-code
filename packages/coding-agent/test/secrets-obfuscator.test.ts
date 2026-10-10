@@ -7,6 +7,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AssistantMessage } from "@gajae-code/ai/core";
+import { streamBedrock } from "@gajae-code/ai/providers/amazon-bedrock";
 import { convertAnthropicMessages } from "@gajae-code/ai/providers/anthropic";
 import { convertMessages as convertGoogleMessages } from "@gajae-code/ai/providers/google-shared";
 import { streamOpenAIResponses } from "@gajae-code/ai/providers/openai-responses";
@@ -1083,5 +1084,280 @@ describe("obfuscateMessages", () => {
 		expect(replayWire).not.toContain("rs_payload");
 		expect(replayWire).toContain("call_payload");
 		expect(replayWire).toContain("clean reply");
+	});
+
+	it("omits signed replay bytes when substitution would leave the secret unchanged", () => {
+		const secret = "cycle-secret-value";
+		const other = "cycle-other-valuex";
+		const cycled = new SecretObfuscator(
+			[
+				{ type: "plain", content: secret, mode: "replace", replacement: other },
+				{ type: "plain", content: other, mode: "replace", replacement: secret },
+			],
+			TEST_KEY,
+		);
+		const unchanged = new SecretObfuscator(
+			[{ type: "plain", content: secret, mode: "replace", replacement: secret }],
+			TEST_KEY,
+		);
+		expect(cycled.obfuscate(secret)).toBe(secret);
+		expect(unchanged.obfuscate(`plan ${secret}`)).toBe(`plan ${secret}`);
+
+		const usage = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const anthropicModel: Model<"anthropic-messages"> = {
+			api: "anthropic-messages",
+			provider: "anthropic",
+			id: "claude-sonnet-4-6",
+			name: "Claude Sonnet 4.6",
+			baseUrl: "https://api.anthropic.com",
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			maxTokens: 8_192,
+			contextWindow: 200_000,
+			reasoning: true,
+		};
+		const signed = (): AssistantMessage => ({
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: `plan ${secret}`, thinkingSignature: "anthropic-cycle-sig" },
+				{ type: "thinking", thinking: `unsigned ${secret}`, thinkingSignature: "" },
+				{ type: "text", text: `visible ${secret}` },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: anthropicModel.id,
+			usage,
+			stopReason: "stop",
+			timestamp: 1,
+		});
+		const [cycledAssistant] = obfuscateMessages(cycled, [signed()]);
+		if (cycledAssistant?.role !== "assistant") throw new Error("expected cycled assistant");
+		expect(JSON.stringify(cycledAssistant)).not.toContain(secret);
+		expect(JSON.stringify(cycledAssistant)).not.toContain("anthropic-cycle-sig");
+		const cycledWire = JSON.stringify(
+			convertAnthropicMessages(
+				[{ role: "user", content: "continue", timestamp: 1 }, cycledAssistant],
+				anthropicModel,
+				false,
+			),
+		);
+		expect(cycledWire).not.toContain(secret);
+		expect(cycledWire).not.toContain("anthropic-cycle-sig");
+		expect(cycledWire).toContain("unsigned");
+
+		const [noopAssistant] = obfuscateMessages(unchanged, [signed()]);
+		if (noopAssistant?.role !== "assistant") throw new Error("expected no-op assistant");
+		expect(
+			noopAssistant.content.some(
+				block => block.type === "thinking" && block.thinkingSignature === "anthropic-cycle-sig",
+			),
+		).toBe(false);
+		expect(JSON.stringify(noopAssistant)).not.toContain("anthropic-cycle-sig");
+		const visible = noopAssistant.content.find(block => block.type === "text");
+		if (visible?.type !== "text") throw new Error("expected visible text");
+		expect(visible.text).toBe(`visible ${secret}`);
+		const noopWire = JSON.stringify(
+			convertAnthropicMessages(
+				[{ role: "user", content: "continue", timestamp: 1 }, noopAssistant],
+				anthropicModel,
+				false,
+			),
+		);
+		expect(noopWire).not.toContain("anthropic-cycle-sig");
+		expect(noopWire).toContain("unsigned");
+	});
+
+	it("omits JSON-escaped secrets in signed, opaque, and replayed provider bytes", async () => {
+		const secret = 'tok-"en"-value';
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }], TEST_KEY);
+		const usage = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const anthropicModel: Model<"anthropic-messages"> = {
+			api: "anthropic-messages",
+			provider: "anthropic",
+			id: "claude-sonnet-4-6",
+			name: "Claude Sonnet 4.6",
+			baseUrl: "https://api.anthropic.com",
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			maxTokens: 8_192,
+			contextWindow: 200_000,
+			reasoning: true,
+		};
+		const responsesModel: Model<"openai-responses"> = {
+			api: "openai-responses",
+			provider: "openai",
+			id: "gpt-4.1-mini",
+			name: "gpt-4.1-mini",
+			baseUrl: "https://api.openai.com/v1",
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			maxTokens: 16_000,
+			contextWindow: 128_000,
+			reasoning: true,
+		};
+		const bedrockModel: Model<"bedrock-converse-stream"> = {
+			api: "bedrock-converse-stream",
+			provider: "amazon-bedrock",
+			id: "anthropic.claude-sonnet-4-6-v1:0",
+			name: "Claude",
+			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			maxTokens: 8_192,
+			contextWindow: 200_000,
+			reasoning: true,
+		};
+		const signature = JSON.stringify({
+			type: "reasoning",
+			id: "rs_quote",
+			encrypted_content: `cipher ${secret}`,
+		});
+		const opaque = JSON.stringify({ blob: secret });
+		const encodedArguments = JSON.stringify({ command: `echo ${secret}` });
+		expect(signature.includes(secret)).toBe(false);
+		expect(opaque.includes(secret)).toBe(false);
+		expect(encodedArguments.includes(secret)).toBe(false);
+
+		const anthropic: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "clean plan", thinkingSignature: signature },
+				{ type: "redactedThinking", data: opaque },
+				{ type: "toolCall", id: "toolu_quote", name: "bash", arguments: { command: "echo ok" } },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: anthropicModel.id,
+			usage,
+			stopReason: "toolUse",
+			timestamp: 1,
+		};
+		const bedrock: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: `plan ${secret}`, thinkingSignature: "bedrock-sig" },
+				{ type: "toolCall", id: "toolu_bedrock", name: "bash", arguments: { command: "echo ok" } },
+			],
+			api: "bedrock-converse-stream",
+			provider: "amazon-bedrock",
+			model: bedrockModel.id,
+			usage,
+			stopReason: "toolUse",
+			timestamp: 2,
+		};
+		const history: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "visible reply" }],
+			api: "openai-responses",
+			provider: "openai",
+			model: responsesModel.id,
+			usage,
+			stopReason: "stop",
+			timestamp: 3,
+			providerPayload: {
+				type: "openaiResponsesHistory",
+				provider: "openai",
+				dt: true,
+				items: [
+					{
+						type: "reasoning",
+						id: "rs_quote",
+						summary: [{ type: "summary_text", text: `note ${secret}` }],
+						encrypted_content: "enc-clean",
+					},
+					{
+						type: "function_call",
+						call_id: "call_quote",
+						name: "bash",
+						arguments: encodedArguments,
+					},
+				],
+			},
+		};
+
+		const [obfuscatedAnthropic, obfuscatedBedrock, obfuscatedHistory] = obfuscateMessages(obfuscator, [
+			anthropic,
+			bedrock,
+			history,
+		]);
+		if (obfuscatedAnthropic?.role !== "assistant") throw new Error("expected anthropic assistant");
+		if (obfuscatedBedrock?.role !== "assistant") throw new Error("expected bedrock assistant");
+		if (obfuscatedHistory?.role !== "assistant") throw new Error("expected history assistant");
+
+		const anthropicWire = JSON.stringify(
+			convertAnthropicMessages(
+				[{ role: "user", content: "continue", timestamp: 1 }, obfuscatedAnthropic],
+				anthropicModel,
+				false,
+			),
+		);
+		expect(anthropicWire).not.toContain(secret);
+		expect(anthropicWire).not.toContain("rs_quote");
+		expect(anthropicWire).not.toContain("redacted_thinking");
+		expect(anthropicWire).toContain("toolu_quote");
+
+		expect(JSON.stringify(obfuscatedBedrock)).not.toContain(secret);
+		expect(JSON.stringify(obfuscatedBedrock)).not.toContain("bedrock-sig");
+		const controller = new AbortController();
+		controller.abort();
+		const bedrockPayload = await Promise.race([
+			new Promise<unknown>(resolve => {
+				streamBedrock(
+					bedrockModel,
+					{ messages: [{ role: "user", content: "continue", timestamp: 1 }, obfuscatedBedrock] },
+					{
+						region: "us-east-1",
+						signal: controller.signal,
+						onPayload: captured => resolve(captured),
+					},
+				);
+			}),
+			new Promise<never>((_resolve, reject) => {
+				setTimeout(() => reject(new Error("Bedrock replay payload was not captured")), 20_000);
+			}),
+		]);
+		const bedrockWire = JSON.stringify(bedrockPayload);
+		expect(bedrockWire).not.toContain(secret);
+		expect(bedrockWire).not.toContain("bedrock-sig");
+		expect(bedrockWire).toContain("toolu_bedrock");
+
+		const historyItems = obfuscatedHistory.providerPayload?.items ?? [];
+		expect(historyItems.some(item => item.type === "reasoning")).toBe(false);
+		expect(JSON.stringify(historyItems)).not.toContain(secret);
+		expect(JSON.stringify(historyItems)).toContain("call_quote");
+		const replayPayload = await Promise.race([
+			new Promise<unknown>(resolve => {
+				streamOpenAIResponses(
+					responsesModel,
+					{ messages: [{ role: "user", content: "continue", timestamp: 1 }, obfuscatedHistory] },
+					{
+						apiKey: "test-key",
+						signal: controller.signal,
+						onPayload: captured => resolve(captured),
+					},
+				);
+			}),
+			new Promise<never>((_resolve, reject) => {
+				setTimeout(() => reject(new Error("OpenAI replay payload was not captured")), 20_000);
+			}),
+		]);
+		const replayWire = JSON.stringify(replayPayload);
+		expect(replayWire).not.toContain(secret);
+		expect(replayWire).not.toContain("rs_quote");
+		expect(replayWire).toContain("call_quote");
 	});
 });

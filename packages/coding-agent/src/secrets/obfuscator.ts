@@ -121,6 +121,13 @@ function generateDeterministicReplacement(secret: string, key: Uint8Array): stri
 const PLACEHOLDER_DOMAIN = "gjc.secret-obfuscation.placeholder.v1\0";
 const PLACEHOLDER_RE = /#GJC1_[A-Za-z0-9_-]{22}#/g;
 
+/**
+ * Last-resort outbound mask when substitution leaves a configured secret in
+ * place (explicit replacement equal to the secret, or a replacement cycle).
+ * Not a reversible `#GJC1_` placeholder.
+ */
+const OUTBOUND_SECRET_MASK = "#GJC_REDACTED#";
+
 /** Build a versioned, authenticated placeholder whose identity depends only on the key and secret. */
 function buildPlaceholder(secret: string, key: Uint8Array): string {
 	const tag = createHmac("sha256", key)
@@ -356,6 +363,104 @@ export class SecretObfuscator {
 				? new RegExp(mappings.map(mapping => escapeRegex(mapping.secret)).join("|"), "g")
 				: undefined;
 	}
+
+	/**
+	 * True when a configured plain secret or non-empty regex match occurs in
+	 * `text`. Unlike `obfuscate(text) !== text`, a no-op replacement or a
+	 * replacement cycle still counts.
+	 */
+	containsConfiguredSecret(text: string): boolean {
+		if (!this.#hasAny || text.length === 0) return false;
+		for (const secret of this.#plainMappings.keys()) {
+			if (secret.length > 0 && text.includes(secret)) return true;
+		}
+		for (const secret of this.#replaceMappings.keys()) {
+			if (secret.length > 0 && text.includes(secret)) return true;
+		}
+		for (const entry of this.#regexEntries) {
+			entry.regex.lastIndex = 0;
+			for (;;) {
+				const match = entry.regex.exec(text);
+				if (match === null) break;
+				if (match[0].length === 0) {
+					entry.regex.lastIndex++;
+					continue;
+				}
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Substitute secrets for an outbound copy. If substitution leaves a
+	 * configured secret in place, remaining matches are masked. The mask is
+	 * not reversed by `deobfuscate()`.
+	 */
+	scrubOutbound(text: string): string {
+		const obfuscated = this.obfuscate(text);
+		if (!this.containsConfiguredSecret(obfuscated)) return obfuscated;
+		// An explicit replacement equal to the secret is authoritative for
+		// semantic text. A cycle that restores the secret is not.
+		if (obfuscated === text && this.#substitutionLeftSecretIntentionally(text)) return text;
+		const masked = this.#maskRemainingSecrets(obfuscated);
+		return this.containsConfiguredSecret(masked) ? OUTBOUND_SECRET_MASK : masked;
+	}
+
+	/** True when every secret still in `text` was configured to replace itself. */
+	#substitutionLeftSecretIntentionally(text: string): boolean {
+		for (const entry of this.#regexEntries) {
+			entry.regex.lastIndex = 0;
+			for (;;) {
+				const match = entry.regex.exec(text);
+				if (match === null) break;
+				if (match[0].length === 0) {
+					entry.regex.lastIndex++;
+					continue;
+				}
+				return false;
+			}
+		}
+		let matched = false;
+		for (const [secret, replacement] of this.#replaceMappings) {
+			if (secret.length === 0 || !text.includes(secret)) continue;
+			matched = true;
+			if (replacement !== secret) return false;
+		}
+		for (const secret of this.#plainMappings.keys()) {
+			if (secret.length > 0 && text.includes(secret)) return false;
+		}
+		return matched;
+	}
+
+	#maskRemainingSecrets(text: string): string {
+		let result = text;
+		const secrets = [...this.#plainMappings.keys(), ...this.#replaceMappings.keys()].sort(
+			(left, right) => right.length - left.length,
+		);
+		for (const secret of secrets) {
+			if (secret.length === 0 || secret === OUTBOUND_SECRET_MASK) continue;
+			if (result.includes(secret)) result = replaceAll(result, secret, OUTBOUND_SECRET_MASK);
+		}
+		for (const entry of this.#regexEntries) {
+			entry.regex.lastIndex = 0;
+			const matches = new Set<string>();
+			for (;;) {
+				const match = entry.regex.exec(result);
+				if (match === null) break;
+				if (match[0].length === 0) {
+					entry.regex.lastIndex++;
+					continue;
+				}
+				matches.add(match[0]);
+			}
+			for (const matchValue of matches) {
+				if (matchValue === OUTBOUND_SECRET_MASK) continue;
+				result = replaceAll(result, matchValue, OUTBOUND_SECRET_MASK);
+			}
+		}
+		return result;
+	}
 }
 
 export function deobfuscateSessionContext(
@@ -377,10 +482,11 @@ export function deobfuscateSessionContext(
  * Obfuscate text and tool-call arguments. Unsigned thinking text is redacted.
  * A block whose provider replays it under integrity metadata is omitted when a
  * configured secret occurs in those bytes or in the text that would be sent
- * with them. OpenAI Responses sends the reasoning item in `thinkingSignature`
- * (and, when present, `providerPayload` history) rather than the thinking
- * prose, so a clean signature is kept and only the prose is redacted. Image
- * payloads are not scanned.
+ * with them, including a secret that is visible only after JSON decoding and a
+ * secret that substitution would leave unchanged. OpenAI Responses sends the
+ * reasoning item in `thinkingSignature` (and, when present, `providerPayload`
+ * history) rather than the thinking prose, so a clean signature is kept and
+ * only the prose is redacted. Image payloads are not scanned.
  */
 export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Message[]): Message[] {
 	return messages.map(msg => {
@@ -395,7 +501,7 @@ export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Messag
 		const content: object[] = [];
 		for (const block of msg.content) {
 			if (block.type === "text") {
-				const obfuscated = obfuscator.obfuscate(block.text);
+				const obfuscated = obfuscator.scrubOutbound(block.text);
 				if (obfuscated !== block.text) {
 					changed = true;
 					content.push({ ...block, text: obfuscated } as TextContent);
@@ -423,7 +529,11 @@ export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Messag
 				continue;
 			}
 			if (block.type === "toolCall") {
-				const obfuscatedArguments = deepWalkStrings(block.arguments, text => obfuscator.obfuscate(text));
+				const obfuscatedArguments = deepWalkStrings(block.arguments, text => scrubProtocolString(obfuscator, text));
+				if (obfuscatedArguments !== block.arguments && valueTreeHasSecret(obfuscator, obfuscatedArguments, 0)) {
+					changed = true;
+					continue;
+				}
 				const dropSignature =
 					textHasSecret(obfuscator, block.thoughtSignature) || obfuscatedArguments !== block.arguments;
 				if (dropSignature) {
@@ -442,8 +552,69 @@ export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Messag
 	});
 }
 
-function textHasSecret(obfuscator: SecretObfuscator, value: string | undefined): boolean {
-	return value !== undefined && obfuscator.obfuscate(value) !== value;
+function textHasSecret(obfuscator: SecretObfuscator, value: string | undefined, depth = 0): boolean {
+	if (value === undefined || value.length === 0) return false;
+	if (obfuscator.containsConfiguredSecret(value)) return true;
+	if (depth >= 4) return false;
+	const parsed = parseJsonValue(value);
+	if (parsed === undefined) return false;
+	return valueTreeHasSecret(obfuscator, parsed, depth + 1);
+}
+
+/** Decode a JSON object, array, or string. Other text is not JSON. */
+function parseJsonValue(value: string): unknown | undefined {
+	const trimmed = value.trim();
+	if (trimmed.length < 2) return undefined;
+	const first = trimmed[0];
+	if (first !== "{" && first !== "[" && first !== '"') return undefined;
+	try {
+		return JSON.parse(value);
+	} catch {
+		return undefined;
+	}
+}
+
+function valueTreeHasSecret(
+	obfuscator: SecretObfuscator,
+	value: unknown,
+	depth: number,
+	seen: WeakSet<object> = new WeakSet(),
+): boolean {
+	if (typeof value === "string") return textHasSecret(obfuscator, value, depth);
+	if (typeof value !== "object" || value === null) return false;
+	if (seen.has(value)) return false;
+	seen.add(value);
+	if (Array.isArray(value)) return value.some(item => valueTreeHasSecret(obfuscator, item, depth, seen));
+	for (const key of Object.keys(value)) {
+		if (obfuscator.containsConfiguredSecret(key)) return true;
+		if (valueTreeHasSecret(obfuscator, (value as Record<string, unknown>)[key], depth, seen)) return true;
+	}
+	return false;
+}
+
+/**
+ * Redact a protocol string. JSON objects, arrays, and strings are decoded so a
+ * secret that exists only in escaped form is still replaced. The original
+ * string is kept when nothing matches.
+ */
+function scrubProtocolString(obfuscator: SecretObfuscator, value: string, depth = 0): string {
+	if (depth < 4) {
+		const parsed = parseJsonValue(value);
+		if (typeof parsed === "string") {
+			const scrubbed = scrubProtocolString(obfuscator, parsed, depth + 1);
+			return scrubbed === parsed ? value : JSON.stringify(scrubbed);
+		}
+		if (parsed !== undefined && typeof parsed === "object" && parsed !== null) {
+			const walked = deepWalkStrings(parsed, text => scrubProtocolString(obfuscator, text, depth + 1));
+			if (walked === parsed) return value;
+			try {
+				return JSON.stringify(walked);
+			} catch {
+				return obfuscator.scrubOutbound(value);
+			}
+		}
+	}
+	return obfuscator.scrubOutbound(value);
 }
 
 const RESPONSES_APIS = new Set(["openai-responses", "azure-openai-responses", "openai-codex-responses"]);
@@ -514,9 +685,9 @@ function redactThinkingText<
 		rawText?: string;
 	},
 >(obfuscator: SecretObfuscator, block: T): T {
-	const thinking = obfuscator.obfuscate(block.thinking);
-	const summaryText = block.summaryText !== undefined ? obfuscator.obfuscate(block.summaryText) : undefined;
-	const rawText = block.rawText !== undefined ? obfuscator.obfuscate(block.rawText) : undefined;
+	const thinking = scrubProtocolString(obfuscator, block.thinking);
+	const summaryText = block.summaryText !== undefined ? scrubProtocolString(obfuscator, block.summaryText) : undefined;
+	const rawText = block.rawText !== undefined ? scrubProtocolString(obfuscator, block.rawText) : undefined;
 	if (thinking === block.thinking && summaryText === block.summaryText && rawText === block.rawText) return block;
 	return {
 		...block,
@@ -567,7 +738,9 @@ function scrubHistoryItem(obfuscator: SecretObfuscator, item: unknown): unknown 
 		return rewriteHistoryField(obfuscator, record, "output");
 	}
 	if (record.type === "message" && Array.isArray(record.content)) {
-		const content = deepWalkStrings(record.content, text => obfuscator.obfuscate(text));
+		if (opaqueSiblingHasSecret(obfuscator, record, "content")) return undefined;
+		const content = deepWalkStrings(record.content, text => scrubProtocolString(obfuscator, text));
+		if (content !== record.content && valueTreeHasSecret(obfuscator, content, 0)) return undefined;
 		return content === record.content ? record : { ...record, content };
 	}
 	return historyItemHasSecret(obfuscator, record) ? undefined : record;
@@ -577,20 +750,45 @@ function rewriteHistoryField(
 	obfuscator: SecretObfuscator,
 	item: Record<string, unknown>,
 	key: "arguments" | "input" | "output",
-): Record<string, unknown> {
+): Record<string, unknown> | undefined {
+	if (opaqueSiblingHasSecret(obfuscator, item, key)) return undefined;
 	if (!(key in item)) return item;
-	const next = deepWalkStrings(item[key], text => obfuscator.obfuscate(text));
+	const next = scrubProtocolValue(obfuscator, item[key]);
+	if (next !== item[key] && valueTreeHasSecret(obfuscator, next, 0)) return undefined;
 	return next === item[key] ? item : { ...item, [key]: next };
 }
 
-function historyItemHasSecret(obfuscator: SecretObfuscator, item: Record<string, unknown>): boolean {
-	let encoded: string;
-	try {
-		encoded = JSON.stringify(item);
-	} catch {
-		return false;
+function opaqueSiblingHasSecret(
+	obfuscator: SecretObfuscator,
+	item: Record<string, unknown>,
+	semanticKey: string,
+): boolean {
+	for (const key of Object.keys(item)) {
+		if (key === semanticKey || key === "type") continue;
+		if (valueTreeHasSecret(obfuscator, item[key], 0)) return true;
 	}
-	return textHasSecret(obfuscator, encoded);
+	return false;
+}
+
+function scrubProtocolValue(obfuscator: SecretObfuscator, value: unknown, depth = 0): unknown {
+	if (typeof value === "string") return scrubProtocolString(obfuscator, value, depth);
+	if (Array.isArray(value)) {
+		let changed = false;
+		const result = value.map(item => {
+			const next = scrubProtocolValue(obfuscator, item, depth);
+			if (next !== item) changed = true;
+			return next;
+		});
+		return changed ? result : value;
+	}
+	if (value !== null && typeof value === "object") {
+		return deepWalkStrings(value, text => scrubProtocolString(obfuscator, text, depth));
+	}
+	return value;
+}
+
+function historyItemHasSecret(obfuscator: SecretObfuscator, item: Record<string, unknown>): boolean {
+	return valueTreeHasSecret(obfuscator, item, 0);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
