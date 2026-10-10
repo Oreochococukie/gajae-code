@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { ptree } from "@gajae-code/utils";
 import { formatCrashDiagnosticNotice, writeCrashReport } from "../src/debug/crash-diagnostics";
 
 const tempDirs: string[] = [];
@@ -186,5 +187,52 @@ describe("crash diagnostics path", () => {
 		const report = JSON.parse(await Bun.file(crashed.path as string).text()) as { stderrPreview?: string };
 		expect(report.stderrPreview).not.toContain(token);
 		expect(report.stderrPreview).toContain("«redacted-auth»");
+	});
+
+	it("scrubs a bearer token retained after the stderr tail drops its marker", async () => {
+		const dir = await makeTempDir();
+		const token = "A".repeat(32768);
+		const child = ptree.spawn([process.execPath, "-e", `process.stderr.write("Bearer ${token}"); process.exit(1);`]);
+		await child.wait({ allowNonZero: true });
+		const retained = child.peekStderr().trim();
+		expect(retained.includes("Bearer")).toBe(false);
+		expect(retained.length).toBeGreaterThan(4096);
+		expect(retained.endsWith("A".repeat(64))).toBe(true);
+
+		const crashed = await writeCrashReport(
+			{ kind: "dap", exitCode: 1, stderr: retained },
+			{
+				cwd: dir,
+				env: { GJC_CRASH_DIAGNOSTICS: "1", GJC_CRASH_DIAGNOSTICS_DIR: dir } as NodeJS.ProcessEnv,
+				now: new Date("2026-06-04T00:00:10.000Z"),
+			},
+		);
+		const report = JSON.parse(await Bun.file(crashed.path as string).text()) as { stderrPreview?: string };
+		expect(report.stderrPreview).not.toContain("A".repeat(64));
+		expect(report.stderrPreview).toContain("«redacted-auth»");
+
+		const withSuffix = await writeCrashReport(
+			{ kind: "dap", exitCode: 1, stderr: `${retained}\nadapter exited` },
+			{
+				cwd: dir,
+				env: { GJC_CRASH_DIAGNOSTICS: "1", GJC_CRASH_DIAGNOSTICS_DIR: dir } as NodeJS.ProcessEnv,
+				now: new Date("2026-06-04T00:00:10.500Z"),
+			},
+		);
+		const suffixReport = JSON.parse(await Bun.file(withSuffix.path as string).text()) as { stderrPreview?: string };
+		expect(suffixReport.stderrPreview).not.toContain("A".repeat(64));
+		expect(suffixReport.stderrPreview).toContain("«redacted-auth»");
+		expect(suffixReport.stderrPreview).toContain("adapter exited");
+
+		const short = await writeCrashReport(
+			{ kind: "dap", exitCode: 1, stderr: "A".repeat(32) },
+			{
+				cwd: dir,
+				env: { GJC_CRASH_DIAGNOSTICS: "1", GJC_CRASH_DIAGNOSTICS_DIR: dir } as NodeJS.ProcessEnv,
+				now: new Date("2026-06-04T00:00:11.000Z"),
+			},
+		);
+		const shortReport = JSON.parse(await Bun.file(short.path as string).text()) as { stderrPreview?: string };
+		expect(shortReport.stderrPreview).toBe("A".repeat(32));
 	});
 });
