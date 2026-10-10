@@ -8794,7 +8794,9 @@ describe("accepted-control zero-execution bound (#4668)", () => {
 								: key === "sdk.flushWorktreeOnDeadline"
 									? true
 									: undefined,
-					has: (key: string) => key === "sdk.flushWorktreeOnDeadline",
+					// Primary checkout: only a user/global true opts in. `has()` would
+					// also be true for a project file, which must not authorize this.
+					getGlobal: (key: string) => (key === "sdk.flushWorktreeOnDeadline" ? true : undefined),
 					getAgentDir: () => path.join(cwd, ".gjc", "agent"),
 				} as unknown as Settings,
 				sendUserMessage: async (_content, options) => {
