@@ -6,7 +6,7 @@ import { TempDir } from "@gajae-code/utils";
 import { Settings } from "../../src/config/settings";
 import { selectLaunchAdapter } from "../../src/dap/config";
 import { dapSessionManager } from "../../src/dap/session";
-import { resolveCommand, resolveTrustedCommand } from "../../src/lsp/config";
+import { resolveCommand } from "../../src/lsp/config";
 import type { ToolSession } from "../../src/tools";
 import { DebugTool } from "../../src/tools/debug";
 
@@ -152,6 +152,7 @@ describe("DAP project-controlled adapter binaries", () => {
 
 			expect(fs.existsSync(marker)).toBe(false);
 			const command = fixture.adapter === "debugpy" ? "python" : fixture.adapter;
+			const { resolveTrustedCommand } = await import("../../src/lsp/config");
 			expect(resolveTrustedCommand(command, cwd)).toBeNull();
 			expect(resolveCommand(command, cwd)).toBeNull();
 		}, 20_000);
@@ -261,6 +262,31 @@ describe("DAP project-controlled adapter binaries", () => {
 				tool.execute("call-trusted", { action: "launch", program: "main.c", adapter: "gdb", timeout: 5 }),
 			).rejects.toThrow(/DAP adapter exited/);
 			expect(fs.existsSync(projectMarker)).toBe(false);
+			expect(fs.existsSync(trustedMarker)).toBe(true);
+		},
+		20_000,
+	);
+
+	it.skipIf(!POSIX_STUB)(
+		"still launches a host-path gdb when the repository has no local gdb (skipped on win32: POSIX stub)",
+		async () => {
+			using tempDir = TempDir.createSync("@gjc-dap-trust-allowed-");
+			const trustedMarker = tempDir.join("trusted-stub-ran");
+			const repo = path.join(tempDir.path(), "repo");
+			await fs.promises.mkdir(path.join(repo, ".git"), { recursive: true });
+			await Bun.write(path.join(repo, "main.c"), "int main(void) { return 0; }\n");
+			await Bun.write(path.join(repo, "go.mod"), "module example\n");
+			const trustedBinary = tempDir.join("outside", "gdb");
+			await writeStub(trustedBinary, trustedMarker);
+			vi.spyOn(piUtils, "$which").mockImplementation(command => (command === "gdb" ? trustedBinary : null));
+			const tool = new DebugTool(sessionFor(repo));
+
+			const selected = selectLaunchAdapter(path.join(repo, "main.c"), repo, "gdb");
+			expect(selected?.resolvedCommand).toBe(trustedBinary);
+
+			await expect(
+				tool.execute("call-allowed", { action: "launch", program: "main.c", adapter: "gdb", timeout: 5 }),
+			).rejects.toThrow(/DAP adapter exited/);
 			expect(fs.existsSync(trustedMarker)).toBe(true);
 		},
 		20_000,
