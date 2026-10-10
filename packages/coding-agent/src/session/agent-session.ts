@@ -412,6 +412,7 @@ import type { LazyService } from "../runtime/lazy-service";
 import type { NetworkPrewarmRuntime } from "../runtime/network-prewarm-service";
 import type { WorkspaceTreeRuntime } from "../runtime/workspace-tree-service";
 import { type ExactMcpServerControlResult, MCPManager } from "../runtime-mcp/manager";
+import { omitPluginMcpNameShadows } from "../runtime-mcp/plugin-mcp-name-filter";
 import { attachExactMcpControls, getExactMcpControls, revokeExactMcpControls } from "../runtime-mcp/redaction";
 import type { NotificationSessionController } from "../sdk/bus/session-control";
 import { buildSyntheticModelId, syntheticNamespaceCollision } from "../sdk/model-profile-model";
@@ -6237,7 +6238,7 @@ export class AgentSession {
 		for (const name of previous) this.#toolRegistry.delete(name);
 		const getCustomToolContext = () => this.#getCustomToolContext();
 		const added: string[] = [];
-		for (const customTool of nextTools) {
+		for (const customTool of omitPluginMcpNameShadows(nextTools)) {
 			const wrapped = CustomToolAdapter.wrap(customTool, getCustomToolContext) as AgentTool;
 			const finalTool = (
 				this.#extensionRunner ? new ExtensionToolWrapper(wrapped, this.#extensionRunner) : wrapped
@@ -12337,7 +12338,7 @@ export class AgentSession {
 			},
 		});
 
-		for (const customTool of mcpTools) {
+		for (const customTool of omitPluginMcpNameShadows(mcpTools)) {
 			const wrapped = CustomToolAdapter.wrap(customTool, getCustomToolContext) as AgentTool;
 			const finalTool = (
 				this.#extensionRunner ? new ExtensionToolWrapper(wrapped, this.#extensionRunner) : wrapped
