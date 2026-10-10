@@ -1,2 +1,2 @@
 ### Fixed
-- Discord thread reconciliation now adopts a public nonce marker only when the message was posted by this bot and the thread's `parent_id` and `owner_id` are that bot's thread in the configured parent, so a copied marker cannot rebind the session.
+- Discord thread reconciliation and the thread-create response now bind a session only when the starter was posted by this bot and the thread's `parent_id` and `owner_id` identify that bot's thread in the configured parent.

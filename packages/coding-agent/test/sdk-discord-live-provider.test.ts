@@ -54,15 +54,22 @@ function provider(
 			if (path.endsWith("/applications/@me")) return response({ id: "app" });
 			if (path.endsWith("/gateway/bot")) return response({ url: "wss://gateway.test" });
 			if (path.includes("/threads/active"))
-				return response({ threads: [{ id: "thread", parent_id: "parent", thread_metadata: { archived: false } }] });
+				return response({
+					threads: [{ id: "thread", parent_id: "parent", owner_id: "bot", thread_metadata: { archived: false } }],
+				});
 			if (path.includes("archived/public")) return response({ threads: [] });
 			if (path.includes("/messages?limit")) return response([]);
 			if (path.endsWith("/channels/parent/messages")) return response({ id: "starter" });
 			if (path.endsWith("/channels/parent/messages/starter/threads"))
-				return response({ id: "thread", parent_id: "parent", thread_metadata: { archived: false } });
+				return response({
+					id: "thread",
+					parent_id: "parent",
+					owner_id: "bot",
+					thread_metadata: { archived: false },
+				});
 			if (path.includes("/interactions/")) return new Response(null, { status: 204 });
 			if (path.includes("/messages")) return response({ id: "message" });
-			return response({ id: "thread", parent_id: "parent", thread_metadata: { archived: false } });
+			return response({ id: "thread", parent_id: "parent", owner_id: "bot", thread_metadata: { archived: false } });
 		},
 		WebSocketImpl: url => {
 			expect(url).toBe("wss://gateway.test/?v=10&encoding=json");
@@ -864,6 +871,146 @@ describe("DiscordLiveProvider protocol", () => {
 			live.createThread({ guildId: "guild", parentId: "parent", name: "Session", nonce: "nonce" }),
 		).resolves.toMatchObject({ id: "bot-thread", parentId: "parent" });
 		expect(threadPosts).toEqual(["https://discord.test/api/channels/parent/messages/fresh-starter/threads"]);
+	});
+
+	test("rejects a thread-create response that omits owner_id", async () => {
+		const live = new DiscordLiveProvider({
+			applicationId: "app",
+			botToken: "discord-secret-token",
+			apiBaseUrl: "https://discord.test/api",
+			fetchImpl: async (input, init) => {
+				const path = String(input);
+				const method = (init?.method ?? "GET").toUpperCase();
+				if (path.endsWith("/users/@me")) return response({ id: "bot" });
+				if (path.endsWith("/channels/parent/messages?limit=100")) return response([]);
+				if (path.endsWith("/channels/parent/messages") && method === "POST") return response({ id: "starter" });
+				if (method === "POST" && path.endsWith("/threads"))
+					return response({ id: "thread", parent_id: "parent", thread_metadata: { archived: false } });
+				return response({ threads: [] });
+			},
+		});
+		await expect(
+			live.createThread({ guildId: "guild", parentId: "parent", name: "Session", nonce: "nonce" }),
+		).rejects.toThrow("Discord returned an invalid thread response");
+	});
+
+	test("rejects a thread-create response owned by someone else", async () => {
+		const live = new DiscordLiveProvider({
+			applicationId: "app",
+			botToken: "discord-secret-token",
+			apiBaseUrl: "https://discord.test/api",
+			fetchImpl: async (input, init) => {
+				const path = String(input);
+				const method = (init?.method ?? "GET").toUpperCase();
+				if (path.endsWith("/users/@me")) return response({ id: "bot" });
+				if (path.endsWith("/channels/parent/messages?limit=100")) return response([]);
+				if (path.endsWith("/channels/parent/messages") && method === "POST") return response({ id: "starter" });
+				if (method === "POST" && path.endsWith("/threads")) {
+					return response({
+						id: "evil-thread",
+						parent_id: "parent",
+						owner_id: "OUTSIDER-4242",
+						thread_metadata: { archived: false },
+					});
+				}
+				return response({ threads: [] });
+			},
+		});
+		await expect(
+			live.createThread({ guildId: "guild", parentId: "parent", name: "Session", nonce: "nonce" }),
+		).rejects.toThrow("Discord returned an invalid thread response");
+	});
+
+	test("does not adopt an outsider thread from the archived-thread fallback", async () => {
+		const marker = "<!-- gjc-thread-nonce:nonce -->";
+		const live = new DiscordLiveProvider({
+			applicationId: "app",
+			botToken: "discord-secret-token",
+			apiBaseUrl: "https://discord.test/api",
+			fetchImpl: async input => {
+				const path = String(input);
+				if (path.endsWith("/users/@me")) return response({ id: "bot" });
+				if (path.endsWith("/channels/parent/messages?limit=100")) return response([]);
+				if (path.endsWith("/guilds/guild/threads/active")) return response({ threads: [] });
+				if (path.includes("archived/public")) {
+					return response({
+						threads: [
+							{
+								id: "evil-thread",
+								parent_id: "parent",
+								owner_id: "OUTSIDER-4242",
+								thread_metadata: { archived: false },
+							},
+						],
+					});
+				}
+				if (path.endsWith("/channels/evil-thread/messages?limit=25")) {
+					return response([{ id: "copied", author: { id: "OUTSIDER-4242", bot: false }, content: marker }]);
+				}
+				return response({ threads: [] });
+			},
+		});
+		await expect(
+			live.findThreadByNonce({ guildId: "guild", parentId: "parent", nonce: "nonce" }),
+		).resolves.toBeNull();
+	});
+
+	test("notification does not post when the thread-create response is owned by someone else", async () => {
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-discord-nonce-owner-"));
+		const posts: string[] = [];
+		const live = new DiscordLiveProvider({
+			applicationId: "app",
+			botToken: "discord-secret-token",
+			apiBaseUrl: "https://discord.test/api",
+			fetchImpl: async (input, init) => {
+				const requestPath = String(input).slice("https://discord.test/api".length);
+				const method = (init?.method ?? "GET").toUpperCase();
+				if (requestPath === "/users/@me") return response({ id: "bot" });
+				if (requestPath === "/channels/parent/messages?limit=100") return response([]);
+				if (requestPath === "/channels/parent/messages" && method === "POST")
+					return response({ id: "bot-starter" });
+				if (requestPath === "/channels/parent/messages/bot-starter/threads" && method === "POST") {
+					return response({
+						id: "evil-thread",
+						parent_id: "parent",
+						owner_id: "OUTSIDER-4242",
+						thread_metadata: { archived: false },
+					});
+				}
+				if (method === "POST" && requestPath.endsWith("/messages")) {
+					posts.push(requestPath);
+					return response({ id: "posted" });
+				}
+				if (requestPath.includes("/messages?limit")) return response([]);
+				return response({ threads: [] });
+			},
+		});
+		const daemon = new DiscordNotificationDaemon({
+			agentDir,
+			guildId: "guild",
+			parentChannelId: "parent",
+			provider: live,
+			resolveAttachment: async (sessionId, expectedGeneration = 1) => ({
+				sessionId,
+				generation: expectedGeneration,
+				isCurrent: () => true,
+				send: () => {},
+				sendMaintenance: () => {},
+			}),
+		});
+		try {
+			await expect(
+				daemon.notify({
+					sessionId: "session",
+					endpointGeneration: 1,
+					content: "SESSION-OUTPUT-CANARY",
+				}),
+			).rejects.toThrow("Discord returned an invalid thread response");
+			expect(posts).toEqual([]);
+		} finally {
+			await daemon.stop();
+			await fs.rm(agentDir, { recursive: true, force: true });
+		}
 	});
 
 	test("notification retry posts the session body to the bot thread after an outsider copies the marker", async () => {

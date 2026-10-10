@@ -143,7 +143,7 @@ export class DiscordLiveProvider implements DiscordProvider, DiscordDiagnosticPr
 				},
 				context,
 			);
-			return this.#thread(body, input.guildId, input.parentId);
+			return this.#thread(body, input.guildId, input.parentId, botUserId);
 		});
 	}
 
@@ -647,8 +647,8 @@ export class DiscordLiveProvider implements DiscordProvider, DiscordDiagnosticPr
 		}
 	}
 
-	#thread(value: unknown, guildId: string, parentId: string): DiscordThread {
-		const thread = this.#threadOrUndefined(value, guildId, parentId);
+	#thread(value: unknown, guildId: string, parentId: string, botUserId: string): DiscordThread {
+		const thread = this.#botOwnedThread(value, guildId, parentId, botUserId);
 		if (!thread) throw new Error("Discord returned an invalid thread response");
 		return thread;
 	}
