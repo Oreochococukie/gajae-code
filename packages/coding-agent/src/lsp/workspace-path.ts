@@ -34,21 +34,27 @@ function toPlatformSep(filePath: string): string {
 	return path.sep === "\\" ? filePath.replace(/\//g, "\\") : filePath;
 }
 
+/** `/` is always a separator. `\` is a separator only on Windows, so a POSIX name may end with `\`. */
+function hasSepSuffix(value: string): boolean {
+	if (value.endsWith("/")) return true;
+	return path.sep === "\\" && value.endsWith("\\");
+}
+
 /** Absolute path against `cwd`. `..` stays in the string so a symlink can be followed first. */
 function lexicalAbsolute(filePath: string, cwd: string): string {
 	if (path.isAbsolute(filePath)) return toPlatformSep(filePath);
-	const base = cwd.endsWith("/") || cwd.endsWith("\\") ? cwd : `${cwd}${path.sep}`;
+	const base = hasSepSuffix(cwd) ? cwd : `${cwd}${path.sep}`;
 	return toPlatformSep(`${base}${filePath}`);
 }
 
 function joinRaw(parent: string, child: string): string {
-	if (parent.endsWith("/") || parent.endsWith("\\")) return parent + child;
+	if (hasSepSuffix(parent)) return parent + child;
 	return parent + path.sep + child;
 }
 
 function joinRoot(root: string, parts: string[]): string {
 	if (parts.length === 0) return root || path.sep;
-	if (root.endsWith("/") || root.endsWith("\\")) return root + parts.join(path.sep);
+	if (hasSepSuffix(root)) return root + parts.join(path.sep);
 	if (root.length === 0) return parts.join(path.sep);
 	return `${root}${path.sep}${parts.join(path.sep)}`;
 }
@@ -66,7 +72,7 @@ function identityPath(filePath: string, cwd: string): string {
 
 function isSameOrInside(child: string, parent: string): boolean {
 	if (child === parent) return true;
-	const prefix = parent.endsWith("/") || parent.endsWith("\\") ? parent : parent + path.sep;
+	const prefix = hasSepSuffix(parent) ? parent : parent + path.sep;
 	return child.startsWith(prefix);
 }
 
@@ -96,8 +102,13 @@ function absoluteLink(linkText: string, parent: string): string {
 }
 
 async function symlinkText(postPath: string, moves: Move[]): Promise<string | null> {
-	const direct = [...moves].reverse().find(move => move.to === postPath);
-	if (direct) return direct.linkText;
+	for (let i = moves.length - 1; i >= 0; i--) {
+		const move = moves[i];
+		if (move.to === postPath) return move.linkText;
+		// A newer directory rename replaced this path. Read that directory, not an older move onto the same string.
+		if (isSameOrInside(postPath, move.to)) break;
+		if (move.from === postPath || isSameOrInside(postPath, move.from)) return null;
+	}
 	if (isMovedAway(postPath, moves)) return null;
 	try {
 		const stat = await fs.lstat(liveLocation(postPath, moves));
@@ -167,7 +178,14 @@ async function canonicalize(filePath: string): Promise<string> {
 		}
 		if (stat) {
 			try {
-				return path.join(await fs.realpath(cursor), ...missing);
+				const joined = path.join(await fs.realpath(cursor), ...missing);
+				// `path.join` collapses `..` onto a symlink the walk never opened. Follow that result.
+				try {
+					return await fs.realpath(joined);
+				} catch (error) {
+					if (!isEnoent(error)) throw error;
+					return joined;
+				}
 			} catch (error) {
 				if (isEnoent(error)) throw new ToolError(`LSP edit escapes the workspace: ${filePath}`);
 				throw error;
@@ -227,6 +245,15 @@ export type PlannedResource =
 	| { kind: "rename"; oldPath: string; newPath: string }
 	| { kind: "delete"; filePath: string };
 
+/** Parent symlinks and `.` applied, final component not followed, so `alias/link` and `link` match. */
+async function entryIdentity(filePath: string, cwd: string, moves: Move[]): Promise<string> {
+	const absolute = identityPath(filePath, cwd);
+	const { root, parts } = splitAbsolute(absolute);
+	if (parts.length === 0) return root || path.sep;
+	const parent = parts.length === 1 ? root || path.sep : await locate(joinRoot(root, parts.slice(0, -1)), moves, 0);
+	return joinRaw(parent, parts[parts.length - 1]);
+}
+
 /**
  * Reject a batch whose own earlier rename would make a later path leave the workspace.
  * The check runs before any write, so a rejected later target does not leave earlier edits applied.
@@ -251,8 +278,8 @@ export async function assertBatchStaysInside(cwd: string, ops: PlannedResource[]
 		if (op.kind === "rename") {
 			await check(op.oldPath);
 			await check(op.newPath);
-			const from = identityPath(op.oldPath, cwd);
-			const to = identityPath(op.newPath, cwd);
+			const from = await entryIdentity(op.oldPath, cwd, moves);
+			const to = await entryIdentity(op.newPath, cwd, moves);
 			let linkText: string | null = null;
 			try {
 				const live = liveLocation(from, moves);

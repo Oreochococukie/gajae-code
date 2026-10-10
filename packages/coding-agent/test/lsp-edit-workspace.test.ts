@@ -509,6 +509,212 @@ describe("rename_file server edits", () => {
 		expect(await readFile(dest, "utf8")).toBe("ok");
 		await expect(lstat(source)).rejects.toMatchObject({ code: "ENOENT" });
 	});
+
+	it.skipIf(process.platform === "win32")(
+		"rename_file does not write through a symlink hidden by a missing .. segment",
+		async () => {
+			const root = await mkdtemp(path.join(tmpdir(), "lsp-collapsed-link-"));
+			const workspace = path.join(root, "ws");
+			await mkdir(workspace);
+			const outside = path.join(root, "secret.txt");
+			await writeFile(outside, "secret");
+			await writeFile(path.join(workspace, "note.txt"), "keep");
+			await symlink(outside, path.join(workspace, "link"));
+			const uri = `file://${workspace}/missing/../link`;
+			expect(uri).toContain("/missing/../");
+			await withRenameServer(
+				workspace,
+				{
+					changes: {
+						[uri]: [
+							{
+								range: { start: { line: 0, character: 0 }, end: { line: 0, character: 6 } },
+								newText: "pwnedX",
+							},
+						],
+					},
+				},
+				async tool => {
+					await expect(
+						tool.execute("rename-collapsed", {
+							action: "rename_file",
+							file: path.join(workspace, "note.txt"),
+							new_name: path.join(workspace, "note2.txt"),
+							timeout: 5,
+						}),
+					).rejects.toThrow(/escapes the workspace/);
+				},
+			);
+			expect(await readFile(outside, "utf8")).toBe("secret");
+			expect((await lstat(path.join(workspace, "link"))).isSymbolicLink()).toBe(true);
+			expect(await readFile(path.join(workspace, "note.txt"), "utf8")).toBe("keep");
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"rename_file treats an ancestor symlink as the same path as its target",
+		async () => {
+			const root = await mkdtemp(path.join(tmpdir(), "lsp-alias-move-"));
+			const workspace = path.join(root, "ws");
+			await mkdir(path.join(workspace, "deep"), { recursive: true });
+			await mkdir(path.join(workspace, "safe"), { recursive: true });
+			const outside = path.join(root, "safe");
+			await mkdir(outside);
+			await writeFile(path.join(workspace, "note.txt"), "keep");
+			const link = path.join(workspace, "deep", "link");
+			await symlink("../safe", link);
+			await symlink(workspace, path.join(workspace, "alias"));
+			await withRenameServer(
+				workspace,
+				{
+					documentChanges: [
+						{ kind: "rename", oldUri: fileToUri(link), newUri: fileToUri(path.join(workspace, "alias", "link")) },
+						{ kind: "create", uri: fileToUri(path.join(workspace, "link", "new.txt")) },
+					],
+				},
+				async tool => {
+					await expect(
+						tool.execute("rename-alias", {
+							action: "rename_file",
+							file: path.join(workspace, "note.txt"),
+							new_name: path.join(workspace, "note2.txt"),
+							timeout: 5,
+						}),
+					).rejects.toThrow(/escapes the workspace/);
+				},
+			);
+			expect((await lstat(link)).isSymbolicLink()).toBe(true);
+			await expect(lstat(path.join(outside, "new.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+			expect(await readFile(path.join(workspace, "note.txt"), "utf8")).toBe("keep");
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"rename_file does not reuse a symlink after a later rename replaces its directory",
+		async () => {
+			const root = await mkdtemp(path.join(tmpdir(), "lsp-stale-move-"));
+			const workspace = path.join(root, "ws");
+			const outside = path.join(root, "out");
+			await mkdir(path.join(workspace, "a"), { recursive: true });
+			await mkdir(path.join(workspace, "b"), { recursive: true });
+			await mkdir(path.join(workspace, "c"), { recursive: true });
+			await mkdir(path.join(workspace, "d"), { recursive: true });
+			await mkdir(path.join(workspace, "safe"), { recursive: true });
+			await mkdir(outside);
+			await writeFile(path.join(workspace, "note.txt"), "keep");
+			const original = path.join(workspace, "a", "link");
+			await symlink(path.join(workspace, "safe"), original);
+			await symlink(outside, path.join(workspace, "d", "link"));
+			await withRenameServer(
+				workspace,
+				{
+					documentChanges: [
+						{
+							kind: "rename",
+							oldUri: fileToUri(original),
+							newUri: fileToUri(path.join(workspace, "b", "link")),
+						},
+						{
+							kind: "rename",
+							oldUri: fileToUri(path.join(workspace, "b", "link")),
+							newUri: fileToUri(path.join(workspace, "c", "link")),
+						},
+						{
+							kind: "rename",
+							oldUri: fileToUri(path.join(workspace, "d")),
+							newUri: fileToUri(path.join(workspace, "b")),
+						},
+						{ kind: "create", uri: fileToUri(path.join(workspace, "b", "link", "new.txt")) },
+					],
+				},
+				async tool => {
+					await expect(
+						tool.execute("rename-stale", {
+							action: "rename_file",
+							file: path.join(workspace, "note.txt"),
+							new_name: path.join(workspace, "note2.txt"),
+							timeout: 5,
+						}),
+					).rejects.toThrow(/escapes the workspace/);
+				},
+			);
+			expect((await lstat(original)).isSymbolicLink()).toBe(true);
+			await expect(lstat(path.join(outside, "new.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+			expect(await readFile(path.join(workspace, "note.txt"), "utf8")).toBe("keep");
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"rename_file refuses a directory whose name ends with a backslash",
+		async () => {
+			const root = await mkdtemp(path.join(tmpdir(), "lsp-box-"));
+			const workspace = path.join(root, "ws");
+			await mkdir(workspace);
+			const inside = path.join(workspace, "ok.txt");
+			await writeFile(inside, "ok");
+			const outside = path.join(root, "out");
+			await mkdir(outside);
+			const box = path.join(workspace, "box\\");
+			await mkdir(box);
+			await symlink(outside, path.join(box, "hop"));
+			const inward = path.join(outside, "inward");
+			await symlink(inside, inward);
+			const source = path.join(box, "hop", "inward");
+			expect(splitAbsolute(source).parts.some(part => part.endsWith("\\"))).toBe(true);
+			const tool = new LspTool({ cwd: workspace } as ToolSession);
+			await expect(
+				tool.execute("rename-box", {
+					action: "rename_file",
+					file: source,
+					new_name: path.join(workspace, "moved.txt"),
+				}),
+			).rejects.toThrow(/escapes the workspace/);
+			expect((await lstat(inward)).isSymbolicLink()).toBe(true);
+			expect(await readFile(inside, "utf8")).toBe("ok");
+			await expect(lstat(path.join(workspace, "moved.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"rename_file rejects its own destination when an earlier server rename retargets it",
+		async () => {
+			const root = await mkdtemp(path.join(tmpdir(), "lsp-user-dest-"));
+			const workspace = path.join(root, "ws");
+			await mkdir(path.join(workspace, "deep"), { recursive: true });
+			await mkdir(path.join(workspace, "safe"), { recursive: true });
+			const outside = path.join(root, "safe");
+			await mkdir(outside);
+			await writeFile(path.join(workspace, "note.txt"), "keep");
+			const link = path.join(workspace, "deep", "link");
+			await symlink("../safe", link);
+			await withRenameServer(
+				workspace,
+				{
+					documentChanges: [
+						{
+							kind: "rename",
+							oldUri: fileToUri(link),
+							newUri: fileToUri(path.join(workspace, "link")),
+						},
+					],
+				},
+				async tool => {
+					await expect(
+						tool.execute("rename-user-dest", {
+							action: "rename_file",
+							file: path.join(workspace, "note.txt"),
+							new_name: path.join(workspace, "link", "new.txt"),
+							timeout: 5,
+						}),
+					).rejects.toThrow(/escapes the workspace/);
+				},
+			);
+			expect(await readFile(path.join(workspace, "note.txt"), "utf8")).toBe("keep");
+			expect((await lstat(link)).isSymbolicLink()).toBe(true);
+			await expect(lstat(path.join(workspace, "link"))).rejects.toMatchObject({ code: "ENOENT" });
+			await expect(lstat(path.join(outside, "new.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+		},
+	);
 });
 
 describe("applyWorkspaceEdit containment", () => {

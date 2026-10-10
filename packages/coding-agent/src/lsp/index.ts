@@ -1544,7 +1544,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			for (const { edit } of perServerEdits) {
 				serverResourceOps.push(...(await resourceOpsOf(edit, this.session.cwd)));
 			}
-			await assertBatchStaysInside(this.session.cwd, serverResourceOps);
+			await assertBatchStaysInside(this.session.cwd, [
+				...serverResourceOps,
+				{ kind: "rename", oldPath: source, newPath: dest },
+			]);
 
 			const acceptedEdits: Array<{ filePath: string; bucket: AcceptedBucket }> = [];
 			const acceptedIndex = new Map<string, number>();
