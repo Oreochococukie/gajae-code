@@ -8,6 +8,7 @@ import { expandApplyPatchToEntries } from "../edit/modes/apply-patch";
 import { GJC_SESSION_PREFIX, modeStatePath as sessionModeStatePath } from "../gjc-runtime/session-layout";
 import { resolveGjcSessionForRead } from "../gjc-runtime/session-resolution";
 import { ModeStateSchema } from "../gjc-runtime/state-schema";
+import { workflowEnvelopeChecksumStatus } from "../gjc-runtime/state-writer";
 import { getSkillManifest } from "../gjc-runtime/workflow-manifest";
 import { LocalProtocolHandler, resolveLocalUrlToPath } from "../internal-urls/local-protocol";
 import { resolveToCwd } from "../tools/path-utils";
@@ -317,10 +318,16 @@ function resolveCurrentWorkflowEntry(entries: SkillActiveEntry[], topLevelSkill:
  * governs, so a stale planning entry can never block while an executor runs and
  * a resumed planning phase reliably re-blocks.
  *
- * Fail-open contract: a missing or invalid durable mode-state releases the block
- * (a corrupt state file must not lock all mutation), matching the guard's
- * historical behavior — this is intentionally looser than the Stop hook, which
- * fails closed for handoff-required skills.
+ * Fail-open contract: a missing or schema-invalid durable mode-state releases
+ * the block (a corrupt state file must not lock all mutation), matching the
+ * guard's historical behavior — this is intentionally looser than the Stop
+ * hook, which fails closed for handoff-required skills. A checksum mismatch is
+ * not that case: the file is still schema-valid, and the CLI already refuses
+ * it as an out-of-band edit. The guard keeps the active entry's phase instead
+ * of letting the forged `current_phase` or `active: false` release the block.
+ * An unsigned envelope may restate that entry, but it may not release a block
+ * the entry still holds. A matching `content_sha256` is the existing writer
+ * stamp and is trusted.
  */
 async function getActivePlanningSkill(
 	cwd: string,
@@ -343,11 +350,62 @@ async function getActivePlanningSkill(
 	const modeState = guardContext.modeStates.get(current.skill) ?? null;
 
 	if (!modeState) return null;
-	if (modeState.active !== true) return null;
-	if (!modeStateMatchesContext(modeState, resolvedSessionId, threadId)) return null;
-	const phase = String(modeState.current_phase ?? current.phase ?? "").trim();
-	if (!isBlockingPlanningPhase(current.skill, phase)) return null;
-	return { skill: current.skill, phase };
+	const activePhase = String(current.phase ?? "").trim();
+	const posture = planningPostureFromModeState(current.skill, activePhase, modeState, resolvedSessionId, threadId);
+	if (posture.tampered) {
+		warnInvalidModeState(
+			modeStatePath(cwd, current.skill, resolvedSessionId),
+			"out-of-band edit detected (content_sha256 mismatch)",
+		);
+	}
+	if (!posture.blocking) return null;
+	return { skill: current.skill, phase: posture.phase };
+}
+
+/**
+ * Decide whether `modeState` may release the planning block.
+ *
+ * The active entry is the seal. A mode-state file releases that seal only when
+ * its writer-stamped `content_sha256` still matches, or when it does not claim
+ * a looser posture than the entry. Checksum mismatch ignores the file.
+ */
+function planningPostureFromModeState(
+	skill: MutationGatedSkill,
+	activePhase: string,
+	modeState: ModeState,
+	sessionId?: string,
+	threadId?: string,
+): { blocking: boolean; phase: string; tampered: boolean } {
+	const status = workflowEnvelopeChecksumStatus(modeState);
+	if (status === "mismatch") {
+		return {
+			blocking: isBlockingPlanningPhase(skill, activePhase),
+			phase: activePhase,
+			tampered: true,
+		};
+	}
+	if (!modeStateMatchesContext(modeState, sessionId, threadId)) {
+		return { blocking: false, phase: activePhase, tampered: false };
+	}
+	if (status === "match") {
+		if (modeState.active !== true) return { blocking: false, phase: activePhase, tampered: false };
+		const phase = String(modeState.current_phase ?? activePhase).trim();
+		return { blocking: isBlockingPlanningPhase(skill, phase), phase, tampered: false };
+	}
+	if (!isBlockingPlanningPhase(skill, activePhase)) {
+		return { blocking: false, phase: activePhase, tampered: false };
+	}
+	if (modeState.active !== true) return { blocking: true, phase: activePhase, tampered: false };
+	const modePhase = String(modeState.current_phase ?? "").trim();
+	if (
+		modePhase &&
+		!isBlockingPlanningPhase(skill, modePhase) &&
+		modePhase.trim().toLowerCase() !== activePhase.trim().toLowerCase()
+	) {
+		return { blocking: true, phase: activePhase, tampered: false };
+	}
+	const phase = modePhase || activePhase;
+	return { blocking: isBlockingPlanningPhase(skill, phase), phase, tampered: false };
 }
 
 function normalizePosix(value: string): string {
