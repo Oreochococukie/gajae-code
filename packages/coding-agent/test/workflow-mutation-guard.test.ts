@@ -727,6 +727,26 @@ describe("workflow mutation guard", () => {
 		expect(gjcBash.blocked).toBe(false);
 	});
 
+	it("keeps an unsigned stricter phase when the active entry has left planning", async () => {
+		const cwd = await makeTempRoot();
+		const sessionId = "session-a";
+		await writeActiveSkill(cwd, "ultragoal", "active", sessionId);
+		await fs.writeFile(
+			modeStatePath(cwd, sessionId, "ultragoal"),
+			`${JSON.stringify({ active: true, current_phase: "goal-planning", session_id: sessionId }, null, 2)}\n`,
+		);
+		const edit = {
+			cwd,
+			sessionId,
+			tool: tool("edit"),
+			args: { path: "src/product.ts", edits: [{ old_text: "a", new_text: "b" }] },
+		};
+		await expect(assertWorkflowMutationAllowed(edit)).rejects.toBeInstanceOf(ToolError);
+		const decision = await getWorkflowMutationDecision(edit);
+		expect(decision.blocked).toBe(true);
+		expect(decision.reason).toBe("phase-boundary");
+	});
+
 	it("blocks product mutation only during the ultragoal goal-planning phase", async () => {
 		const cwd = await makeTempRoot();
 		await writeActiveSkill(cwd, "ultragoal", "goal-planning");

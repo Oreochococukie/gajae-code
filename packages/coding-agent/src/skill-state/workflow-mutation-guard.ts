@@ -326,7 +326,9 @@ function resolveCurrentWorkflowEntry(entries: SkillActiveEntry[], topLevelSkill:
  * it as an out-of-band edit. The guard keeps the active entry's phase instead
  * of letting the forged `current_phase` or `active: false` release the block.
  * An unsigned envelope may restate that entry, but it may not release a block
- * the entry still holds. A `session_id` or `thread_id` that does not match this
+ * the entry still holds. It may still name a stricter blocking phase: the
+ * pre-fix guard honored that phase, and dropping it would allow an edit the
+ * base rejected. A `session_id` or `thread_id` that does not match this
  * session is the same kind of claim: it does not make the file someone else's,
  * and it does not open the block. A matching `content_sha256` whose context
  * also matches is the existing writer stamp and is trusted.
@@ -370,8 +372,9 @@ async function getActivePlanningSkill(
  * The active entry is the seal. A mode-state file releases that seal only when
  * its writer-stamped `content_sha256` matches and its session context matches,
  * or when an unsigned file in the same context does not claim a looser posture
- * than the entry. Checksum mismatch ignores the file. A context mismatch does
- * not release the entry's block: the file was read from this session's path.
+ * than the entry. An unsigned file may still impose a stricter blocking phase.
+ * Checksum mismatch ignores the file. A context mismatch does not release the
+ * entry's block: the file was read from this session's path.
  */
 function planningPostureFromModeState(
 	skill: MutationGatedSkill,
@@ -401,6 +404,10 @@ function planningPostureFromModeState(
 		return { blocking: isBlockingPlanningPhase(skill, phase), phase, tampered: false };
 	}
 	if (!isBlockingPlanningPhase(skill, activePhase)) {
+		const stricterPhase = String(modeState.current_phase ?? "").trim();
+		if (modeState.active === true && stricterPhase && isBlockingPlanningPhase(skill, stricterPhase)) {
+			return { blocking: true, phase: stricterPhase, tampered: false };
+		}
 		return { blocking: false, phase: activePhase, tampered: false };
 	}
 	if (modeState.active !== true) return { blocking: true, phase: activePhase, tampered: false };
