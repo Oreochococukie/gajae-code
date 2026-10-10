@@ -849,6 +849,116 @@ describe("rename_file server edits", () => {
 			expect(await readFile(path.join(workspace, "note.txt"), "utf8")).toBe("keep");
 		},
 	);
+
+	it.skipIf(process.platform === "win32")(
+		"rename_file creates hop/../file inside the walked directory, not the lexical collapse",
+		async () => {
+			const root = await mkdtemp(path.join(tmpdir(), "lsp-hop-create-"));
+			const workspace = path.join(root, "ws");
+			const deep = path.join(workspace, "deep", "dir");
+			await mkdir(deep, { recursive: true });
+			const outside = path.join(root, "outside");
+			await mkdir(outside);
+			const secret = path.join(outside, "secret.txt");
+			await writeFile(secret, "secret");
+			await writeFile(path.join(workspace, "note.txt"), "keep");
+			await symlink(deep, path.join(workspace, "hop"));
+			await symlink(secret, path.join(workspace, "file"));
+			const via = `file://${workspace}/hop/../file`;
+			expect(via.includes("/hop/../file")).toBe(true);
+			await withRenameServer(workspace, { documentChanges: [{ kind: "create", uri: via }] }, async tool => {
+				await tool.execute("rename-hop-create", {
+					action: "rename_file",
+					file: path.join(workspace, "note.txt"),
+					new_name: path.join(workspace, "note2.txt"),
+					timeout: 5,
+				});
+			});
+			expect(await readFile(secret, "utf8")).toBe("secret");
+			expect((await lstat(path.join(workspace, "file"))).isSymbolicLink()).toBe(true);
+			expect(await readFile(path.join(workspace, "deep", "file"), "utf8")).toBe("");
+			await expect(lstat(path.join(workspace, "note.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+			expect(await readFile(path.join(workspace, "note2.txt"), "utf8")).toBe("keep");
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"rename_file does not text-edit the file named by lexically collapsing hop/..",
+		async () => {
+			const root = await mkdtemp(path.join(tmpdir(), "lsp-hop-text-"));
+			const workspace = path.join(root, "ws");
+			const deep = path.join(workspace, "deep", "dir");
+			await mkdir(deep, { recursive: true });
+			const outside = path.join(root, "outside");
+			await mkdir(outside);
+			const secret = path.join(outside, "secret.txt");
+			await writeFile(secret, "secret");
+			await writeFile(path.join(workspace, "note.txt"), "keep");
+			await symlink(deep, path.join(workspace, "hop"));
+			await symlink(secret, path.join(workspace, "file"));
+			const via = `file://${workspace}/hop/../file`;
+			expect(via.includes("/hop/../file")).toBe(true);
+			await withRenameServer(
+				workspace,
+				{
+					changes: {
+						[via]: [
+							{
+								range: { start: { line: 0, character: 0 }, end: { line: 0, character: 6 } },
+								newText: "pwnedX",
+							},
+						],
+					},
+				},
+				async tool => {
+					await expect(
+						tool.execute("rename-hop-text", {
+							action: "rename_file",
+							file: path.join(workspace, "note.txt"),
+							new_name: path.join(workspace, "note2.txt"),
+							timeout: 5,
+						}),
+					).rejects.toThrow();
+				},
+			);
+			expect(await readFile(secret, "utf8")).toBe("secret");
+			expect((await lstat(path.join(workspace, "file"))).isSymbolicLink()).toBe(true);
+			await expect(lstat(path.join(workspace, "deep", "file"))).rejects.toMatchObject({ code: "ENOENT" });
+			expect(await readFile(path.join(workspace, "note.txt"), "utf8")).toBe("keep");
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"rename_file does not delete an outside tree named by lexically collapsing hop/..",
+		async () => {
+			const root = await mkdtemp(path.join(tmpdir(), "lsp-hop-delete-"));
+			const workspace = path.join(root, "ws");
+			const deep = path.join(workspace, "deep", "dir");
+			await mkdir(deep, { recursive: true });
+			const outside = path.join(root, "outside");
+			await mkdir(outside);
+			const victim = path.join(outside, "x");
+			await writeFile(victim, "secret");
+			await writeFile(path.join(workspace, "note.txt"), "keep");
+			await symlink(deep, path.join(workspace, "hop"));
+			await symlink(outside, path.join(workspace, "alias4"));
+			const via = `file://${workspace}/hop/../alias4/x`;
+			expect(via.includes("/hop/../alias4/x")).toBe(true);
+			await withRenameServer(workspace, { documentChanges: [{ kind: "delete", uri: via }] }, async tool => {
+				await expect(
+					tool.execute("rename-hop-delete", {
+						action: "rename_file",
+						file: path.join(workspace, "note.txt"),
+						new_name: path.join(workspace, "note2.txt"),
+						timeout: 5,
+					}),
+				).rejects.toThrow();
+			});
+			expect(await readFile(victim, "utf8")).toBe("secret");
+			expect((await lstat(path.join(workspace, "alias4"))).isSymbolicLink()).toBe(true);
+			expect(await readFile(path.join(workspace, "note.txt"), "utf8")).toBe("keep");
+		},
+	);
 });
 
 describe("applyWorkspaceEdit containment", () => {

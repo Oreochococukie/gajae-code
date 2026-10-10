@@ -214,7 +214,9 @@ async function canonicalize(filePath: string): Promise<string> {
 }
 
 export async function canonicalWorkspacePath(cwd: string, filePath: string): Promise<string> {
-	return canonicalize(lexicalAbsolute(filePath, cwd));
+	// `realpath` cancels `hop/..` lexically, then can follow a different symlink than `open`.
+	const walked = await locate(identityPath(filePath, cwd), [], [], 0);
+	return canonicalize(walked);
 }
 
 export async function assertInsideWorkspace(cwd: string, filePath: string): Promise<void> {
@@ -222,7 +224,8 @@ export async function assertInsideWorkspace(cwd: string, filePath: string): Prom
 		throw new ToolError(`LSP edit escapes the workspace: ${filePath}`);
 	}
 	const root = await fs.realpath(cwd);
-	const candidate = await canonicalize(lexicalAbsolute(filePath, cwd));
+	const walked = await locate(identityPath(filePath, cwd), [], [], 0);
+	const candidate = await canonicalize(walked);
 	if (escapes(root, candidate)) {
 		throw new ToolError(`LSP edit escapes the workspace: ${filePath}`);
 	}
@@ -322,8 +325,9 @@ export async function assertBatchStaysInside(cwd: string, ops: PlannedResource[]
 
 /**
  * Absolute path the kernel will use. Relative URIs are anchored at the workspace, not
- * `process.cwd()`. A literal `missing/..` segment does not exist, so use the canonical
- * file after containment has walked the original spelling. `.` is not part of the identity.
+ * `process.cwd()`. A missing spelled path uses the directory entry the containment walk
+ * already checked. Lexical collapse (`path.resolve`) can name a different entry:
+ * `hop/../file` follows `hop` to `deep/file`, while `path.resolve` yields `file`.
  */
 export async function workspaceOperand(cwd: string, filePath: string): Promise<string> {
 	const absolute = identityPath(filePath, cwd);
@@ -333,15 +337,7 @@ export async function workspaceOperand(cwd: string, filePath: string): Promise<s
 	} catch (error) {
 		if (!isEnoent(error)) throw error;
 	}
-	// A collapsed `missing/..` names the directory entry. realpath would move the symlink target.
-	const collapsed = path.resolve(absolute);
-	try {
-		await fs.lstat(collapsed);
-		return collapsed;
-	} catch (error) {
-		if (!isEnoent(error)) throw error;
-		return canonicalize(absolute);
-	}
+	return entryIdentity(filePath, cwd, [], []);
 }
 
 /** Syscall only. The caller has already rejected any path that leaves the workspace. */
