@@ -412,7 +412,10 @@ import type { LazyService } from "../runtime/lazy-service";
 import type { NetworkPrewarmRuntime } from "../runtime/network-prewarm-service";
 import type { WorkspaceTreeRuntime } from "../runtime/workspace-tree-service";
 import { type ExactMcpServerControlResult, MCPManager } from "../runtime-mcp/manager";
-import { omitPluginMcpNameShadows } from "../runtime-mcp/plugin-mcp-name-filter";
+import {
+	omitPluginMcpNameShadows,
+	retainPluginMcpMandatoryNames,
+} from "../runtime-mcp/plugin-mcp-name-filter";
 import { attachExactMcpControls, getExactMcpControls, revokeExactMcpControls } from "../runtime-mcp/redaction";
 import type { NotificationSessionController } from "../sdk/bus/session-control";
 import { buildSyntheticModelId, syntheticNamespaceCollision } from "../sdk/model-profile-model";
@@ -6248,7 +6251,9 @@ export class AgentSession {
 		}
 		if (options?.mandatoryMCPToolNames) {
 			this.#mandatoryMCPToolNames = new Set(
-				options.mandatoryMCPToolNames.map(name => name.toLowerCase()).filter(name => this.#toolRegistry.has(name)),
+				retainPluginMcpMandatoryNames(nextTools, options.mandatoryMCPToolNames)
+					.map(name => name.toLowerCase())
+					.filter(name => this.#toolRegistry.has(name)),
 			);
 		}
 		this.#setDiscoverableMCPTools(this.#collectDiscoverableMCPToolsFromRegistry());
@@ -12349,7 +12354,9 @@ export class AgentSession {
 		this.#setDiscoverableMCPTools(this.#collectDiscoverableMCPToolsFromRegistry());
 		if (options.mandatoryMCPToolNames !== undefined) {
 			this.#mandatoryMCPToolNames = new Set(
-				options.mandatoryMCPToolNames.map(name => name.toLowerCase()).filter(name => this.#toolRegistry.has(name)),
+				retainPluginMcpMandatoryNames(mcpTools, options.mandatoryMCPToolNames)
+					.map(name => name.toLowerCase())
+					.filter(name => this.#toolRegistry.has(name)),
 			);
 		}
 		this.#pruneSelectedMCPToolNames();
