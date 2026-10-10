@@ -1149,6 +1149,34 @@ describe("workflow mutation guard", () => {
 			);
 			await expect(assertWorkflowMutationAllowed(edit)).rejects.toBeInstanceOf(ToolError);
 
+			await fs.writeFile(
+				statePath,
+				`${JSON.stringify({ active: true, current_phase: phase, session_id: "session-b" }, null, 2)}\n`,
+			);
+			await expect(assertWorkflowMutationAllowed(edit)).rejects.toBeInstanceOf(ToolError);
+			await fs.writeFile(
+				statePath,
+				`${JSON.stringify({ active: true, current_phase: "complete", session_id: "session-b" }, null, 2)}\n`,
+			);
+			await expect(assertWorkflowMutationAllowed(edit)).rejects.toBeInstanceOf(ToolError);
+
+			const restored = await runNativeStateCommand(
+				[
+					"write",
+					"--mode",
+					skill,
+					"--input",
+					JSON.stringify({ current_phase: phase }),
+					"--session-id",
+					sessionId,
+					"--force",
+					"--json",
+				],
+				cwd,
+			);
+			expect(restored.status, skill).toBe(0);
+			await expect(assertWorkflowMutationAllowed(edit)).rejects.toBeInstanceOf(ToolError);
+
 			const cleared = await runNativeStateCommand(
 				["clear", "--mode", skill, "--session-id", sessionId, "--force", "--json"],
 				cwd,

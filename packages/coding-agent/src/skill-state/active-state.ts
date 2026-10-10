@@ -520,6 +520,8 @@ async function readModeStatePhase(
 		const phase = safeString(record.current_phase).trim();
 		if (!phase) return undefined;
 		if (record.active === false && !getSkillManifest("ralplan").canonicalOverrides.includes(phase)) return undefined;
+		const claimedSession = safeString(record.session_id).trim();
+		if (claimedSession && claimedSession !== sessionId) return undefined;
 		// A mode-state phase may replace the active entry only when the writer
 		// stamp still matches. A checksum mismatch is an out-of-band edit. An
 		// unsigned releasing phase is not a seal and must not paint "complete"
