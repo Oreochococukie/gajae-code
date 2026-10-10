@@ -184,10 +184,10 @@ export function canonicalEnvKey(name: string): string {
 /**
  * Keys whose last declaration is not safe to value-compare.
  *
- * The line parser above strips one plain pair of quotes. It does not decode
- * escapes or join lines. A raw value that contains a quote, backslash, or
- * carriage return, and is not that plain pair, is recorded here so provenance
- * refuses the key. The bytes inside the quotes are not interpreted.
+ * The line parser above strips one plain pair of quotes and an unquoted `#`
+ * comment. Classification uses that same comment cut, then refuses a value
+ * the line parser would not store the way Bun loaded it. Other backslashes
+ * stay in the compared text. The bytes inside the quotes are not decoded.
  */
 function quotedDeclarationKeys(content: string): Set<string> {
 	const quoted = new Set<string>();
@@ -199,21 +199,24 @@ function quotedDeclarationKeys(content: string): Set<string> {
 		const key = match?.[1];
 		if (!key || !isValidEnvName(key)) continue;
 		const canonical = canonicalEnvKey(key);
-		if (rawValueDisagreesWithLineParser(match[2] ?? "")) quoted.add(canonical);
+		const comparable = stripInlineDotenvComment(match[2] ?? "");
+		if (rawValueDisagreesWithLineParser(comparable)) quoted.add(canonical);
 		else quoted.delete(canonical);
 	}
 	return quoted;
 }
 
 function rawValueDisagreesWithLineParser(raw: string): boolean {
-	if (!/["'`\\\r]/.test(raw)) return false;
 	const trimmed = raw.trim();
 	const opener = trimmed[0];
 	if ((opener === '"' || opener === "'") && trimmed.length >= 2 && trimmed.endsWith(opener)) {
 		const inner = trimmed.slice(1, -1);
-		if (!/["'`\\\r]/.test(inner)) return false;
+		if (inner.includes(opener) || inner.includes("`") || inner.includes("\r") || inner.includes("\n")) return true;
+		// Bun turns only `\n` and `\r` into controls inside double quotes.
+		if (opener === '"' && /\\[nr]/.test(inner)) return true;
+		return false;
 	}
-	return true;
+	return /["'`\r]/.test(trimmed);
 }
 
 /**
@@ -245,14 +248,15 @@ export function projectEnvSnapshot(cwd = process.cwd()): ProjectEnvSnapshot {
 	const dynamic = new Set<string>();
 	for (const file of files) {
 		const filePath = path.join(cwd, file);
-		let quoted = new Set<string>();
+		let content: string;
 		try {
-			quoted = quotedDeclarationKeys(fs.readFileSync(filePath, "utf-8"));
+			content = fs.readFileSync(filePath, "utf-8");
 		} catch {
-			quoted = new Set();
+			continue;
 		}
+		const quoted = quotedDeclarationKeys(content);
 		const seen = new Set<string>();
-		for (const [rawKey, value] of Object.entries(parseEnvFile(filePath))) {
+		for (const [rawKey, value] of Object.entries(parseEnvFileContent(content))) {
 			const key = canonicalEnvKey(rawKey);
 			seen.add(key);
 			values[key] = value;

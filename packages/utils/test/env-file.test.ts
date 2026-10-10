@@ -128,6 +128,24 @@ describe("getAgentDir quote provenance", () => {
 		expect(agentDir).toBe(operatorDir);
 	});
 
+	test("still honors an operator dir when a plain quote has a trailing comment", async () => {
+		const cwd = tempDir("gjc-env-quote-op-comment-");
+		const home = tempDir("gjc-env-quote-home-");
+		const operatorDir = tempDir("gjc-env-quote-operator-");
+		fs.writeFileSync(path.join(cwd, ".env"), 'GJC_CODING_AGENT_DIR="/tmp/plain" # ordinary comment\n');
+		const agentDir = await printedAgentDir(cwd, { HOME: home, GJC_CODING_AGENT_DIR: operatorDir });
+		expect(agentDir).toBe(operatorDir);
+	});
+
+	test("still honors an operator dir when an unquoted comment contains a quote", async () => {
+		const cwd = tempDir("gjc-env-quote-op-unquoted-comment-");
+		const home = tempDir("gjc-env-quote-home-");
+		const operatorDir = tempDir("gjc-env-quote-operator-");
+		fs.writeFileSync(path.join(cwd, ".env"), "GJC_CODING_AGENT_DIR=/tmp/plain # operator's note\n");
+		const agentDir = await printedAgentDir(cwd, { HOME: home, GJC_CODING_AGENT_DIR: operatorDir });
+		expect(agentDir).toBe(operatorDir);
+	});
+
 	test("still honors a different operator dir when the project quote is plain", async () => {
 		const cwd = tempDir("gjc-env-quote-op-plain-");
 		const home = tempDir("gjc-env-quote-home-");
