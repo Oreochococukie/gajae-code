@@ -18,26 +18,46 @@ function rewritesToGet(status: number, method: string): boolean {
 }
 
 /**
- * Follow same-origin MCP redirects only. A cross-origin 307/308 would carry
- * custom credential headers, `Mcp-Session-Id`, and the JSON-RPC body.
+ * Follow same-origin MCP redirects only.
+ *
+ * A cross-origin 307/308 would carry custom credential headers, `Mcp-Session-Id`,
+ * and the JSON-RPC body. The first request uses `rawUrl` unchanged so a caller
+ * that cannot be parsed (diagnostic redaction) still reaches fetch, but with
+ * `redirect: "manual"` so that hop is not followed either.
  */
 export async function fetchMcpRespectingOrigin(rawUrl: string, init: BunFetchRequestInit): Promise<Response> {
-	let currentUrl = new URL(rawUrl);
+	let currentUrl: URL;
+	try {
+		currentUrl = new URL(rawUrl);
+	} catch {
+		return fetch(rawUrl, { ...init, redirect: "manual" });
+	}
+
+	let requestTarget = rawUrl;
 	let currentInit: BunFetchRequestInit = { ...init, redirect: "manual" };
-	for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount++) {
-		const response = await fetch(currentUrl.toString(), currentInit);
+	for (let redirectCount = 0; ; redirectCount++) {
+		const response = await fetch(requestTarget, currentInit);
 		if (!REDIRECT_STATUSES.has(response.status)) return response;
+
 		const location = response.headers.get("location");
 		if (!location) return response;
-		if (redirectCount === MAX_REDIRECTS) {
+		if (redirectCount >= MAX_REDIRECTS) {
 			cancelMCPStream(response.body);
 			throw new Error("MCP redirect limit exceeded");
 		}
-		const nextUrl = new URL(location, currentUrl);
+
+		let nextUrl: URL;
+		try {
+			nextUrl = new URL(location, currentUrl);
+		} catch (error) {
+			cancelMCPStream(response.body);
+			throw error;
+		}
 		if (nextUrl.origin !== currentUrl.origin) {
 			cancelMCPStream(response.body);
 			throw new Error("cross-origin redirects are not allowed");
 		}
+
 		const headers = new Headers(currentInit.headers);
 		const method = (currentInit.method ?? "GET").toUpperCase();
 		if (rewritesToGet(response.status, method)) {
@@ -47,7 +67,7 @@ export async function fetchMcpRespectingOrigin(rawUrl: string, init: BunFetchReq
 			currentInit = { ...currentInit, headers, redirect: "manual" };
 		}
 		currentUrl = nextUrl;
+		requestTarget = nextUrl.toString();
 		cancelMCPStream(response.body);
 	}
-	throw new Error("MCP redirect limit exceeded");
 }
