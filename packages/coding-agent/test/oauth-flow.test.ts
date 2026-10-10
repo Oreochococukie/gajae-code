@@ -261,11 +261,12 @@ describe("mcp oauth flow", () => {
 		expect(new URL(url).searchParams.get("client_id")).toBeNull();
 	});
 
-	it("does not GET link-local, private, or IPv6 loopback authorization URLs", async () => {
+	it("does not GET link-local, private, IPv6 loopback, or 6to4 anycast authorization URLs", async () => {
 		const targets = [
 			"http://10.0.0.8/authorize",
 			"http://169.254.169.254/latest/meta-data",
 			"http://[::1]/authorize",
+			"http://192.88.99.2/authorize",
 		];
 		for (const authorizationUrl of targets) {
 			const urls: string[] = [];
