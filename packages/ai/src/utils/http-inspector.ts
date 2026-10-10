@@ -171,7 +171,8 @@ export async function appendRawHttpRequestDumpFor400(
 	const filePath = path.join(dumpDir, fileName);
 
 	try {
-		await Bun.write(filePath, `${JSON.stringify(sanitizedDump, null, 2)}\n`);
+		await fs.mkdir(dumpDir, { recursive: true });
+		await fs.writeFile(filePath, `${JSON.stringify(sanitizedDump, null, 2)}\n`, { mode: 0o600 });
 		await pruneHttpRequestDumps(dumpDir);
 		return `${message}\nraw-http-request=${filePath}\n${RAW_HTTP_REQUEST_PRIVACY_NOTE}`;
 	} catch (writeError) {

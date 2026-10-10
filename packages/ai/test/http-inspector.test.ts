@@ -3,8 +3,9 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getConfigRootDir, setAgentDir } from "@gajae-code/utils";
+import { streamGoogle } from "../src/providers/google";
+import type { Model } from "../src/types";
 import {
-	appendRawHttpRequestDumpFor400,
 	appendTransportFailureContext,
 	finalizeErrorMessage,
 	formatModelUnavailableGuidance,
@@ -142,26 +143,43 @@ describe("HTTP 400 request dump sanitization", () => {
 
 	it("redacts Google and Cloudflare auth headers before writing the HTTP 400 dump", async () => {
 		await useTempAgentDir();
-		const authorizationSecret = "synthetic-authorization-secret";
-		const apiKeySecret = "synthetic-x-api-key-secret";
 		const googApiKeySecret = "synthetic-x-goog-api-key-secret";
 		const cloudflareSecret = "synthetic-cf-aig-authorization-secret";
-		const dump: RawHttpRequestDump = {
-			provider: "google",
+		const visibleRequestId = "visible-dump-request-id";
+		const model: Model<"google-generative-ai"> = {
+			id: "gemini-2.5-pro",
+			name: "Gemini 2.5 Pro",
 			api: "google-generative-ai",
-			model: "gemini-2.5-pro",
-			method: "POST",
-			url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent",
-			headers: {
-				authorization: `Bearer ${authorizationSecret}`,
-				"x-api-key": apiKeySecret,
-				"x-goog-api-key": googApiKeySecret,
-				"cf-aig-authorization": `Bearer ${cloudflareSecret}`,
-			},
+			provider: "google",
+			baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1_000_000,
+			maxTokens: 8_192,
 		};
-		const error = Object.assign(new Error("synthetic provider rejection"), { status: 400 });
 
-		const message = await appendRawHttpRequestDumpFor400("synthetic provider rejection", error, dump);
+		const result = await streamGoogle(
+			model,
+			{ messages: [{ role: "user", content: "hello", timestamp: 0 }] },
+			{
+				apiKey: googApiKeySecret,
+				headers: {
+					"cf-aig-authorization": `Bearer ${cloudflareSecret}`,
+					"x-request-id": visibleRequestId,
+				},
+				fetch: async () =>
+					new Response(JSON.stringify({ error: { message: "invalid request" } }), {
+						status: 400,
+						headers: { "content-type": "application/json" },
+					}),
+			},
+		).result();
+
+		expect(result.stopReason).toBe("error");
+		const message = result.errorMessage ?? "";
+		expect(message).not.toContain(googApiKeySecret);
+		expect(message).not.toContain(cloudflareSecret);
 		const filePath = /raw-http-request=(.+)$/m.exec(message)?.[1];
 		if (filePath === undefined) {
 			throw new Error(`expected a raw HTTP dump path, got: ${message}`);
@@ -169,14 +187,12 @@ describe("HTTP 400 request dump sanitization", () => {
 		const saved = await fs.readFile(filePath, "utf-8");
 		const parsed = JSON.parse(saved) as { headers?: Record<string, string> };
 
-		expect(parsed.headers?.authorization).toBe("[redacted]");
-		expect(parsed.headers?.["x-api-key"]).toBe("[redacted]");
 		expect(parsed.headers?.["x-goog-api-key"]).toBe("[redacted]");
 		expect(parsed.headers?.["cf-aig-authorization"]).toBe("[redacted]");
-		expect(saved).not.toContain(authorizationSecret);
-		expect(saved).not.toContain(apiKeySecret);
+		expect(parsed.headers?.["x-request-id"]).toBe(visibleRequestId);
 		expect(saved).not.toContain(googApiKeySecret);
 		expect(saved).not.toContain(cloudflareSecret);
+		expect((await fs.stat(filePath)).mode & 0o777).toBe(0o600);
 	});
 });
 
