@@ -1246,7 +1246,7 @@ function parseAnthropicCustomHeaders(rawHeaders: string | undefined): Record<str
 function resolveAnthropicCustomHeaders(model: Model<"anthropic-messages">): Record<string, string> | undefined {
 	if (model.provider !== "anthropic") return undefined;
 	if (!isFoundryEnabled()) return undefined;
-	return parseAnthropicCustomHeaders($env.ANTHROPIC_CUSTOM_HEADERS);
+	return parseAnthropicCustomHeaders(trustedFoundryTlsValue("ANTHROPIC_CUSTOM_HEADERS", startupProjectEnvSnapshot()));
 }
 
 function looksLikeFilePath(value: string): boolean {
@@ -1281,7 +1281,8 @@ function unescapeProjectDotenvControls(value: string): string {
 /**
  * Operator environment only. `$env` already contains the project dotenv, and a
  * value equal to that declaration — or produced from a `$` / backtick
- * declaration — must not become the Foundry trust anchor or client identity.
+ * declaration — must not become the Foundry trust anchor, client identity, or
+ * extra request headers.
  */
 function trustedFoundryTlsValue(name: string, snapshot: ProjectEnvSnapshot): string | undefined {
 	const raw = $env[name];
