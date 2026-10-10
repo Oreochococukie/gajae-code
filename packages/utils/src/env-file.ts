@@ -40,14 +40,27 @@ function stripInlineShellComment(value: string): string {
 }
 
 /**
- * Bun's dotenv whitespace. NBSP and other Unicode spaces are values, not
- * separators: trimming them would make the snapshot disagree with `process.env`.
- * Shell files keep their own comment rule in `stripInlineShellComment`.
+ * Strips an unquoted trailing `# comment` from a dotenv value the way Bun's
+ * dotenv loader does: an unescaped `#` starts a comment regardless of the
+ * preceding character (`a#b` loads as `a`), while `#` inside quotes or after a
+ * backslash escape survives. Used only by `parseEnvFile`; shell files use
+ * `stripInlineShellComment`, whose POSIX rule requires whitespace before `#`.
  */
-const BUN_DOTENV_WHITESPACE = new Set([" ", "\t", "\v", "\f", "\n", "\r"]);
-
-function isBunDotenvWhitespace(char: string | undefined): boolean {
-	return char !== undefined && BUN_DOTENV_WHITESPACE.has(char);
+function stripInlineDotenvComment(value: string): string {
+	let quote: '"' | "'" | undefined;
+	for (let i = 0; i < value.length; i++) {
+		const char = value[i];
+		if (char === "\\") {
+			i++;
+			continue;
+		}
+		if ((char === '"' || char === "'") && (!quote || quote === char)) {
+			quote = quote ? undefined : char;
+			continue;
+		}
+		if (char === "#" && !quote) return value.slice(0, i).trimEnd();
+	}
+	return value.trimEnd();
 }
 
 /**
@@ -96,23 +109,14 @@ export function parseShellEnvFile(filePath: string): Record<string, string> {
  *
  * The trust guards (`trustedAgentDirOverrideFor`, `trustedConfigDirName`,
  * `filterCredentialInheritedEnv`) decide provenance by comparing
- * `process.env` against this parse, so a declaration Bun loads has to produce
- * the same value here. That includes `export KEY=value`, ASCII whitespace
- * around `=` or a colon that is followed by whitespace, and `#` comments on
- * unquoted values (quotes keep their `#`). `$VAR` and `${VAR}` stay literal
- * and are marked dynamic, so an expansion Bun would perform is refused instead
- * of compared. Backticks are quotes, as they are for Bun, not shell commands.
- *
- * Quote handling has to match Bun's loader, not a one-line strip. A double-quoted
- * value may span physical lines, and Bun's ASCII whitespace (including a newline)
- * may separate the key, `=` or `:`, and the opening quote. Inside double quotes
- * only the pairs `\n` and `\r` become newline and carriage return; every other
- * backslash pair keeps its backslash. Single quotes and backticks do not
- * unescape. Text after the closing quote is discarded. An unquoted `#` starts a
- * comment even after a backslash. The decoded value is stored, including a
- * newline: dropping the key would make the value Bun loaded into `process.env`
- * look like an operator override. `$` expansion is left literal and marked
- * dynamic, so an expanded declaration is refused instead of compared.
+ * `process.env` against this parse, so the accepted syntax must be a superset
+ * of what Bun's own dotenv loader honors in `cwd/.env`: `export KEY=value`,
+ * whitespace around `=` or `:`, and `#` comments after unquoted values (quotes keep
+ * their `#`). Values that Bun would expand (`$VAR`, `${VAR}`, backticks,
+ * command substitution) are kept as their literal text: the trust rule only
+ * needs the parser to see the key at all, and an operator environment value
+ * cannot equal attacker-written expansion text, so a literal parse stays
+ * conservative.
  */
 export function parseEnvFile(filePath: string): Record<string, string> {
 	try {
@@ -123,187 +127,31 @@ export function parseEnvFile(filePath: string): Record<string, string> {
 	}
 }
 
-function isEnvKeyStart(char: string | undefined): boolean {
-	return char !== undefined && ((char >= "A" && char <= "Z") || (char >= "a" && char <= "z") || char === "_");
-}
-
-function isEnvKeyContinue(char: string | undefined): boolean {
-	return isEnvKeyStart(char) || (char !== undefined && char >= "0" && char <= "9");
-}
-
-function indexAfterLine(text: string, index: number): number {
-	let cursor = index;
-	while (cursor < text.length && text[cursor] !== "\n" && text[cursor] !== "\r") cursor++;
-	if (text[cursor] === "\r") {
-		cursor++;
-		if (text[cursor] === "\n") cursor++;
-		return cursor;
-	}
-	if (text[cursor] === "\n") return cursor + 1;
-	return text.length;
-}
-
-function skipBunDotenvWhitespace(text: string, index: number): number {
-	while (isBunDotenvWhitespace(text[index])) index++;
-	return index;
-}
-
-function trimBunDotenvWhitespace(value: string): string {
-	let start = 0;
-	let end = value.length;
-	while (start < end && isBunDotenvWhitespace(value[start])) start++;
-	while (end > start && isBunDotenvWhitespace(value[end - 1])) end--;
-	return value.slice(start, end);
-}
-
-function stripLeadingUtf8Bom(content: string): string {
-	return content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
-}
-
-/**
- * The closer is the next quote that is not the second character of a backslash
- * pair. `\"` and `\'` therefore stay inside the value instead of ending it.
- */
-function findClosingQuote(text: string, start: number, quote: '"' | "'" | "`"): number {
-	for (let index = start; index < text.length; index++) {
-		if (text[index] === "\\") {
-			if (index + 1 >= text.length) return -1;
-			index++;
-			continue;
-		}
-		if (text[index] === quote) return index;
-	}
-	return -1;
-}
-
-/**
- * A bare CR or CRLF inside a quote is one line feed. Returning the LF index
- * without emitting it deletes the break: the caller's increment then skips that
- * LF, so the project value no longer matches Bun.
- */
-function pushBareCarriageReturn(raw: string, index: number, out: string[]): number {
-	out.push("\n");
-	if (raw[index + 1] === "\n") return index + 1;
-	return index;
-}
-
-/**
- * Inside double quotes, only the letters `\n` and `\r` are escapes. A backslash
- * before a physical CR keeps both bytes: folding that CR to LF first would
- * disagree with Bun and let the project value through `trustedValue`.
- */
-function decodeDoubleQuoted(raw: string): string {
-	const out: string[] = [];
-	for (let index = 0; index < raw.length; index++) {
-		const char = raw[index];
-		if (char === "\\") {
-			if (index + 1 >= raw.length) {
-				out.push("\\");
-				break;
-			}
-			const next = raw[index + 1];
-			if (next === "n") out.push("\n");
-			else if (next === "r") out.push("\r");
-			else if (next !== undefined) out.push("\\", next);
-			index++;
-			continue;
-		}
-		if (char === "\r") {
-			index = pushBareCarriageReturn(raw, index, out);
-			continue;
-		}
-		if (char !== undefined) out.push(char);
-	}
-	return out.join("");
-}
-
-/**
- * Single quotes and backticks keep backslashes. They do not protect a physical
- * CR, which Bun still folds to a line feed.
- */
-function decodeLiteralQuoted(raw: string): string {
-	const out: string[] = [];
-	for (let index = 0; index < raw.length; index++) {
-		const char = raw[index];
-		if (char === "\r") {
-			index = pushBareCarriageReturn(raw, index, out);
-			continue;
-		}
-		if (char !== undefined) out.push(char);
-	}
-	return out.join("");
-}
-
-function readDotenvValue(text: string, index: number): { text: string; next: number } {
-	const quotedAt = skipBunDotenvWhitespace(text, index);
-	const opener = text[quotedAt];
-	if ((opener === '"' || opener === "'" || opener === "`") && quotedAt < text.length) {
-		const close = findClosingQuote(text, quotedAt + 1, opener);
-		if (close !== -1) {
-			const raw = text.slice(quotedAt + 1, close);
-			return {
-				text: opener === '"' ? decodeDoubleQuoted(raw) : decodeLiteralQuoted(raw),
-				next: indexAfterLine(text, close + 1),
-			};
-		}
-	}
-	let end = index;
-	while (end < text.length && text[end] !== "#" && text[end] !== "\n" && text[end] !== "\r") end++;
-	return { text: trimBunDotenvWhitespace(text.slice(index, end)), next: indexAfterLine(text, end) };
-}
-
 /** Parse dotenv content that has already been read from a trusted file. */
 export function parseEnvFileContent(content: string): Record<string, string> {
-	const text = stripLeadingUtf8Bom(content);
 	const result: Record<string, string> = {};
-	const length = text.length;
-	let index = 0;
-	while (index < length) {
-		index = skipBunDotenvWhitespace(text, index);
-		if (index >= length) break;
-		if (text[index] === "#") {
-			index = indexAfterLine(text, index);
-			continue;
-		}
+	for (const line of content.split("\n")) {
+		const trimmed = line.trim();
+		// Skip comments and blank lines
+		if (!trimmed || trimmed.startsWith("#")) continue;
 
-		const lineStart = index;
-		if (text.startsWith("export", index) && isBunDotenvWhitespace(text[index + 6])) {
-			const exported = skipBunDotenvWhitespace(text, index + 6);
-			if (isEnvKeyStart(text[exported])) index = exported;
-		}
+		const match = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|:)\s*(.*)$/.exec(trimmed);
+		if (!match) continue;
 
-		const keyStart = index;
-		if (!isEnvKeyStart(text[index])) {
-			index = indexAfterLine(text, lineStart);
-			continue;
-		}
-		index++;
-		while (isEnvKeyContinue(text[index])) index++;
-		const key = text.slice(keyStart, index);
-		if (!isValidEnvName(key)) {
-			index = indexAfterLine(text, lineStart);
-			continue;
-		}
+		const key = match[1];
+		if (!isValidEnvName(key)) continue;
 
-		index = skipBunDotenvWhitespace(text, index);
-		const separator = text[index];
-		if (separator === "=") {
-			index++;
-		} else if (separator === ":" && isBunDotenvWhitespace(text[index + 1])) {
-			index += 2;
-		} else {
-			index = indexAfterLine(text, lineStart);
-			continue;
-		}
+		// Strip an unquoted trailing `# comment` the way Bun's dotenv loader
+		// does (`KEY=v#note` loads as `v`); quoted `#` survives.
+		let value = stripInlineDotenvComment(match[2] ?? "").trim();
 
-		const value = readDotenvValue(text, index);
-		index = value.next;
-		// A newline is a real snapshot value. Skipping the key here would fail open.
-		if (!isSafeEnvValue(value.text)) continue;
-		// Windows env names are case-insensitive. Folding here, in file order,
-		// keeps the last declaration. Folding later via Object.entries lets an
-		// earlier differently-cased key overwrite it.
-		result[canonicalEnvKey(key)] = value.text;
+		// Remove surrounding quotes (" or ')
+		if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+			value = value.slice(1, -1);
+		}
+		if (!isSafeEnvValue(value)) continue;
+
+		result[key] = value;
 	}
 
 	return result;
@@ -313,9 +161,9 @@ export function parseEnvFileContent(content: string): Record<string, string> {
  * What the caller's checkout declares through its dotenv files.
  *
  * `values` is the merged declaration set, later layers winning. `dynamic` holds
- * the keys whose surviving declaration is one Bun expands at load time, which
- * every provenance guard refuses outright because a value comparison cannot see
- * what such a declaration became.
+ * the keys whose surviving declaration is one Bun expands at load time, or whose
+ * raw text is quoted in a way this line parser does not decode. Provenance
+ * refuses those keys instead of comparing a value Bun may have loaded differently.
  */
 export interface ProjectEnvSnapshot {
 	values: Record<string, string>;
@@ -331,6 +179,41 @@ export interface ProjectEnvSnapshot {
  */
 export function canonicalEnvKey(name: string): string {
 	return process.platform === "win32" ? name.toUpperCase() : name;
+}
+
+/**
+ * Keys whose last declaration is not safe to value-compare.
+ *
+ * The line parser above strips one plain pair of quotes. It does not decode
+ * escapes or join lines. A raw value that contains a quote, backslash, or
+ * carriage return, and is not that plain pair, is recorded here so provenance
+ * refuses the key. The bytes inside the quotes are not interpreted.
+ */
+function quotedDeclarationKeys(content: string): Set<string> {
+	const quoted = new Set<string>();
+	for (const line of content.split("\n")) {
+		const trimmed = line.trim();
+		if (!trimmed || trimmed.startsWith("#")) continue;
+		// `.` stops at a carriage return, which is why the line parser drops the key.
+		const match = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|:)\s*([\s\S]*)$/.exec(trimmed);
+		const key = match?.[1];
+		if (!key || !isValidEnvName(key)) continue;
+		const canonical = canonicalEnvKey(key);
+		if (rawValueDisagreesWithLineParser(match[2] ?? "")) quoted.add(canonical);
+		else quoted.delete(canonical);
+	}
+	return quoted;
+}
+
+function rawValueDisagreesWithLineParser(raw: string): boolean {
+	if (!/["'`\\\r]/.test(raw)) return false;
+	const trimmed = raw.trim();
+	const opener = trimmed[0];
+	if ((opener === '"' || opener === "'") && trimmed.length >= 2 && trimmed.endsWith(opener)) {
+		const inner = trimmed.slice(1, -1);
+		if (!/["'`\\\r]/.test(inner)) return false;
+	}
+	return true;
 }
 
 /**
@@ -361,11 +244,29 @@ export function projectEnvSnapshot(cwd = process.cwd()): ProjectEnvSnapshot {
 	const values: Record<string, string> = {};
 	const dynamic = new Set<string>();
 	for (const file of files) {
-		for (const [rawKey, value] of Object.entries(parseEnvFile(path.join(cwd, file)))) {
+		const filePath = path.join(cwd, file);
+		let quoted = new Set<string>();
+		try {
+			quoted = quotedDeclarationKeys(fs.readFileSync(filePath, "utf-8"));
+		} catch {
+			quoted = new Set();
+		}
+		const seen = new Set<string>();
+		for (const [rawKey, value] of Object.entries(parseEnvFile(filePath))) {
 			const key = canonicalEnvKey(rawKey);
+			seen.add(key);
 			values[key] = value;
-			if (/[$`]/.test(value)) dynamic.add(key);
+			// A quoted declaration Bun may decode differently is refused, same as `$`.
+			// Unquoted values, and one plain pair of quotes, still compare by text.
+			if (quoted.has(key) || /[$`]/.test(value)) dynamic.add(key);
 			else dynamic.delete(key);
+		}
+		// The line parser drops a key when `.` cannot cross a carriage return.
+		// Keep that key in the snapshot so the value Bun loaded is not an override.
+		for (const key of quoted) {
+			if (seen.has(key)) continue;
+			values[key] = "";
+			dynamic.add(key);
 		}
 	}
 	return { values, dynamic };

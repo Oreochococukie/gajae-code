@@ -89,12 +89,9 @@ function filterCredentialInheritedEnv(env: Record<string, string | undefined>): 
 		// dynamic dotenv declaration is also ambiguous even when expansion changes
 		// its runtime value. Exclude those from the credential-only snapshot while
 		// keeping them available through $env.
-		// Compare the raw declaration to Bun's value. Trimming only the declaration
-		// makes a quoted trailing space or newline look like a different, operator
-		// supplied credential.
-		const projectKey = canonicalEnvKey(key);
-		const projectValue = projectEnv[projectKey];
-		if (projectValue !== undefined && (projectSnapshot.dynamic.has(projectKey) || projectValue === value)) continue;
+		const projectValue = resolveFileEnvValue(projectEnv, key);
+		if (projectValue !== undefined && (projectSnapshot.dynamic.has(canonicalEnvKey(key)) || projectValue === value))
+			continue;
 
 		result[key] = value;
 	}
