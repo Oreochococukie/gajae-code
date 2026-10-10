@@ -6,7 +6,7 @@ import { describe, expect, it, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AssistantMessage, ToolResultMessage, UserMessage } from "@gajae-code/ai/core";
+import type { AssistantMessage, DeveloperMessage, ToolResultMessage, UserMessage } from "@gajae-code/ai/core";
 import { streamBedrock } from "@gajae-code/ai/providers/amazon-bedrock";
 import { convertAnthropicMessages } from "@gajae-code/ai/providers/anthropic";
 import { convertMessages as convertGoogleMessages } from "@gajae-code/ai/providers/google-shared";
@@ -1577,9 +1577,8 @@ describe("obfuscateMessages", () => {
 		expect(text.text).toContain("#GJC1_");
 		const thinking = obfuscatedAssistant.content.find(block => block.type === "thinking");
 		if (thinking?.type !== "thinking") throw new Error("expected unsigned thinking");
-		expect(thinking.thinking).not.toContain(whole);
-		expect(thinking.thinking).not.toBe(whole);
-		expect(thinking.thinking).toContain("#GJC1_");
+		expect(thinking.thinking).toBe("{}");
+		expect(JSON.parse(thinking.thinking)).toEqual({});
 		expect(thinking.summaryText).not.toContain(whole);
 		expect(thinking.rawText).not.toContain(leaf);
 		expect(thinking.rawText).not.toContain(imageShaped);
@@ -1593,8 +1592,8 @@ describe("obfuscateMessages", () => {
 		expect(payload.data).toContain("#GJC1_");
 		const decoded = JSON.parse(String(call.arguments.encoded)) as { data?: string };
 		expect(decoded.data).not.toContain(leaf);
-		expect(String(call.arguments.whole)).not.toContain(whole);
-		expect(String(call.arguments.whole)).toContain("#GJC1_");
+		expect(String(call.arguments.whole)).toBe("{}");
+		expect(JSON.parse(String(call.arguments.whole))).toEqual({});
 
 		const wire = JSON.stringify(
 			convertAnthropicMessages(
@@ -1610,8 +1609,8 @@ describe("obfuscateMessages", () => {
 		const items = obfuscatedAssistant.providerPayload?.items ?? [];
 		const historyCall = items.find(item => item.type === "function_call");
 		if (!historyCall || typeof historyCall.arguments !== "string") throw new Error("expected history arguments");
-		expect(historyCall.arguments).not.toContain(whole);
-		expect(historyCall.arguments).toContain("#GJC1_");
+		expect(historyCall.arguments).toBe("{}");
+		expect(JSON.parse(historyCall.arguments)).toEqual({});
 		const historyMessage = items.find(item => item.type === "message");
 		const parts = (historyMessage?.content ?? []) as Array<{
 			type?: string;
@@ -1645,7 +1644,114 @@ describe("obfuscateMessages", () => {
 		if (resultImage?.type !== "image") throw new Error("expected tool result image");
 		expect(resultImage.data).toBe(leaf);
 	});
+
+	it("scrubs string content and double-encoded secrets without breaking JSON arguments", () => {
+		const quoted = 'quoted-"token"';
+		const trigger = "SYNTHETIC_TRIGGER";
+		const whole = JSON.stringify({ token: "SYNTHETIC" });
+		const obfuscator = new SecretObfuscator(
+			[
+				{ type: "plain", content: quoted },
+				{ type: "plain", content: whole },
+				{ type: "plain", content: trigger, mode: "replace", replacement: JSON.stringify(quoted) },
+			],
+			TEST_KEY,
+		);
+		const doubleKey = JSON.stringify({ [JSON.stringify(quoted)]: "ok" });
+		expect(doubleKey.includes(quoted)).toBe(false);
+		const usage = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const encodedBody = JSON.stringify({ command: `echo ${quoted}` });
+		const assistant: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: doubleKey, summaryText: trigger, rawText: `raw ${trigger}` },
+				{
+					type: "toolCall",
+					id: "call-json",
+					name: "bash",
+					arguments: { body: encodedBody, token: quoted, whole, [quoted]: "ok" },
+				},
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-6",
+			usage,
+			stopReason: "toolUse",
+			timestamp: 1,
+			providerPayload: {
+				type: "openaiResponsesHistory",
+				provider: "openai",
+				dt: true,
+				items: [{ type: "function_call", call_id: "call_json", name: "bash", arguments: whole }],
+			},
+		};
+		const user: UserMessage = { role: "user", content: `prompt ${quoted}`, timestamp: 2 };
+		const developer: DeveloperMessage = { role: "developer", content: quoted, timestamp: 3 };
+		const [obfuscatedAssistant, obfuscatedUser, obfuscatedDeveloper] = obfuscateMessages(obfuscator, [
+			assistant,
+			user,
+			developer,
+		]);
+		if (obfuscatedAssistant?.role !== "assistant") throw new Error("expected assistant");
+		if (obfuscatedUser?.role !== "user" || typeof obfuscatedUser.content !== "string") {
+			throw new Error("expected string user content");
+		}
+		if (obfuscatedDeveloper?.role !== "developer" || typeof obfuscatedDeveloper.content !== "string") {
+			throw new Error("expected string developer content");
+		}
+		expect(obfuscatedUser.content).not.toContain(quoted);
+		expect(obfuscatedUser.content).toContain("#GJC1_");
+		expect(obfuscatedDeveloper.content).not.toContain(quoted);
+		const thinking = obfuscatedAssistant.content.find(block => block.type === "thinking");
+		if (thinking?.type !== "thinking") throw new Error("expected thinking");
+		expect(revealsSecret(thinking.thinking, quoted)).toBe(false);
+		expect(revealsSecret(thinking.summaryText ?? "", quoted)).toBe(false);
+		expect(revealsSecret(thinking.rawText ?? "", quoted)).toBe(false);
+		const call = obfuscatedAssistant.content.find(block => block.type === "toolCall");
+		if (call?.type !== "toolCall") throw new Error("expected tool call");
+		expect(call.id).toBe("call-json");
+		expect(call.name).toBe("bash");
+		const decodedBody = JSON.parse(String(call.arguments.body)) as { command?: string };
+		expect(decodedBody.command).not.toContain(quoted);
+		expect(JSON.parse(String(call.arguments.whole))).toEqual({});
+		const restored = obfuscator.deobfuscateObject(call.arguments);
+		expect(restored.token).toBe(quoted);
+		expect(restored[quoted]).toBe("ok");
+		const restoredBody = JSON.parse(String(restored.body)) as { command?: string };
+		expect(restoredBody.command).toBe(`echo ${quoted}`);
+		const historyCall = obfuscatedAssistant.providerPayload?.items?.find(item => item.type === "function_call");
+		if (!historyCall || typeof historyCall.arguments !== "string") throw new Error("expected history arguments");
+		expect(JSON.parse(historyCall.arguments)).toEqual({});
+	});
 });
+
+function revealsSecret(value: unknown, secret: string, depth = 0): boolean {
+	if (typeof value === "string") {
+		if (value.includes(secret)) return true;
+		if (depth >= 4 || value.length < 2) return false;
+		const first = value.trim()[0];
+		if (first !== "{" && first !== "[" && first !== '"') return false;
+		try {
+			return revealsSecret(JSON.parse(value), secret, depth + 1);
+		} catch {
+			return false;
+		}
+	}
+	if (Array.isArray(value)) return value.some(item => revealsSecret(item, secret, depth));
+	if (value !== null && typeof value === "object") {
+		return Object.entries(value as Record<string, unknown>).some(
+			([key, item]) => revealsSecret(key, secret, depth) || revealsSecret(item, secret, depth),
+		);
+	}
+	return false;
+}
 
 function findFunctionCallArguments(payload: unknown, callId: string): string | undefined {
 	const stack: unknown[] = [payload];
