@@ -2073,7 +2073,9 @@ export class FileSessionStorage implements SessionStorage {
 
 	writeTextSync(fpath: string, content: string): void {
 		this.ensureDirSync(path.dirname(fpath));
-		fs.writeFileSync(fpath, content);
+		// New fork and branch transcripts are created here. Without a mode, umask
+		// leaves them group- and world-readable in a shared explicit session directory.
+		fs.writeFileSync(fpath, content, { mode: 0o600 });
 	}
 
 	readTextSync(fpath: string): string {
