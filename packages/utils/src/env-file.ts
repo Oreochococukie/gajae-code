@@ -40,27 +40,14 @@ function stripInlineShellComment(value: string): string {
 }
 
 /**
- * Strips an unquoted trailing `# comment` from a dotenv value the way Bun's
- * dotenv loader does: an unescaped `#` starts a comment regardless of the
- * preceding character (`a#b` loads as `a`), while `#` inside quotes or after a
- * backslash escape survives. Used for unquoted dotenv values; shell files use
- * `stripInlineShellComment`, whose POSIX rule requires whitespace before `#`.
+ * Bun's dotenv whitespace. NBSP and other Unicode spaces are values, not
+ * separators: trimming them would make the snapshot disagree with `process.env`.
+ * Shell files keep their own comment rule in `stripInlineShellComment`.
  */
-function stripInlineDotenvComment(value: string): string {
-	let quote: '"' | "'" | undefined;
-	for (let i = 0; i < value.length; i++) {
-		const char = value[i];
-		if (char === "\\") {
-			i++;
-			continue;
-		}
-		if ((char === '"' || char === "'") && (!quote || quote === char)) {
-			quote = quote ? undefined : char;
-			continue;
-		}
-		if (char === "#" && !quote) return value.slice(0, i).trimEnd();
-	}
-	return value.trimEnd();
+const BUN_DOTENV_WHITESPACE = new Set([" ", "\t", "\v", "\f", "\n", "\r"]);
+
+function isBunDotenvWhitespace(char: string | undefined): boolean {
+	return char !== undefined && BUN_DOTENV_WHITESPACE.has(char);
 }
 
 /**
@@ -109,21 +96,23 @@ export function parseShellEnvFile(filePath: string): Record<string, string> {
  *
  * The trust guards (`trustedAgentDirOverrideFor`, `trustedConfigDirName`,
  * `filterCredentialInheritedEnv`) decide provenance by comparing
- * `process.env` against this parse, so the accepted syntax must be a superset
- * of what Bun's own dotenv loader honors in `cwd/.env`: `export KEY=value`,
- * whitespace around `=` or `:`, and `#` comments after unquoted values (quotes keep
- * their `#`). Values that Bun would expand (`$VAR`, `${VAR}`, backticks,
- * command substitution) are kept as their literal text: the trust rule only
- * needs the parser to see the key at all, and an operator environment value
- * cannot equal attacker-written expansion text, so a literal parse stays
- * conservative.
+ * `process.env` against this parse, so a declaration Bun loads has to produce
+ * the same value here. That includes `export KEY=value`, ASCII whitespace
+ * around `=` or a colon that is followed by whitespace, and `#` comments on
+ * unquoted values (quotes keep their `#`). `$VAR` and `${VAR}` stay literal
+ * and are marked dynamic, so an expansion Bun would perform is refused instead
+ * of compared. Backticks are quotes, as they are for Bun, not shell commands.
  *
  * Quote handling has to match Bun's loader, not a one-line strip. A double-quoted
- * value may span physical lines. Inside double quotes only the pairs `\n` and `\r`
- * become newline and carriage return; every other backslash pair keeps its
- * backslash. Single quotes do not unescape. Text after the closing quote is
- * discarded. The decoded newline is stored: dropping the key would make the
- * value Bun loaded into `process.env` look like an operator override.
+ * value may span physical lines, and Bun's ASCII whitespace (including a newline)
+ * may separate the key, `=` or `:`, and the opening quote. Inside double quotes
+ * only the pairs `\n` and `\r` become newline and carriage return; every other
+ * backslash pair keeps its backslash. Single quotes and backticks do not
+ * unescape. Text after the closing quote is discarded. An unquoted `#` starts a
+ * comment even after a backslash. The decoded value is stored, including a
+ * newline: dropping the key would make the value Bun loaded into `process.env`
+ * look like an operator override. `$` expansion is left literal and marked
+ * dynamic, so an expanded declaration is refused instead of compared.
  */
 export function parseEnvFile(filePath: string): Record<string, string> {
 	try {
@@ -143,10 +132,6 @@ function normalizeDotenvNewlines(content: string): string {
 	return content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 
-function isInlineWhitespace(char: string | undefined): boolean {
-	return char !== undefined && char !== "\n" && char !== "\r" && /\s/.test(char);
-}
-
 function isEnvKeyStart(char: string | undefined): boolean {
 	return char !== undefined && ((char >= "A" && char <= "Z") || (char >= "a" && char <= "z") || char === "_");
 }
@@ -160,11 +145,28 @@ function indexAfterLine(text: string, index: number): number {
 	return end === -1 ? text.length : end + 1;
 }
 
+function skipBunDotenvWhitespace(text: string, index: number): number {
+	while (isBunDotenvWhitespace(text[index])) index++;
+	return index;
+}
+
+function trimBunDotenvWhitespace(value: string): string {
+	let start = 0;
+	let end = value.length;
+	while (start < end && isBunDotenvWhitespace(value[start])) start++;
+	while (end > start && isBunDotenvWhitespace(value[end - 1])) end--;
+	return value.slice(start, end);
+}
+
+function stripLeadingUtf8Bom(content: string): string {
+	return content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+}
+
 /**
  * The closer is the next quote that is not the second character of a backslash
  * pair. `\"` and `\'` therefore stay inside the value instead of ending it.
  */
-function findClosingQuote(text: string, start: number, quote: '"' | "'"): number {
+function findClosingQuote(text: string, start: number, quote: '"' | "'" | "`"): number {
 	for (let index = start; index < text.length; index++) {
 		if (text[index] === "\\") {
 			if (index + 1 >= text.length) return -1;
@@ -195,47 +197,42 @@ function decodeDoubleQuoted(raw: string): string {
 }
 
 function readDotenvValue(text: string, index: number): { text: string; next: number } {
-	const opener = text[index];
-	if (opener === '"' || opener === "'") {
-		const close = findClosingQuote(text, index + 1, opener);
+	const quotedAt = skipBunDotenvWhitespace(text, index);
+	const opener = text[quotedAt];
+	if ((opener === '"' || opener === "'" || opener === "`") && quotedAt < text.length) {
+		const close = findClosingQuote(text, quotedAt + 1, opener);
 		if (close !== -1) {
-			const raw = text.slice(index + 1, close);
+			const raw = text.slice(quotedAt + 1, close);
 			return {
 				text: opener === '"' ? decodeDoubleQuoted(raw) : raw,
 				next: indexAfterLine(text, close + 1),
 			};
 		}
 	}
-	const end = text.indexOf("\n", index);
-	const lineEnd = end === -1 ? text.length : end;
-	return {
-		text: stripInlineDotenvComment(text.slice(index, lineEnd)).trim(),
-		next: end === -1 ? text.length : end + 1,
-	};
+	let end = index;
+	while (end < text.length && text[end] !== "#" && text[end] !== "\n" && text[end] !== "\r") end++;
+	const next = end >= text.length ? text.length : text[end] === "\n" ? end + 1 : indexAfterLine(text, end);
+	return { text: trimBunDotenvWhitespace(text.slice(index, end)), next };
 }
 
 /** Parse dotenv content that has already been read from a trusted file. */
 export function parseEnvFileContent(content: string): Record<string, string> {
-	const text = normalizeDotenvNewlines(content);
+	const text = normalizeDotenvNewlines(stripLeadingUtf8Bom(content));
 	const result: Record<string, string> = {};
 	const length = text.length;
 	let index = 0;
 	while (index < length) {
-		while (isInlineWhitespace(text[index])) index++;
+		index = skipBunDotenvWhitespace(text, index);
 		if (index >= length) break;
-		if (text[index] === "\n") {
-			index++;
-			continue;
-		}
 		if (text[index] === "#") {
 			index = indexAfterLine(text, index);
 			continue;
 		}
 
 		const lineStart = index;
-		if (text.startsWith("export", index) && isInlineWhitespace(text[index + 6])) {
-			index += 6;
-			while (isInlineWhitespace(text[index])) index++;
+		if (text.startsWith("export", index) && isBunDotenvWhitespace(text[index + 6])) {
+			const exported = skipBunDotenvWhitespace(text, index + 6);
+			if (isEnvKeyStart(text[exported])) index = exported;
 		}
 
 		const keyStart = index;
@@ -251,14 +248,16 @@ export function parseEnvFileContent(content: string): Record<string, string> {
 			continue;
 		}
 
-		while (isInlineWhitespace(text[index])) index++;
+		index = skipBunDotenvWhitespace(text, index);
 		const separator = text[index];
-		if (separator !== "=" && separator !== ":") {
+		if (separator === "=") {
+			index++;
+		} else if (separator === ":" && isBunDotenvWhitespace(text[index + 1])) {
+			index += 2;
+		} else {
 			index = indexAfterLine(text, lineStart);
 			continue;
 		}
-		index++;
-		while (isInlineWhitespace(text[index])) index++;
 
 		const value = readDotenvValue(text, index);
 		index = value.next;

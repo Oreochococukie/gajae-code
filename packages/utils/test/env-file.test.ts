@@ -66,7 +66,7 @@ describe("parseEnvFileContent Bun quote and newline parsing", () => {
 		);
 	});
 
-	test("keeps unquoted # comments and does not expand $ or backticks", () => {
+	test("keeps unquoted # comments and does not expand $", () => {
 		const parsed = parseEnvFileContent(
 			["INLINE=value # note", "TIGHT=value#note", 'QUOTED="v # kept"', 'DYN="$KEEP"', "BT=`cmd`"].join("\n"),
 		);
@@ -74,17 +74,36 @@ describe("parseEnvFileContent Bun quote and newline parsing", () => {
 		expect(parsed.TIGHT).toBe("value");
 		expect(parsed.QUOTED).toBe("v # kept");
 		expect(parsed.DYN).toBe("$KEEP");
-		expect(parsed.BT).toBe("`cmd`");
+		expect(parsed.BT).toBe("cmd");
 
 		const cwd = tempDir("gjc-env-quote-snap-");
 		fs.writeFileSync(path.join(cwd, ".env"), 'A="$KEEP"\nB=`cmd`\nC="plain\\n"\n');
 		const snapshot = projectEnvSnapshot(cwd);
 		expect(snapshot.values.A).toBe("$KEEP");
-		expect(snapshot.values.B).toBe("`cmd`");
+		expect(snapshot.values.B).toBe("cmd");
 		expect(snapshot.values.C).toBe("plain\n");
 		expect(snapshot.dynamic.has("A")).toBe(true);
-		expect(snapshot.dynamic.has("B")).toBe(true);
+		expect(snapshot.dynamic.has("B")).toBe(false);
 		expect(snapshot.dynamic.has("C")).toBe(false);
+	});
+
+	test("matches Bun where a mismatch would accept a project value", () => {
+		expect(parseEnvFileContent("GJC_CODING_AGENT_DIR=/tmp/evil\\#x\n").GJC_CODING_AGENT_DIR).toBe("/tmp/evil\\");
+		expect(parseEnvFileContent('GJC_CODING_AGENT_DIR=ab"c#d"e\n').GJC_CODING_AGENT_DIR).toBe('ab"c');
+		expect(parseEnvFileContent("GJC_CODING_AGENT_DIR=/tmp/evil\u00a0\n").GJC_CODING_AGENT_DIR).toBe(
+			"/tmp/evil\u00a0",
+		);
+		expect(parseEnvFileContent("GJC_CODING_AGENT_DIR=\u00a0/tmp/evil\n").GJC_CODING_AGENT_DIR).toBe(
+			"\u00a0/tmp/evil",
+		);
+		expect(parseEnvFileContent('GJC_CODING_AGENT_DIR=\n"/tmp/evil"\n').GJC_CODING_AGENT_DIR).toBe("/tmp/evil");
+		expect(parseEnvFileContent("GJC_CODING_AGENT_DIR\n=/tmp/evil\n").GJC_CODING_AGENT_DIR).toBe("/tmp/evil");
+		expect(parseEnvFileContent("GJC_CODING_AGENT_DIR:\n/tmp/evil\n").GJC_CODING_AGENT_DIR).toBe("/tmp/evil");
+		expect(parseEnvFileContent("GJC_CODING_AGENT_DIR:/tmp/evil\n").GJC_CODING_AGENT_DIR).toBeUndefined();
+		expect(parseEnvFileContent("GJC_CODING_AGENT_DIR=`a\\nb`\n").GJC_CODING_AGENT_DIR).toBe("a\\nb");
+		expect(parseEnvFileContent("\uFEFFGJC_CODING_AGENT_DIR=/tmp/evil-bom\n").GJC_CODING_AGENT_DIR).toBe(
+			"/tmp/evil-bom",
+		);
 	});
 });
 
@@ -143,6 +162,38 @@ describe("getAgentDir quote provenance", () => {
 		expect(agentDir).not.toBe(planted);
 		expect(agentDir).not.toBe(path.resolve(planted));
 		expect(agentDir.includes("planted-multiline")).toBe(false);
+	});
+
+	test("does not follow an unquoted hash escape planted by the project .env", async () => {
+		const cwd = tempDir("gjc-env-quote-hash-");
+		const home = tempDir("gjc-env-quote-home-");
+		fs.writeFileSync(path.join(cwd, ".env"), "GJC_CODING_AGENT_DIR=/tmp/planted-hash\\#x\n");
+		const agentDir = await printedAgentDir(cwd, { HOME: home });
+		expect(agentDir.includes("planted-hash")).toBe(false);
+	});
+
+	test("does not follow a quoted agent dir that begins on the next line", async () => {
+		const cwd = tempDir("gjc-env-quote-nlq-");
+		const home = tempDir("gjc-env-quote-home-");
+		fs.writeFileSync(path.join(cwd, ".env"), 'GJC_CODING_AGENT_DIR=\n"/tmp/planted-nlquote"\n');
+		const agentDir = await printedAgentDir(cwd, { HOME: home });
+		expect(agentDir.includes("planted-nlquote")).toBe(false);
+	});
+
+	test("does not follow a legacy PI_CODING_AGENT_DIR quoted newline", async () => {
+		const cwd = tempDir("gjc-env-quote-pi-");
+		const home = tempDir("gjc-env-quote-home-");
+		fs.writeFileSync(path.join(cwd, ".env"), 'PI_CODING_AGENT_DIR="/tmp/planted-pi\\n"\n');
+		const agentDir = await printedAgentDir(cwd, { HOME: home });
+		expect(agentDir.includes("planted-pi")).toBe(false);
+	});
+
+	test("does not follow a trailing NBSP that Bun keeps on the project value", async () => {
+		const cwd = tempDir("gjc-env-quote-nbsp-");
+		const home = tempDir("gjc-env-quote-home-");
+		fs.writeFileSync(path.join(cwd, ".env"), "GJC_CODING_AGENT_DIR=/tmp/planted-nbsp\u00a0\n");
+		const agentDir = await printedAgentDir(cwd, { HOME: home });
+		expect(agentDir.includes("planted-nbsp")).toBe(false);
 	});
 
 	test("still honors an operator agent dir when the project has no .env", async () => {
