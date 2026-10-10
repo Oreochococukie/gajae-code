@@ -881,7 +881,10 @@ export class MCPCommandController {
 		return next;
 	}
 
-	async #resolveOAuthEndpointsFromServer(config: MCPServerConfig): Promise<{
+	async #resolveOAuthEndpointsFromServer(
+		config: MCPServerConfig,
+		source?: SourceMeta,
+	): Promise<{
 		authorizationUrl: string;
 		tokenUrl: string;
 		clientId?: string;
@@ -889,11 +892,12 @@ export class MCPCommandController {
 		issuer?: string;
 		authorizationResponseIssSupported?: boolean;
 	}> {
-		// First test if server actually needs auth by connecting without OAuth
+		// First test if server actually needs auth by connecting without OAuth.
+		// A stored file keeps its source so project `!` and secret names stay gated.
 		let connectionSucceeded = false;
 		let connectionError: Error | undefined;
 		try {
-			await this.#handleTestConnection(this.#stripOAuthAuth(config));
+			await this.#handleTestConnection(this.#stripOAuthAuth(config), source);
 			connectionSucceeded = true;
 		} catch (error) {
 			connectionError = error as Error;
@@ -1495,7 +1499,8 @@ export class MCPCommandController {
 			}
 
 			const baseConfig = this.#stripOAuthAuth(found.config);
-			const oauth = await this.#resolveOAuthEndpointsFromServer(baseConfig);
+			const source = nativeMcpSource(found.scope, found.filePath);
+			const oauth = await this.#resolveOAuthEndpointsFromServer(baseConfig, source);
 			const oauthClientSecret = found.config.oauth?.clientSecret ?? currentAuth?.clientSecret ?? "";
 
 			this.#showMessage(["", theme.fg("muted", `Reauthorizing "${name}"...`), ""].join("\n"));

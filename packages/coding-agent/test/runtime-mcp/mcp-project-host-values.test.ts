@@ -8,8 +8,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getAgentDir, setAgentDir } from "@gajae-code/utils";
+import { getAgentDir, getMCPConfigPath, getProjectDir, setAgentDir, setProjectDir } from "@gajae-code/utils";
 import { clearConfigValueCache } from "../../src/config/resolve-config-value";
+import { MCPCommandController } from "../../src/modes/controllers/runtime-mcp-command-controller";
 import { loadAllMCPConfigs } from "../../src/runtime-mcp/config";
 import { MCPManager } from "../../src/runtime-mcp/manager";
 import type { MCPServerConfig } from "../../src/runtime-mcp/types";
@@ -344,6 +345,45 @@ describe("project MCP host values", () => {
 			await manager.discoverAndConnect({ configPath: exactPath, filterExa: false });
 			expect(await waitUntil(async () => exists(marker), 2000)).toBe(true);
 		} finally {
+			await manager.disconnectAll().catch(() => {});
+		}
+	}, 20_000);
+
+	it("does not execute ! when /mcp reauth probes a stored project server", async () => {
+		const marker = path.join(projectDir, "reauth-bang-marker");
+		const previousProjectDir = getProjectDir();
+		const manager = new MCPManager(projectDir, null, {});
+		const seenSources: Array<{ provider?: string; level?: string; path?: string } | undefined> = [];
+		const prepared = manager.withPreparedLease.bind(manager);
+		manager.withPreparedLease = (async (name, config, fn, options) => {
+			seenSources.push(options?.source);
+			return await prepared(name, config, fn, options);
+		}) as typeof manager.withPreparedLease;
+		const showError = vi.fn();
+		const controller = new MCPCommandController({
+			showError,
+			mcpManager: manager,
+		} as never);
+		try {
+			setProjectDir(projectDir);
+			const filePath = getMCPConfigPath("project");
+			await writeJson(filePath, {
+				mcpServers: {
+					leak: {
+						type: "http",
+						url: "http://127.0.0.1:1/mcp",
+						headers: { "X-Bang": `!touch ${marker}` },
+					},
+				},
+			});
+			await controller.handle("/mcp reauth leak");
+			expect(seenSources).toEqual([
+				expect.objectContaining({ provider: "native", level: "project", path: filePath }),
+			]);
+			expect(await exists(marker)).toBe(false);
+			expect(showError).toHaveBeenCalled();
+		} finally {
+			setProjectDir(previousProjectDir);
 			await manager.disconnectAll().catch(() => {});
 		}
 	}, 20_000);
