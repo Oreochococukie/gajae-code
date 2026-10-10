@@ -94,6 +94,38 @@ export async function allocateDisjointIsolationDir(
 	throw new Error("Failed to allocate a disjoint task isolation directory.");
 }
 
+/**
+ * Confirm native teardown may see `mergedDir`.
+ *
+ * `isoStop` deletes that path. The parent entry and `merged` itself must
+ * already be real directories, because native removal follows symlinks.
+ * A missing parent means there is nothing to stop. This does not close a
+ * replacement that happens after the lstat returns.
+ */
+export async function assertIsolationTeardownTarget(mergedDir: string, worktreeRoot: string): Promise<"stop" | "skip"> {
+	const baseDir = resolveIsolationRemovalTarget(mergedDir, worktreeRoot);
+	let baseInfo: { isSymbolicLink(): boolean };
+	try {
+		baseInfo = await fs.lstat(baseDir);
+	} catch (error) {
+		if (isErrno(error, "ENOENT")) return "skip";
+		throw error;
+	}
+	if (baseInfo.isSymbolicLink()) {
+		throw new Error("Refusing to remove a symlinked isolation directory.");
+	}
+	try {
+		const mergedInfo = await fs.lstat(mergedDir);
+		if (mergedInfo.isSymbolicLink()) {
+			throw new Error("Refusing to tear down a symlinked isolation merged directory.");
+		}
+	} catch (error) {
+		if (isErrno(error, "ENOENT")) return "stop";
+		throw error;
+	}
+	return "stop";
+}
+
 /** Remove the isolation directory that owns `mergedDir`. Missing directories are ignored. */
 export async function removeIsolationDirectory(mergedDir: string, worktreeRoot: string): Promise<void> {
 	const baseDir = resolveIsolationRemovalTarget(mergedDir, worktreeRoot);

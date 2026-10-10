@@ -7,7 +7,7 @@ import type * as natives from "@gajae-code/natives";
 
 import { getWorktreeDir, getWorktreesDir, hashPath, logger, Snowflake } from "@gajae-code/utils";
 import * as git from "../utils/git";
-import { allocateDisjointIsolationDir, removeIsolationDirectory } from "./isolation-dir";
+import { allocateDisjointIsolationDir, assertIsolationTeardownTarget, removeIsolationDirectory } from "./isolation-dir";
 
 let nativeWorktreeBindings: typeof import("@gajae-code/natives") | undefined;
 
@@ -440,6 +440,11 @@ export async function ensureIsolation(
 
 /** Tear down a handle returned by {@link ensureIsolation}. */
 export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
+	const worktreeRoot = getWorktreesDir();
+	// Native isoStop removes `mergedDir` and follows symlinks. Refuse a
+	// symlink that is already present before that call.
+	const teardown = await assertIsolationTeardownTarget(handle.mergedDir, worktreeRoot);
+	if (teardown === "skip") return;
 	const natives = nativeWorktree();
 	try {
 		try {
@@ -452,7 +457,7 @@ export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
 			});
 		}
 	} finally {
-		await removeIsolationDirectory(handle.mergedDir, getWorktreesDir());
+		await removeIsolationDirectory(handle.mergedDir, worktreeRoot);
 	}
 }
 

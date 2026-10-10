@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	allocateDisjointIsolationDir,
+	assertIsolationTeardownTarget,
 	removeIsolationDirectory,
 	resolveIsolationRemovalTarget,
 } from "../../src/task/isolation-dir";
@@ -104,6 +105,18 @@ describe("task isolation directories", () => {
 		).toThrow(/not a single worktree entry/);
 	});
 
+	it("skips teardown when the isolation directory is already gone", async () => {
+		const root = await tempRoot();
+		try {
+			expect(await assertIsolationTeardownTarget(path.join(root, "missing-token", "merged"), root)).toBe("skip");
+			const base = path.join(root, "0-T1-abc-token");
+			await fs.mkdir(base, { mode: 0o700 });
+			expect(await assertIsolationTeardownTarget(path.join(base, "merged"), root)).toBe("stop");
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
 	it.skipIf(process.platform === "win32")(
 		"refuses to remove a symlink planted at the isolation directory",
 		async () => {
@@ -114,6 +127,9 @@ describe("task isolation directories", () => {
 				await fs.writeFile(targetFile, "keep\n");
 				const link = path.join(root, "0-T1-abc-token");
 				await fs.symlink(outside, link);
+				await expect(assertIsolationTeardownTarget(path.join(link, "merged"), root)).rejects.toThrow(
+					/symlinked isolation directory/,
+				);
 				await expect(removeIsolationDirectory(path.join(link, "merged"), root)).rejects.toThrow(/symlinked/);
 				expect(await fs.readFile(targetFile, "utf8")).toBe("keep\n");
 			} finally {
