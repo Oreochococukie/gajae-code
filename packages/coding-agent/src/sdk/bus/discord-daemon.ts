@@ -1472,11 +1472,17 @@ export class DiscordNotificationDaemon {
 	 */
 	async #verifiedPublishedThreadId(record: DiscordConversation): Promise<string | undefined> {
 		if (!record.sessionId || !record.createNonce || !record.threadId) return undefined;
+		// Capture the shutdown generation before the lookup. #runEffect records its
+		// own generation only after this returns, so a drain that expires during the
+		// lookup must not admit the later post.
+		const workGeneration = this.#workGeneration;
 		const found = await this.options.provider.findThreadByNonce({
 			guildId: record.guildId,
 			parentId: record.parentChannelId,
 			nonce: discordEffectNonce(`create:${record.sessionId}:${record.createNonce}`),
 		});
+		if (workGeneration !== this.#workGeneration)
+			throw new Error("Discord thread binding was admitted after shutdown drain expiry");
 		if (!found || found.id !== record.threadId) return undefined;
 		if (found.guildId !== record.guildId || found.parentId !== record.parentChannelId) return undefined;
 		return found.id;
@@ -2493,11 +2499,13 @@ export class DiscordNotificationDaemon {
 			await this.#store.delete(intentKey, intent.generation);
 			return;
 		}
+		const workGeneration = this.#workGeneration;
 		const found = await this.options.provider.findThreadByNonce({
 			guildId: intent.guildId,
 			parentId: intent.parentChannelId,
 			nonce: payload.nonce,
 		});
+		if (workGeneration !== this.#workGeneration) return;
 		if (
 			!found ||
 			found.id !== threadId ||
@@ -2509,6 +2517,7 @@ export class DiscordNotificationDaemon {
 		}
 		const boundThreadId = found.id;
 		await this.#requireLiveBinding(effect.sessionId, effect.endpointGeneration, payload.attachmentAuthorityId);
+		if (workGeneration !== this.#workGeneration) return;
 		const key = discordConversationKey({
 			appId: intent.appId,
 			guildId: intent.guildId,

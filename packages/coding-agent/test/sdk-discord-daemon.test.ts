@@ -2850,6 +2850,46 @@ describe("DiscordNotificationDaemon fake-provider acceptance", () => {
 		});
 	});
 
+	test("does not publish a failure notice when nonce revalidation outlives the shutdown drain", async () => {
+		await withDaemon(async (daemon, provider) => {
+			await daemon.start();
+			const conversation = await daemon.notify({
+				sessionId: "session",
+				endpointGeneration: 1,
+				content: "first",
+			});
+			if (!conversation.threadId) throw new Error("Discord notify did not bind a thread");
+			const entered = Promise.withResolvers<void>();
+			const releaseLookup = Promise.withResolvers<void>();
+			const lookup = provider.findThreadByNonce.bind(provider);
+			provider.findThreadByNonce = async input => {
+				entered.resolve();
+				await releaseLookup.promise;
+				return lookup(input);
+			};
+			if (!provider.handler) throw new Error("Discord gateway handler was not installed");
+			const delivery = provider.handler({
+				id: "stale-after-stop",
+				guildId: "guild",
+				parentId: "parent",
+				threadId: conversation.threadId,
+				authorId: "member",
+				interaction: {
+					id: "interaction-stale-after-stop",
+					token: "token-stale-after-stop",
+					customId: "gjc:99:ask:00000000-0000-0000-0000-000000000000",
+					value: "yes",
+				},
+			});
+			await entered.promise;
+			await daemon.stop();
+			releaseLookup.resolve();
+			await delivery;
+			expect(provider.messages.map(message => message.content)).toEqual(["first"]);
+			expect(provider.creates).toBe(1);
+		});
+	}, 12_000);
+
 	test("does not publish session output to a persisted thread the provider cannot tie to the nonce starter", async () => {
 		await withDaemon(async (daemon, provider, agentDir) => {
 			const store = new ConversationStore<DiscordConversation>({ agentDir, kind: "discord" });
