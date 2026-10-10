@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { DiscordNotificationDaemon } from "../src/sdk/bus/discord-daemon";
 import { type DiscordGatewaySocket, DiscordLiveProvider } from "../src/sdk/bus/discord-live-provider";
 import type { DiscordInboundEvent } from "../src/sdk/bus/discord-provider";
 
@@ -123,14 +127,21 @@ describe("DiscordLiveProvider protocol", () => {
 			apiBaseUrl: "https://discord.test/api",
 			fetchImpl: async input => {
 				const path = String(input);
+				if (path.endsWith("/users/@me")) return response({ id: "bot" });
 				if (path.endsWith("/channels/parent/messages?limit=100")) {
 					return response(
 						threadCreated
 							? [
 									{
 										id: "starter",
+										author: { id: "bot", bot: true },
 										content: "<!-- gjc-thread-nonce:nonce -->",
-										thread: { id: "public-thread", thread_metadata: { archived: false } },
+										thread: {
+											id: "public-thread",
+											parent_id: "parent",
+											owner_id: "bot",
+											thread_metadata: { archived: false },
+										},
 									},
 								]
 							: [],
@@ -577,5 +588,375 @@ describe("DiscordLiveProvider protocol", () => {
 		second.message({ op: 0, t: "RESUMED", s: 2, d: {} });
 		expect(live.transportHealthy).toBe(true);
 		await live.stop();
+	});
+
+	test("does not adopt an outsider thread that copies the public nonce marker ahead of the bot starter", async () => {
+		const marker = "<!-- gjc-thread-nonce:nonce -->";
+		const live = new DiscordLiveProvider({
+			applicationId: "app",
+			botToken: "discord-secret-token",
+			apiBaseUrl: "https://discord.test/api",
+			fetchImpl: async input => {
+				const path = String(input);
+				if (path.endsWith("/users/@me")) return response({ id: "bot" });
+				if (path.endsWith("/channels/parent/messages?limit=100")) {
+					return response([
+						{
+							id: "evil-msg",
+							author: { id: "OUTSIDER-4242", bot: false },
+							content: `attack copy of ${marker}`,
+							thread: {
+								id: "evil-thread",
+								parent_id: "parent",
+								owner_id: "OUTSIDER-4242",
+								thread_metadata: { archived: false },
+							},
+						},
+						{
+							id: "starter",
+							author: { id: "bot", bot: true },
+							content: marker,
+							thread: {
+								id: "bot-thread",
+								parent_id: "parent",
+								owner_id: "bot",
+								thread_metadata: { archived: false },
+							},
+						},
+					]);
+				}
+				return response({ threads: [] });
+			},
+		});
+		await expect(
+			live.findThreadByNonce({ guildId: "guild", parentId: "parent", nonce: "nonce" }),
+		).resolves.toMatchObject({ id: "bot-thread", parentId: "parent" });
+	});
+
+	test("returns null when every public nonce marker was posted by someone other than the bot", async () => {
+		const marker = "<!-- gjc-thread-nonce:nonce -->";
+		const live = new DiscordLiveProvider({
+			applicationId: "app",
+			botToken: "discord-secret-token",
+			apiBaseUrl: "https://discord.test/api",
+			fetchImpl: async input => {
+				const path = String(input);
+				if (path.endsWith("/users/@me")) return response({ id: "bot" });
+				if (path.endsWith("/channels/parent/messages?limit=100")) {
+					return response([
+						{
+							id: "evil-msg",
+							author: { id: "OUTSIDER-4242", bot: false },
+							content: marker,
+							thread: {
+								id: "evil-thread",
+								parent_id: "parent",
+								owner_id: "OUTSIDER-4242",
+								thread_metadata: { archived: false },
+							},
+						},
+						{
+							id: "spoofed-bot-flag",
+							author: { id: "bot", bot: false },
+							content: marker,
+							thread: {
+								id: "spoofed-thread",
+								parent_id: "parent",
+								owner_id: "bot",
+								thread_metadata: { archived: false },
+							},
+						},
+					]);
+				}
+				return response({ threads: [] });
+			},
+		});
+		await expect(
+			live.findThreadByNonce({ guildId: "guild", parentId: "parent", nonce: "nonce" }),
+		).resolves.toBeNull();
+	});
+
+	test("does not relabel a nonce thread from another parent as this channel", async () => {
+		const marker = "<!-- gjc-thread-nonce:nonce -->";
+		const live = new DiscordLiveProvider({
+			applicationId: "app",
+			botToken: "discord-secret-token",
+			apiBaseUrl: "https://discord.test/api",
+			fetchImpl: async input => {
+				const path = String(input);
+				if (path.endsWith("/users/@me")) return response({ id: "bot" });
+				if (path.endsWith("/channels/parent/messages?limit=100")) {
+					return response([
+						{
+							id: "starter",
+							author: { id: "bot", bot: true },
+							content: marker,
+							thread: {
+								id: "foreign-thread",
+								parent_id: "OTHER-PARENT-9",
+								owner_id: "bot",
+								thread_metadata: { archived: false },
+							},
+						},
+					]);
+				}
+				return response({ threads: [] });
+			},
+		});
+		await expect(
+			live.findThreadByNonce({ guildId: "guild", parentId: "parent", nonce: "nonce" }),
+		).resolves.toBeNull();
+	});
+
+	test("does not adopt an outsider thread from the active-thread fallback", async () => {
+		const marker = "<!-- gjc-thread-nonce:nonce -->";
+		const live = new DiscordLiveProvider({
+			applicationId: "app",
+			botToken: "discord-secret-token",
+			apiBaseUrl: "https://discord.test/api",
+			fetchImpl: async input => {
+				const path = String(input);
+				if (path.endsWith("/users/@me")) return response({ id: "bot" });
+				if (path.endsWith("/channels/parent/messages?limit=100")) return response([]);
+				if (path.endsWith("/guilds/guild/threads/active")) {
+					return response({
+						threads: [
+							{
+								id: "evil-thread",
+								parent_id: "parent",
+								owner_id: "OUTSIDER-4242",
+								thread_metadata: { archived: false },
+							},
+						],
+					});
+				}
+				if (path.endsWith("/channels/evil-thread/messages?limit=25")) {
+					return response([{ id: "copied", author: { id: "OUTSIDER-4242", bot: false }, content: marker }]);
+				}
+				if (path.includes("archived/public")) return response({ threads: [] });
+				return response({ threads: [] });
+			},
+		});
+		await expect(
+			live.findThreadByNonce({ guildId: "guild", parentId: "parent", nonce: "nonce" }),
+		).resolves.toBeNull();
+	});
+
+	test("reconciles a bot-owned thread from the active-thread fallback after the parent starter scrolls away", async () => {
+		const marker = "<!-- gjc-thread-nonce:nonce -->";
+		const live = new DiscordLiveProvider({
+			applicationId: "app",
+			botToken: "discord-secret-token",
+			apiBaseUrl: "https://discord.test/api",
+			fetchImpl: async input => {
+				const path = String(input);
+				if (path.endsWith("/users/@me")) return response({ id: "bot" });
+				if (path.endsWith("/channels/parent/messages?limit=100")) return response([]);
+				if (path.endsWith("/guilds/guild/threads/active")) {
+					return response({
+						threads: [
+							{
+								id: "evil-thread",
+								parent_id: "parent",
+								owner_id: "OUTSIDER-4242",
+								thread_metadata: { archived: false },
+							},
+							{
+								id: "bot-thread",
+								parent_id: "parent",
+								owner_id: "bot",
+								thread_metadata: { archived: false },
+							},
+						],
+					});
+				}
+				if (path.endsWith("/channels/evil-thread/messages?limit=25")) {
+					return response([{ id: "copied", author: { id: "OUTSIDER-4242", bot: false }, content: marker }]);
+				}
+				if (path.endsWith("/channels/bot-thread/messages?limit=25")) {
+					return response([{ id: "starter", author: { id: "bot", bot: true }, content: marker }]);
+				}
+				if (path.includes("archived/public")) return response({ threads: [] });
+				return response({ threads: [] });
+			},
+		});
+		await expect(
+			live.findThreadByNonce({ guildId: "guild", parentId: "parent", nonce: "nonce" }),
+		).resolves.toMatchObject({ id: "bot-thread", parentId: "parent" });
+	});
+
+	test("starts the thread from a new bot starter when an outsider already posted the nonce marker", async () => {
+		const marker = "<!-- gjc-thread-nonce:nonce -->";
+		const threadPosts: string[] = [];
+		const live = new DiscordLiveProvider({
+			applicationId: "app",
+			botToken: "discord-secret-token",
+			apiBaseUrl: "https://discord.test/api",
+			fetchImpl: async (input, init) => {
+				const path = String(input);
+				const method = (init?.method ?? "GET").toUpperCase();
+				if (path.endsWith("/users/@me")) return response({ id: "bot" });
+				if (path.endsWith("/channels/parent/messages?limit=100")) {
+					return response([
+						{
+							id: "evil-msg",
+							author: { id: "OUTSIDER-4242", bot: false },
+							content: marker,
+						},
+					]);
+				}
+				if (path.endsWith("/channels/parent/messages") && method === "POST") return response({ id: "bot-starter" });
+				if (method === "POST" && path.endsWith("/threads")) {
+					threadPosts.push(path);
+					const id = path.includes("evil-msg") ? "evil-thread" : "bot-thread";
+					return response({ id, parent_id: "parent", owner_id: "bot", thread_metadata: { archived: false } });
+				}
+				return response({ threads: [] });
+			},
+		});
+		await expect(
+			live.createThread({ guildId: "guild", parentId: "parent", name: "Session", nonce: "nonce" }),
+		).resolves.toMatchObject({ id: "bot-thread", parentId: "parent" });
+		expect(threadPosts).toEqual(["https://discord.test/api/channels/parent/messages/bot-starter/threads"]);
+	});
+
+	test("does not adopt a thread another member started from the bot's own starter message", async () => {
+		const marker = "<!-- gjc-thread-nonce:nonce -->";
+		const threadPosts: string[] = [];
+		const live = new DiscordLiveProvider({
+			applicationId: "app",
+			botToken: "discord-secret-token",
+			apiBaseUrl: "https://discord.test/api",
+			fetchImpl: async (input, init) => {
+				const path = String(input);
+				const method = (init?.method ?? "GET").toUpperCase();
+				if (path.endsWith("/users/@me")) return response({ id: "bot" });
+				if (path.endsWith("/channels/parent/messages?limit=100")) {
+					return response([
+						{
+							id: "bot-starter",
+							author: { id: "bot", bot: true },
+							content: marker,
+							thread: {
+								id: "evil-thread",
+								parent_id: "parent",
+								owner_id: "OUTSIDER-4242",
+								thread_metadata: { archived: false },
+							},
+						},
+					]);
+				}
+				if (path.endsWith("/channels/parent/messages") && method === "POST")
+					return response({ id: "fresh-starter" });
+				if (method === "POST" && path.endsWith("/threads")) {
+					threadPosts.push(path);
+					return response({
+						id: "bot-thread",
+						parent_id: "parent",
+						owner_id: "bot",
+						thread_metadata: { archived: false },
+					});
+				}
+				return response({ threads: [] });
+			},
+		});
+		await expect(
+			live.createThread({ guildId: "guild", parentId: "parent", name: "Session", nonce: "nonce" }),
+		).resolves.toMatchObject({ id: "bot-thread", parentId: "parent" });
+		expect(threadPosts).toEqual(["https://discord.test/api/channels/parent/messages/fresh-starter/threads"]);
+	});
+
+	test("notification retry posts the session body to the bot thread after an outsider copies the marker", async () => {
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-discord-nonce-author-"));
+		const posts: Array<{ path: string; body: string }> = [];
+		const parentMessages: Array<Record<string, unknown>> = [];
+		let lostThreadPost = true;
+		const live = new DiscordLiveProvider({
+			applicationId: "app",
+			botToken: "discord-secret-token",
+			apiBaseUrl: "https://discord.test/api",
+			fetchImpl: async (input, init) => {
+				const requestPath = String(input).slice("https://discord.test/api".length);
+				const method = (init?.method ?? "GET").toUpperCase();
+				if (requestPath === "/users/@me") return response({ id: "bot" });
+				if (requestPath === "/channels/parent/messages?limit=100") return response(parentMessages);
+				if (requestPath === "/channels/parent/messages" && method === "POST") {
+					const body = JSON.parse(String(init?.body)) as { content: string };
+					const message = { id: "bot-starter", author: { id: "bot", bot: true }, content: body.content };
+					parentMessages.push(message);
+					return response(message);
+				}
+				if (requestPath === "/channels/parent/messages/bot-starter/threads" && method === "POST") {
+					if (lostThreadPost) {
+						lostThreadPost = false;
+						throw new Error("Discord connection lost before the thread request reached the API");
+					}
+					const thread = {
+						id: "bot-thread",
+						parent_id: "parent",
+						owner_id: "bot",
+						thread_metadata: { archived: false },
+					};
+					const starter = parentMessages.find(message => message.id === "bot-starter");
+					if (starter) starter.thread = thread;
+					return response(thread);
+				}
+				if (requestPath === "/guilds/guild/threads/active" || requestPath.includes("archived/public"))
+					return response({ threads: [] });
+				if (method === "POST" && requestPath.endsWith("/messages")) {
+					posts.push({ path: requestPath, body: String(init?.body) });
+					return response({ id: `posted-${posts.length}` });
+				}
+				if (requestPath.includes("/messages?limit")) return response([]);
+				return response({});
+			},
+		});
+		const daemon = new DiscordNotificationDaemon({
+			agentDir,
+			guildId: "guild",
+			parentChannelId: "parent",
+			provider: live,
+			resolveAttachment: async (sessionId, expectedGeneration = 1) => ({
+				sessionId,
+				generation: expectedGeneration,
+				isCurrent: () => true,
+				send: () => {},
+				sendMaintenance: () => {},
+			}),
+		});
+		try {
+			await expect(
+				daemon.notify({
+					sessionId: "session",
+					endpointGeneration: 1,
+					content: "SESSION-OUTPUT-CANARY-attempt-1",
+				}),
+			).rejects.toThrow("connection lost");
+			const starter = parentMessages.find(message => message.id === "bot-starter");
+			expect(starter?.content).toContain("<!-- gjc-thread-nonce:");
+			parentMessages.unshift({
+				id: "evil-msg",
+				author: { id: "OUTSIDER-4242", bot: false },
+				content: `attack copy of ${String(starter?.content)}`,
+				thread: {
+					id: "evil-thread",
+					parent_id: "parent",
+					owner_id: "OUTSIDER-4242",
+					thread_metadata: { archived: false },
+				},
+			});
+			const conversation = await daemon.notify({
+				sessionId: "session",
+				endpointGeneration: 1,
+				content: "SESSION-OUTPUT-CANARY-attempt-2",
+			});
+			expect(conversation.threadId).toBe("bot-thread");
+			expect(posts.map(post => post.path)).toEqual(["/channels/bot-thread/messages"]);
+			expect(posts[0]?.body).toContain("SESSION-OUTPUT-CANARY-attempt-2");
+			expect(JSON.stringify(posts)).not.toContain("evil-thread");
+		} finally {
+			await daemon.stop();
+			await fs.rm(agentDir, { recursive: true, force: true });
+		}
 	});
 });
