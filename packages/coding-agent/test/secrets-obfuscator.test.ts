@@ -1339,6 +1339,13 @@ describe("obfuscateMessages", () => {
 		expect(historyItems.some(item => item.type === "reasoning")).toBe(false);
 		expect(JSON.stringify(historyItems)).not.toContain(secret);
 		expect(JSON.stringify(historyItems)).toContain("call_quote");
+		const historyCall = historyItems.find(item => item.type === "function_call");
+		if (!historyCall || typeof historyCall.arguments !== "string")
+			throw new Error("expected encoded function_call arguments");
+		const decodedCommand = (JSON.parse(historyCall.arguments) as { command?: string }).command;
+		expect(decodedCommand).not.toContain(secret);
+		expect(decodedCommand).toContain("#GJC1_");
+		expect(decodedCommand).not.toBe(`echo ${secret}`);
 		const replayPayload = await Promise.race([
 			new Promise<unknown>(resolve => {
 				streamOpenAIResponses(
@@ -1359,5 +1366,115 @@ describe("obfuscateMessages", () => {
 		expect(replayWire).not.toContain(secret);
 		expect(replayWire).not.toContain("rs_quote");
 		expect(replayWire).toContain("call_quote");
+		const replayCall = findFunctionCallArguments(replayPayload, "call_quote");
+		if (replayCall === undefined) throw new Error("expected replayed function_call arguments");
+		const replayCommand = (JSON.parse(replayCall) as { command?: string }).command;
+		expect(replayCommand).not.toContain(secret);
+		expect(replayCommand).toContain("#GJC1_");
+	});
+
+	it("redacts a secret that is only a JSON object key and keeps an explicit self-replacement", () => {
+		const keySecret = "SYNTHETIC_TOKEN_42";
+		const keep = "keep-value";
+		const hide = "hide-value";
+		const obfuscator = new SecretObfuscator(
+			[
+				{ type: "plain", content: keySecret },
+				{ type: "plain", content: keep, mode: "replace", replacement: keep },
+				{ type: "plain", content: hide, mode: "replace", replacement: "safe-value" },
+			],
+			TEST_KEY,
+		);
+		const usage = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const encodedKey = JSON.stringify({ [keySecret]: "ok" });
+		expect(encodedKey.includes(keySecret)).toBe(true);
+		const assistant: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "text", text: `${keep} ${hide}` },
+				{
+					type: "toolCall",
+					id: "call-key",
+					name: "bash",
+					arguments: { body: encodedKey, note: `${keep} ${hide}` },
+				},
+			],
+			api: "openai-responses",
+			provider: "openai",
+			model: "gpt-4.1-mini",
+			usage,
+			stopReason: "toolUse",
+			timestamp: 1,
+			providerPayload: {
+				type: "openaiResponsesHistory",
+				provider: "openai",
+				dt: true,
+				items: [
+					{
+						type: "function_call",
+						call_id: "call_key",
+						name: "bash",
+						arguments: encodedKey,
+					},
+					{
+						type: "message",
+						role: "user",
+						content: [
+							{ type: "input_text", text: `see ${keySecret}` },
+							{ type: "input_image", image_url: `data:image/png;base64,AAAA${keySecret}BBBB` },
+						],
+					},
+				],
+			},
+		};
+		const [obfuscated] = obfuscateMessages(obfuscator, [assistant]);
+		if (obfuscated?.role !== "assistant") throw new Error("expected assistant");
+		const text = obfuscated.content.find(block => block.type === "text");
+		if (text?.type !== "text") throw new Error("expected text");
+		expect(text.text).toBe(`${keep} safe-value`);
+		const call = obfuscated.content.find(block => block.type === "toolCall");
+		if (call?.type !== "toolCall") throw new Error("expected tool call");
+		const decodedBody = JSON.parse(String(call.arguments.body)) as Record<string, string>;
+		expect(Object.keys(decodedBody)).not.toContain(keySecret);
+		expect(JSON.stringify(decodedBody)).not.toContain(keySecret);
+		expect(decodedBody[Object.keys(decodedBody)[0] ?? ""]).toBe("ok");
+		expect(call.arguments.note).toBe(`${keep} safe-value`);
+		const items = obfuscated.providerPayload?.items ?? [];
+		const historyCall = items.find(item => item.type === "function_call");
+		if (!historyCall || typeof historyCall.arguments !== "string") throw new Error("expected history arguments");
+		const historyBody = JSON.parse(historyCall.arguments) as Record<string, string>;
+		expect(Object.keys(historyBody)).not.toContain(keySecret);
+		expect(historyBody[Object.keys(historyBody)[0] ?? ""]).toBe("ok");
+		const historyMessage = items.find(item => item.type === "message");
+		const parts = (historyMessage?.content ?? []) as Array<{ type?: string; text?: string; image_url?: string }>;
+		expect(parts.find(part => part.type === "input_text")?.text).not.toContain(keySecret);
+		expect(parts.find(part => part.type === "input_image")?.image_url).toBe(
+			`data:image/png;base64,AAAA${keySecret}BBBB`,
+		);
 	});
 });
+
+function findFunctionCallArguments(payload: unknown, callId: string): string | undefined {
+	const stack: unknown[] = [payload];
+	while (stack.length > 0) {
+		const current = stack.pop();
+		if (!current || typeof current !== "object") continue;
+		if (Array.isArray(current)) {
+			stack.push(...current);
+			continue;
+		}
+		const record = current as Record<string, unknown>;
+		if (record.type === "function_call" && record.call_id === callId && typeof record.arguments === "string") {
+			return record.arguments;
+		}
+		for (const value of Object.values(record)) stack.push(value);
+	}
+	return undefined;
+}

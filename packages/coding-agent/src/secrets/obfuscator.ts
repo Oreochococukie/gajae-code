@@ -393,22 +393,29 @@ export class SecretObfuscator {
 	}
 
 	/**
-	 * Substitute secrets for an outbound copy. If substitution leaves a
-	 * configured secret in place, remaining matches are masked. The mask is
-	 * not reversed by `deobfuscate()`.
+	 * Substitute secrets for an outbound copy. An explicit replacement equal
+	 * to its secret stays. A cycle that restores any other secret is masked.
+	 * The mask is not reversed by `deobfuscate()`.
 	 */
 	scrubOutbound(text: string): string {
 		const obfuscated = this.obfuscate(text);
-		if (!this.containsConfiguredSecret(obfuscated)) return obfuscated;
-		// An explicit replacement equal to the secret is authoritative for
-		// semantic text. A cycle that restores the secret is not.
-		if (obfuscated === text && this.#substitutionLeftSecretIntentionally(text)) return text;
+		if (!this.hasUnintentionalSecret(obfuscated)) return obfuscated;
 		const masked = this.#maskRemainingSecrets(obfuscated);
-		return this.containsConfiguredSecret(masked) ? OUTBOUND_SECRET_MASK : masked;
+		return this.hasUnintentionalSecret(masked) ? OUTBOUND_SECRET_MASK : masked;
 	}
 
-	/** True when every secret still in `text` was configured to replace itself. */
-	#substitutionLeftSecretIntentionally(text: string): boolean {
+	/**
+	 * True when `text` still contains a configured secret that was not
+	 * explicitly replaced with itself.
+	 */
+	hasUnintentionalSecret(text: string): boolean {
+		if (!this.#hasAny || text.length === 0) return false;
+		for (const secret of this.#plainMappings.keys()) {
+			if (secret.length > 0 && text.includes(secret)) return true;
+		}
+		for (const [secret, replacement] of this.#replaceMappings) {
+			if (secret.length > 0 && replacement !== secret && text.includes(secret)) return true;
+		}
 		for (const entry of this.#regexEntries) {
 			entry.regex.lastIndex = 0;
 			for (;;) {
@@ -418,27 +425,24 @@ export class SecretObfuscator {
 					entry.regex.lastIndex++;
 					continue;
 				}
-				return false;
+				if (entry.mode === "replace" && entry.replacement === match[0]) continue;
+				return true;
 			}
 		}
-		let matched = false;
-		for (const [secret, replacement] of this.#replaceMappings) {
-			if (secret.length === 0 || !text.includes(secret)) continue;
-			matched = true;
-			if (replacement !== secret) return false;
-		}
-		for (const secret of this.#plainMappings.keys()) {
-			if (secret.length > 0 && text.includes(secret)) return false;
-		}
-		return matched;
+		return false;
 	}
 
 	#maskRemainingSecrets(text: string): string {
 		let result = text;
-		const secrets = [...this.#plainMappings.keys(), ...this.#replaceMappings.keys()].sort(
-			(left, right) => right.length - left.length,
+		const replaceSecrets = [...this.#replaceMappings.entries()].sort(
+			(left, right) => right[0].length - left[0].length,
 		);
-		for (const secret of secrets) {
+		for (const [secret, replacement] of replaceSecrets) {
+			if (secret.length === 0 || replacement === secret || secret === OUTBOUND_SECRET_MASK) continue;
+			if (result.includes(secret)) result = replaceAll(result, secret, OUTBOUND_SECRET_MASK);
+		}
+		const plainSecrets = [...this.#plainMappings.keys()].sort((left, right) => right.length - left.length);
+		for (const secret of plainSecrets) {
 			if (secret.length === 0 || secret === OUTBOUND_SECRET_MASK) continue;
 			if (result.includes(secret)) result = replaceAll(result, secret, OUTBOUND_SECRET_MASK);
 		}
@@ -456,6 +460,7 @@ export class SecretObfuscator {
 			}
 			for (const matchValue of matches) {
 				if (matchValue === OUTBOUND_SECRET_MASK) continue;
+				if (entry.mode === "replace" && entry.replacement === matchValue) continue;
 				result = replaceAll(result, matchValue, OUTBOUND_SECRET_MASK);
 			}
 		}
@@ -529,8 +534,8 @@ export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Messag
 				continue;
 			}
 			if (block.type === "toolCall") {
-				const obfuscatedArguments = deepWalkStrings(block.arguments, text => scrubProtocolString(obfuscator, text));
-				if (obfuscatedArguments !== block.arguments && valueTreeHasSecret(obfuscator, obfuscatedArguments, 0)) {
+				const obfuscatedArguments = scrubJsonNode(obfuscator, block.arguments, 0);
+				if (treeHasUnintentionalSecret(obfuscator, obfuscatedArguments, 0)) {
 					changed = true;
 					continue;
 				}
@@ -594,7 +599,7 @@ function valueTreeHasSecret(
 
 /**
  * Redact a protocol string. JSON objects, arrays, and strings are decoded so a
- * secret that exists only in escaped form is still replaced. The original
+ * secret in an escaped leaf or an object key is still replaced. The original
  * string is kept when nothing matches.
  */
 function scrubProtocolString(obfuscator: SecretObfuscator, value: string, depth = 0): string {
@@ -605,7 +610,7 @@ function scrubProtocolString(obfuscator: SecretObfuscator, value: string, depth 
 			return scrubbed === parsed ? value : JSON.stringify(scrubbed);
 		}
 		if (parsed !== undefined && typeof parsed === "object" && parsed !== null) {
-			const walked = deepWalkStrings(parsed, text => scrubProtocolString(obfuscator, text, depth + 1));
+			const walked = scrubJsonNode(obfuscator, parsed, depth + 1);
 			if (walked === parsed) return value;
 			try {
 				return JSON.stringify(walked);
@@ -615,6 +620,83 @@ function scrubProtocolString(obfuscator: SecretObfuscator, value: string, depth 
 		}
 	}
 	return obfuscator.scrubOutbound(value);
+}
+
+const HISTORY_IMAGE_PART_TYPES = new Set(["input_image", "output_image", "image", "image_url"]);
+const IMAGE_PAYLOAD_KEYS = new Set(["image_url", "image", "data", "inline_data", "inlineData"]);
+
+function isHistoryImagePart(value: object): boolean {
+	const type = (value as { type?: unknown }).type;
+	return typeof type === "string" && HISTORY_IMAGE_PART_TYPES.has(type);
+}
+
+/** Walk objects and arrays, including keys. Image payload fields are left byte-for-byte. */
+function scrubJsonNode(obfuscator: SecretObfuscator, value: unknown, depth: number): unknown {
+	if (typeof value === "string") return scrubProtocolString(obfuscator, value, depth);
+	if (Array.isArray(value)) {
+		let changed = false;
+		const result = value.map(item => {
+			const next = scrubJsonNode(obfuscator, item, depth);
+			if (next !== item) changed = true;
+			return next;
+		});
+		return changed ? result : value;
+	}
+	if (value !== null && typeof value === "object") {
+		const imagePart = isHistoryImagePart(value);
+		let changed = false;
+		const result: Record<string, unknown> = {};
+		const source = value as Record<string, unknown>;
+		for (const key of Object.keys(source)) {
+			const current = source[key];
+			if (imagePart && IMAGE_PAYLOAD_KEYS.has(key)) {
+				Object.defineProperty(result, key, {
+					value: current,
+					enumerable: true,
+					writable: true,
+					configurable: true,
+				});
+				continue;
+			}
+			const nextKey = scrubProtocolString(obfuscator, key, depth);
+			const nextValue = scrubJsonNode(obfuscator, current, depth);
+			if (nextKey !== key || nextValue !== current) changed = true;
+			Object.defineProperty(result, nextKey, {
+				value: nextValue,
+				enumerable: true,
+				writable: true,
+				configurable: true,
+			});
+		}
+		return changed ? result : value;
+	}
+	return value;
+}
+
+function treeHasUnintentionalSecret(
+	obfuscator: SecretObfuscator,
+	value: unknown,
+	depth: number,
+	seen: WeakSet<object> = new WeakSet(),
+): boolean {
+	if (typeof value === "string") {
+		if (obfuscator.hasUnintentionalSecret(value)) return true;
+		if (depth >= 4) return false;
+		const parsed = parseJsonValue(value);
+		if (parsed === undefined) return false;
+		return treeHasUnintentionalSecret(obfuscator, parsed, depth + 1, seen);
+	}
+	if (typeof value !== "object" || value === null) return false;
+	if (seen.has(value)) return false;
+	seen.add(value);
+	if (Array.isArray(value)) return value.some(item => treeHasUnintentionalSecret(obfuscator, item, depth, seen));
+	const imagePart = isHistoryImagePart(value);
+	for (const key of Object.keys(value)) {
+		if (imagePart && IMAGE_PAYLOAD_KEYS.has(key)) continue;
+		if (obfuscator.hasUnintentionalSecret(key)) return true;
+		if (treeHasUnintentionalSecret(obfuscator, (value as Record<string, unknown>)[key], depth, seen)) return true;
+	}
+	return false;
 }
 
 const RESPONSES_APIS = new Set(["openai-responses", "azure-openai-responses", "openai-codex-responses"]);
@@ -739,8 +821,8 @@ function scrubHistoryItem(obfuscator: SecretObfuscator, item: unknown): unknown 
 	}
 	if (record.type === "message" && Array.isArray(record.content)) {
 		if (opaqueSiblingHasSecret(obfuscator, record, "content")) return undefined;
-		const content = deepWalkStrings(record.content, text => scrubProtocolString(obfuscator, text));
-		if (content !== record.content && valueTreeHasSecret(obfuscator, content, 0)) return undefined;
+		const content = scrubJsonNode(obfuscator, record.content, 0);
+		if (treeHasUnintentionalSecret(obfuscator, content, 0)) return undefined;
 		return content === record.content ? record : { ...record, content };
 	}
 	return historyItemHasSecret(obfuscator, record) ? undefined : record;
@@ -754,7 +836,7 @@ function rewriteHistoryField(
 	if (opaqueSiblingHasSecret(obfuscator, item, key)) return undefined;
 	if (!(key in item)) return item;
 	const next = scrubProtocolValue(obfuscator, item[key]);
-	if (next !== item[key] && valueTreeHasSecret(obfuscator, next, 0)) return undefined;
+	if (treeHasUnintentionalSecret(obfuscator, next, 0)) return undefined;
 	return next === item[key] ? item : { ...item, [key]: next };
 }
 
@@ -771,20 +853,7 @@ function opaqueSiblingHasSecret(
 }
 
 function scrubProtocolValue(obfuscator: SecretObfuscator, value: unknown, depth = 0): unknown {
-	if (typeof value === "string") return scrubProtocolString(obfuscator, value, depth);
-	if (Array.isArray(value)) {
-		let changed = false;
-		const result = value.map(item => {
-			const next = scrubProtocolValue(obfuscator, item, depth);
-			if (next !== item) changed = true;
-			return next;
-		});
-		return changed ? result : value;
-	}
-	if (value !== null && typeof value === "object") {
-		return deepWalkStrings(value, text => scrubProtocolString(obfuscator, text, depth));
-	}
-	return value;
+	return scrubJsonNode(obfuscator, value, depth);
 }
 
 function historyItemHasSecret(obfuscator: SecretObfuscator, item: Record<string, unknown>): boolean {
