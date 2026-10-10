@@ -162,6 +162,7 @@ import {
 } from "../runtime-mcp";
 import { createMCPFormInputHandler } from "../runtime-mcp/elicitation";
 import type { MCPLoadResult } from "../runtime-mcp/manager";
+import { omitPluginMcpNameShadows } from "../runtime-mcp/plugin-mcp-name-filter";
 import { MCP_STARTUP_WAIT_GRACE_MS } from "../runtime-mcp/startup-policy";
 import type { MCPServerConfig } from "../runtime-mcp/types";
 import {
@@ -3940,7 +3941,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const inlineExtensions: ExtensionFactory[] = [...(options.extensions ?? [])];
 		const discoveredHookExtensions: Array<{ factory: ExtensionFactory; name: string }> = [];
 		if (customTools.length > 0) {
-			inlineExtensions.push(createCustomToolsExtension(customTools));
+			inlineExtensions.push(createCustomToolsExtension(omitPluginMcpNameShadows(customTools)));
 		}
 		if (!options.disableExtensionDiscovery) {
 			try {
