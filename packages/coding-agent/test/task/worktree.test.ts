@@ -3,12 +3,16 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as natives from "@gajae-code/natives";
+import * as utils from "@gajae-code/utils";
+import { hashPath } from "@gajae-code/utils";
 import {
 	applyNestedPatches,
 	captureBaseline,
 	captureDeltaPatch,
+	cleanupIsolation,
 	ensureIsolation,
 	getGitNoIndexNullPath,
+	getRepoRoot,
 	mergeTaskBranches,
 	parseIsolationMode,
 	serializeRecoveryPatchBundle,
@@ -82,6 +86,10 @@ describe("worktree isolation helpers", () => {
 
 	it("retries isoResolve candidates when a backend is path-unavailable", async () => {
 		const { repo } = await createGitRepo();
+		const wt = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-iso-wt-"));
+		tempDirs.push(wt);
+		vi.spyOn(utils, "getWorktreesDir").mockReturnValue(wt);
+		vi.spyOn(utils, "getWorktreeDir").mockImplementation(segment => path.join(wt, segment));
 		const unavailable = new Error("ISO_UNAVAILABLE: btrfs source is not a subvolume");
 		const isoResolve = vi.spyOn(natives, "isoResolve").mockReturnValue({
 			kind: natives.IsoBackendKind.Btrfs,
@@ -105,6 +113,59 @@ describe("worktree isolation helpers", () => {
 		expect(handle.backend).toBe(natives.IsoBackendKind.Rcopy);
 		expect(handle.fellBack).toBe(true);
 		expect(handle.fallbackReason).toBe(unavailable.message);
+	});
+
+	it("keeps another session's live isolation tree when the same task id is reused", async () => {
+		const { repo } = await createGitRepo();
+		const repoRoot = await getRepoRoot(repo);
+		const id = "0-T1";
+		const wt = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-iso-wt-"));
+		tempDirs.push(wt);
+		vi.spyOn(utils, "getWorktreesDir").mockReturnValue(wt);
+		vi.spyOn(utils, "getWorktreeDir").mockImplementation(segment => path.join(wt, segment));
+		const canonical = path.join(wt, `${id}-${hashPath(repoRoot)}`);
+		const planted = path.join(canonical, "merged", "in-flight-work.ts");
+		const created = new Set<string>([canonical]);
+		await fs.mkdir(path.dirname(planted), { recursive: true });
+		await fs.writeFile(planted, "session A in-flight work\n");
+		vi.spyOn(natives, "isoResolve").mockReturnValue({
+			kind: natives.IsoBackendKind.Rcopy,
+			candidates: [natives.IsoBackendKind.Rcopy],
+			fellBack: false,
+			reason: undefined,
+		});
+		vi.spyOn(natives, "isoIsUnavailableError").mockReturnValue(false);
+		vi.spyOn(natives, "isoStop").mockResolvedValue(undefined);
+		vi.spyOn(natives, "isoStart").mockImplementation(async (_kind, _lower, merged) => {
+			const mergedDir = String(merged);
+			await fs.mkdir(mergedDir, { recursive: true });
+			await fs.writeFile(path.join(mergedDir, "in-flight-work.ts"), "live\n");
+		});
+
+		try {
+			const handleA = await ensureIsolation(repo, id);
+			const handleB = await ensureIsolation(repo, id);
+			created.add(path.dirname(handleA.mergedDir));
+			created.add(path.dirname(handleB.mergedDir));
+
+			expect(await fs.readFile(planted, "utf8")).toBe("session A in-flight work\n");
+			expect(await fs.readFile(path.join(handleA.mergedDir, "in-flight-work.ts"), "utf8")).toBe("live\n");
+			expect(await fs.readFile(path.join(handleB.mergedDir, "in-flight-work.ts"), "utf8")).toBe("live\n");
+			expect(path.dirname(handleA.mergedDir)).not.toBe(canonical);
+			expect(path.dirname(handleB.mergedDir)).not.toBe(canonical);
+			expect(handleA.mergedDir).not.toBe(handleB.mergedDir);
+
+			await cleanupIsolation(handleB);
+			expect(await fs.readFile(planted, "utf8")).toBe("session A in-flight work\n");
+			expect(await fs.readFile(path.join(handleA.mergedDir, "in-flight-work.ts"), "utf8")).toBe("live\n");
+			await expect(fs.stat(handleB.mergedDir)).rejects.toMatchObject({ code: "ENOENT" });
+
+			await cleanupIsolation(handleA);
+			expect(await fs.readFile(planted, "utf8")).toBe("session A in-flight work\n");
+			await expect(fs.stat(handleA.mergedDir)).rejects.toMatchObject({ code: "ENOENT" });
+		} finally {
+			await Promise.all([...created].map(dir => fs.rm(dir, { recursive: true, force: true })));
+		}
 	});
 
 	it("does not pop an unrelated pre-existing stash when the working tree is clean", async () => {
