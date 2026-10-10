@@ -25,6 +25,9 @@ const RETAINED_BEARER_BODY = /^\s*[A-Za-z0-9._~+/=-]{4096,}/;
  */
 export function redactCrashSecrets(text: string): string {
 	let redacted = text;
+	// Before the other rules. An `sk-` or similar prefix inside a retained bearer
+	// body would otherwise rewrite the start and hide the rest of that body.
+	redacted = redacted.replace(RETAINED_BEARER_BODY, "«redacted-auth»");
 	redacted = redacted.replace(/\b(?:Bearer|Basic|Token)\s+[A-Za-z0-9._~+/=-]{8,}/gi, "«redacted-auth»");
 	redacted = redacted.replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, "«redacted-jwt»");
 	redacted = redacted.replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "«redacted-api-key»");
@@ -79,7 +82,6 @@ export function redactCrashSecrets(text: string): string {
 		/(?<![A-Za-z0-9_])(["']?(?:api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?token|client[_-]?secret|secret[_-]?key|secret[_-]?access[_-]?key|password|passwd|authorization)["']?\s*[=:]\s*["']?)[^\s"',;}\]]{8,}/gi,
 		"$1«redacted»",
 	);
-	redacted = redacted.replace(RETAINED_BEARER_BODY, "«redacted-auth»");
 	return redacted;
 }
 

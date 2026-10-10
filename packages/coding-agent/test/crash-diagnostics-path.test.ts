@@ -191,13 +191,14 @@ describe("crash diagnostics path", () => {
 
 	it("scrubs a bearer token retained after the stderr tail drops its marker", async () => {
 		const dir = await makeTempDir();
-		const token = "A".repeat(32768);
+		const token = `sk-${"A".repeat(16)}/${"B".repeat(32748)}`;
 		const child = ptree.spawn([process.execPath, "-e", `process.stderr.write("Bearer ${token}"); process.exit(1);`]);
 		await child.wait({ allowNonZero: true });
 		const retained = child.peekStderr().trim();
 		expect(retained.includes("Bearer")).toBe(false);
 		expect(retained.length).toBeGreaterThan(4096);
-		expect(retained.endsWith("A".repeat(64))).toBe(true);
+		expect(retained.startsWith("sk-")).toBe(true);
+		expect(retained.endsWith("B".repeat(64))).toBe(true);
 
 		const crashed = await writeCrashReport(
 			{ kind: "dap", exitCode: 1, stderr: retained },
@@ -208,7 +209,8 @@ describe("crash diagnostics path", () => {
 			},
 		);
 		const report = JSON.parse(await Bun.file(crashed.path as string).text()) as { stderrPreview?: string };
-		expect(report.stderrPreview).not.toContain("A".repeat(64));
+		expect(report.stderrPreview).not.toContain("B".repeat(64));
+		expect(report.stderrPreview).not.toContain("sk-");
 		expect(report.stderrPreview).toContain("«redacted-auth»");
 
 		const withSuffix = await writeCrashReport(
@@ -220,7 +222,7 @@ describe("crash diagnostics path", () => {
 			},
 		);
 		const suffixReport = JSON.parse(await Bun.file(withSuffix.path as string).text()) as { stderrPreview?: string };
-		expect(suffixReport.stderrPreview).not.toContain("A".repeat(64));
+		expect(suffixReport.stderrPreview).not.toContain("B".repeat(64));
 		expect(suffixReport.stderrPreview).toContain("«redacted-auth»");
 		expect(suffixReport.stderrPreview).toContain("adapter exited");
 
