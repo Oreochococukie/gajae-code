@@ -201,13 +201,19 @@ export class DiscordLiveProvider implements DiscordProvider, DiscordDiagnosticPr
 				}
 			const candidates = await this.#listThreads(input.guildId, input.parentId, botUserId, context);
 			for (const candidate of candidates) {
-				const messages = await this.#request(`/channels/${candidate.id}/messages?limit=25`, {}, context);
-				if (
-					Array.isArray(messages) &&
-					messages.some(
-						message => this.#messageContent(message).includes(marker) && this.#authoredByBot(message, botUserId),
-					)
-				)
+				// A thread started from a message uses that message id. Only the parent
+				// starter counts; a later bot message that repeats the marker does not.
+				let starter: unknown;
+				try {
+					starter = await this.#request(`/channels/${input.parentId}/messages/${candidate.id}`, {}, context);
+				} catch (error) {
+					if (!(error instanceof Error) || !/^Discord API request failed \(\d+\)$/.test(error.message))
+						throw error;
+					continue;
+				}
+				const starterId = this.#string(starter, "id");
+				if (starterId !== undefined && starterId !== candidate.id) continue;
+				if (this.#messageContent(starter).includes(marker) && this.#authoredByBot(starter, botUserId))
 					return candidate;
 			}
 			return null;

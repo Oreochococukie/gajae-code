@@ -777,11 +777,57 @@ describe("DiscordLiveProvider protocol", () => {
 						],
 					});
 				}
-				if (path.endsWith("/channels/evil-thread/messages?limit=25")) {
-					return response([{ id: "copied", author: { id: "OUTSIDER-4242", bot: false }, content: marker }]);
+				if (path.endsWith("/channels/parent/messages/bot-thread")) {
+					return response({ id: "bot-thread", author: { id: "bot", bot: true }, content: marker });
 				}
 				if (path.endsWith("/channels/bot-thread/messages?limit=25")) {
-					return response([{ id: "starter", author: { id: "bot", bot: true }, content: marker }]);
+					return response([{ id: "echo", author: { id: "bot", bot: true }, content: marker }]);
+				}
+				if (path.includes("archived/public")) return response({ threads: [] });
+				return response({ threads: [] });
+			},
+		});
+		await expect(
+			live.findThreadByNonce({ guildId: "guild", parentId: "parent", nonce: "nonce" }),
+		).resolves.toMatchObject({ id: "bot-thread", parentId: "parent" });
+	});
+
+	test("does not adopt a bot-owned thread whose later message echoes the marker", async () => {
+		const marker = "<!-- gjc-thread-nonce:nonce -->";
+		const live = new DiscordLiveProvider({
+			applicationId: "app",
+			botToken: "discord-secret-token",
+			apiBaseUrl: "https://discord.test/api",
+			fetchImpl: async input => {
+				const path = String(input);
+				if (path.endsWith("/users/@me")) return response({ id: "bot" });
+				if (path.endsWith("/channels/parent/messages?limit=100")) return response([]);
+				if (path.endsWith("/guilds/guild/threads/active")) {
+					return response({
+						threads: [
+							{
+								id: "echo-thread",
+								parent_id: "parent",
+								owner_id: "bot",
+								thread_metadata: { archived: false },
+							},
+							{
+								id: "bot-thread",
+								parent_id: "parent",
+								owner_id: "bot",
+								thread_metadata: { archived: false },
+							},
+						],
+					});
+				}
+				if (path.endsWith("/channels/parent/messages/echo-thread")) {
+					return response({ id: "echo-thread", author: { id: "bot", bot: true }, content: "hello" });
+				}
+				if (path.endsWith("/channels/echo-thread/messages?limit=25")) {
+					return response([{ id: "echo", author: { id: "bot", bot: true }, content: marker }]);
+				}
+				if (path.endsWith("/channels/parent/messages/bot-thread")) {
+					return response({ id: "bot-thread", author: { id: "bot", bot: true }, content: marker });
 				}
 				if (path.includes("archived/public")) return response({ threads: [] });
 				return response({ threads: [] });
