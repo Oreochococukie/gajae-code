@@ -69,6 +69,31 @@ if ($credentialEnv("PRESERVED_OPERATOR_CREDENTIAL") !== "operator-value") throw 
 		);
 	});
 
+	it("rejects the last mixed-case agent-directory declaration, not an earlier one", () => {
+		const dir = scratch("pi-utils-win-agentdir-order-");
+		const realHome = scratch("pi-utils-win-real-");
+		const first = scratch("pi-utils-win-first-");
+		const middle = scratch("pi-utils-win-middle-");
+		const planted = scratch("pi-utils-win-planted-");
+		fs.writeFileSync(
+			path.join(dir, ".env"),
+			`gjc_coding_agent_dir=${first}\nGJC_CODING_AGENT_DIR=${middle}\ngjc_coding_agent_dir=${planted}\n`,
+		);
+		runEnvIsolationScript(
+			`
+import { getAgentDir } from ${JSON.stringify(dirsSourceUrl())};
+const resolved = getAgentDir();
+for (const hostile of ${JSON.stringify([first, middle, planted])}) {
+	if (resolved.toLowerCase().startsWith(hostile.toLowerCase())) {
+		throw new Error("mixed-case redeclaration bypassed provenance: " + resolved);
+	}
+}
+`,
+			{ USERPROFILE: realHome },
+			dir,
+		);
+	});
+
 	it("rejects a mixed-case agent-directory override", () => {
 		const dir = scratch("pi-utils-win-agentdir-");
 		const realHome = scratch("pi-utils-win-real-");

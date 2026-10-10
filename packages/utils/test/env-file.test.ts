@@ -104,6 +104,18 @@ describe("parseEnvFileContent Bun quote and newline parsing", () => {
 		expect(parseEnvFileContent("\uFEFFGJC_CODING_AGENT_DIR=/tmp/evil-bom\n").GJC_CODING_AGENT_DIR).toBe(
 			"/tmp/evil-bom",
 		);
+		expect(parseEnvFileContent('KEY="a\\\rb"\n').KEY).toBe("a\\\rb");
+		expect(parseEnvFileContent('KEY="a\\\r\nb"\n').KEY).toBe("a\\\r\nb");
+		expect(parseEnvFileContent('KEY="a\rb"\n').KEY).toBe("a\nb");
+		expect(parseEnvFileContent("KEY='a\\\rb'\n").KEY).toBe("a\\\nb");
+	});
+
+	test.skipIf(process.platform === "win32")("keeps case-distinct keys on POSIX", () => {
+		const parsed = parseEnvFileContent(
+			"gjc_coding_agent_dir=first\nGJC_CODING_AGENT_DIR=middle\ngjc_coding_agent_dir=planted\n",
+		);
+		expect(parsed.gjc_coding_agent_dir).toBe("planted");
+		expect(parsed.GJC_CODING_AGENT_DIR).toBe("middle");
 	});
 });
 
@@ -186,6 +198,14 @@ describe("getAgentDir quote provenance", () => {
 		fs.writeFileSync(path.join(cwd, ".env"), 'PI_CODING_AGENT_DIR="/tmp/planted-pi\\n"\n');
 		const agentDir = await printedAgentDir(cwd, { HOME: home });
 		expect(agentDir.includes("planted-pi")).toBe(false);
+	});
+
+	test("does not follow a backslash and physical CR planted inside double quotes", async () => {
+		const cwd = tempDir("gjc-env-quote-cr-");
+		const home = tempDir("gjc-env-quote-home-");
+		fs.writeFileSync(path.join(cwd, ".env"), 'GJC_CODING_AGENT_DIR="/tmp/planted-cr\\\r"\n');
+		const agentDir = await printedAgentDir(cwd, { HOME: home });
+		expect(agentDir.includes("planted-cr")).toBe(false);
 	});
 
 	test("does not follow a trailing NBSP that Bun keeps on the project value", async () => {

@@ -123,15 +123,6 @@ export function parseEnvFile(filePath: string): Record<string, string> {
 	}
 }
 
-/**
- * Bun treats CR, LF, and CRLF as line breaks, including a carriage return inside
- * quotes. Normalize before decoding, so a quoted `\r` escape is still a carriage
- * return rather than another line break.
- */
-function normalizeDotenvNewlines(content: string): string {
-	return content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-}
-
 function isEnvKeyStart(char: string | undefined): boolean {
 	return char !== undefined && ((char >= "A" && char <= "Z") || (char >= "a" && char <= "z") || char === "_");
 }
@@ -141,8 +132,15 @@ function isEnvKeyContinue(char: string | undefined): boolean {
 }
 
 function indexAfterLine(text: string, index: number): number {
-	const end = text.indexOf("\n", index);
-	return end === -1 ? text.length : end + 1;
+	let cursor = index;
+	while (cursor < text.length && text[cursor] !== "\n" && text[cursor] !== "\r") cursor++;
+	if (text[cursor] === "\r") {
+		cursor++;
+		if (text[cursor] === "\n") cursor++;
+		return cursor;
+	}
+	if (text[cursor] === "\n") return cursor + 1;
+	return text.length;
 }
 
 function skipBunDotenvWhitespace(text: string, index: number): number {
@@ -178,20 +176,56 @@ function findClosingQuote(text: string, start: number, quote: '"' | "'" | "`"): 
 	return -1;
 }
 
-/** Inside double quotes, only `\n` and `\r` are escapes. Other pairs keep the backslash. */
+/** A bare CR or CRLF inside a quote is one line feed. An escaped CR is not bare. */
+function pushBareCarriageReturn(raw: string, index: number, out: string[]): number {
+	if (raw[index + 1] === "\n") return index + 1;
+	out.push("\n");
+	return index;
+}
+
+/**
+ * Inside double quotes, only the letters `\n` and `\r` are escapes. A backslash
+ * before a physical CR keeps both bytes: folding that CR to LF first would
+ * disagree with Bun and let the project value through `trustedValue`.
+ */
 function decodeDoubleQuoted(raw: string): string {
 	const out: string[] = [];
 	for (let index = 0; index < raw.length; index++) {
 		const char = raw[index];
-		if (char !== "\\" || index + 1 >= raw.length) {
-			if (char !== undefined) out.push(char);
+		if (char === "\\") {
+			if (index + 1 >= raw.length) {
+				out.push("\\");
+				break;
+			}
+			const next = raw[index + 1];
+			if (next === "n") out.push("\n");
+			else if (next === "r") out.push("\r");
+			else if (next !== undefined) out.push("\\", next);
+			index++;
 			continue;
 		}
-		const next = raw[index + 1];
-		if (next === "n") out.push("\n");
-		else if (next === "r") out.push("\r");
-		else if (next !== undefined) out.push("\\", next);
-		index++;
+		if (char === "\r") {
+			index = pushBareCarriageReturn(raw, index, out);
+			continue;
+		}
+		if (char !== undefined) out.push(char);
+	}
+	return out.join("");
+}
+
+/**
+ * Single quotes and backticks keep backslashes. They do not protect a physical
+ * CR, which Bun still folds to a line feed.
+ */
+function decodeLiteralQuoted(raw: string): string {
+	const out: string[] = [];
+	for (let index = 0; index < raw.length; index++) {
+		const char = raw[index];
+		if (char === "\r") {
+			index = pushBareCarriageReturn(raw, index, out);
+			continue;
+		}
+		if (char !== undefined) out.push(char);
 	}
 	return out.join("");
 }
@@ -204,20 +238,19 @@ function readDotenvValue(text: string, index: number): { text: string; next: num
 		if (close !== -1) {
 			const raw = text.slice(quotedAt + 1, close);
 			return {
-				text: opener === '"' ? decodeDoubleQuoted(raw) : raw,
+				text: opener === '"' ? decodeDoubleQuoted(raw) : decodeLiteralQuoted(raw),
 				next: indexAfterLine(text, close + 1),
 			};
 		}
 	}
 	let end = index;
 	while (end < text.length && text[end] !== "#" && text[end] !== "\n" && text[end] !== "\r") end++;
-	const next = end >= text.length ? text.length : text[end] === "\n" ? end + 1 : indexAfterLine(text, end);
-	return { text: trimBunDotenvWhitespace(text.slice(index, end)), next };
+	return { text: trimBunDotenvWhitespace(text.slice(index, end)), next: indexAfterLine(text, end) };
 }
 
 /** Parse dotenv content that has already been read from a trusted file. */
 export function parseEnvFileContent(content: string): Record<string, string> {
-	const text = normalizeDotenvNewlines(stripLeadingUtf8Bom(content));
+	const text = stripLeadingUtf8Bom(content);
 	const result: Record<string, string> = {};
 	const length = text.length;
 	let index = 0;
@@ -263,7 +296,10 @@ export function parseEnvFileContent(content: string): Record<string, string> {
 		index = value.next;
 		// A newline is a real snapshot value. Skipping the key here would fail open.
 		if (!isSafeEnvValue(value.text)) continue;
-		result[key] = value.text;
+		// Windows env names are case-insensitive. Folding here, in file order,
+		// keeps the last declaration. Folding later via Object.entries lets an
+		// earlier differently-cased key overwrite it.
+		result[canonicalEnvKey(key)] = value.text;
 	}
 
 	return result;
