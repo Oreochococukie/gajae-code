@@ -678,6 +678,8 @@ function scrubProtocolString(obfuscator: SecretObfuscator, value: string, depth 
 	if (depth < 4) {
 		const rewritten = mapJsonStrings(value, decoded => scrubProtocolString(obfuscator, decoded, depth + 1));
 		if (rewritten !== undefined) {
+			const numbered = redactJsonNumberSecrets(obfuscator, rewritten);
+			if (numbered !== rewritten) return numbered;
 			if (rewritten !== value) return rewritten;
 			if (jsonSyntaxContainsSecret(obfuscator, value, splitJsonPieces(value) ?? [], true))
 				return jsonSafeFallback(value);
@@ -813,10 +815,38 @@ function mapJsonStrings(input: string, mapDecoded: (decoded: string) => string):
 			continue;
 		}
 		const next = mapDecoded(piece.decoded);
-		if (next !== piece.decoded) changed = true;
-		rebuilt += JSON.stringify(next);
+		if (next !== piece.decoded) {
+			changed = true;
+			rebuilt += JSON.stringify(next);
+		} else {
+			rebuilt += piece.text;
+		}
 	}
 	return changed ? rebuilt : input;
+}
+
+const JSON_NUMBER = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
+
+/** A configured secret that is a JSON number is replaced. Other number lexemes stay byte-for-byte. */
+function redactJsonNumberSecrets(obfuscator: SecretObfuscator, text: string): string {
+	const pieces = splitJsonPieces(text);
+	if (!pieces) return text;
+	let changed = false;
+	let rebuilt = "";
+	for (const piece of pieces) {
+		if (piece.kind === "str") {
+			rebuilt += piece.text;
+			continue;
+		}
+		JSON_NUMBER.lastIndex = 0;
+		rebuilt += piece.text.replace(JSON_NUMBER, number => {
+			if (!obfuscator.hasUnintentionalSecret(number)) return number;
+			changed = true;
+			const next = obfuscator.scrubOutbound(number);
+			return /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(next) ? next : JSON.stringify(next);
+		});
+	}
+	return changed ? rebuilt : text;
 }
 
 /** A secret in raw JSON syntax, not one that exists only because an escape looks like it. */

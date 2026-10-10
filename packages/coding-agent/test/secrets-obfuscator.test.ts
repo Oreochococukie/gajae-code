@@ -1787,7 +1787,9 @@ describe("obfuscateMessages", () => {
 		expect(String(call.arguments.body)).not.toContain(leaf);
 		expect(String(call.arguments.escaped)).toBe(escaped);
 		expect(JSON.parse(String(call.arguments.escaped))[newlineValue]).toBe(newlineValue);
-		expect(String(call.arguments.literal)).not.toContain(slashN);
+		const literalValue = JSON.parse(String(call.arguments.literal)).v;
+		expect(literalValue).not.toContain(slashN);
+		expect(literalValue).toContain("#GJC1_");
 		const restored = obfuscator.deobfuscateObject(call.arguments);
 		expect(String(restored.body)).toContain(integer);
 		expect(String(restored.body)).toContain(leaf);
@@ -1799,6 +1801,45 @@ describe("obfuscateMessages", () => {
 		expect(historyCall.arguments).not.toContain(leaf);
 		expect(JSON.parse(historyCall.arguments).id.toString()).not.toBe(integer);
 		expect(historyCall.arguments.includes(integer)).toBe(true);
+		const pin = "123456789";
+		const pinObfuscator = new SecretObfuscator(
+			[
+				{ type: "plain", content: pin, mode: "replace", replacement: "MASKED_PIN" },
+				{ type: "plain", content: leaf, mode: "replace", replacement: "MASKED_TOKEN" },
+			],
+			TEST_KEY,
+		);
+		const pinDocument = `{"pin":${pin},"note":"${leaf}"}`;
+		const pinUser: UserMessage = { role: "user", content: pinDocument, timestamp: 4 };
+		const k1 = String.raw`{"token":"${leaf}","path":"a\/b"}`;
+		const k2 = `{"token":"${leaf}","path":"a/b"}`;
+		expect(k1).not.toBe(k2);
+		const keyed: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call-keys", name: "bash", arguments: { [k1]: "left", [k2]: "right" } }],
+			api: "openai-responses",
+			provider: "openai",
+			model: "gpt-4.1-mini",
+			usage,
+			stopReason: "toolUse",
+			timestamp: 5,
+		};
+		const [obfuscatedPin] = obfuscateMessages(pinObfuscator, [pinUser]);
+		const [obfuscatedKeys] = obfuscateMessages(obfuscator, [keyed]);
+		if (obfuscatedPin?.role !== "user" || typeof obfuscatedPin.content !== "string") {
+			throw new Error("expected pin user");
+		}
+		expect(obfuscatedPin.content).not.toContain(pin);
+		expect(obfuscatedPin.content).not.toContain(leaf);
+		expect(obfuscatedPin.content).toContain("MASKED_PIN");
+		expect(obfuscatedPin.content).toContain("MASKED_TOKEN");
+		expect(JSON.parse(obfuscatedPin.content).pin).toBe("MASKED_PIN");
+		if (obfuscatedKeys?.role !== "assistant") throw new Error("expected keyed assistant");
+		const keyedCall = obfuscatedKeys.content.find(block => block.type === "toolCall");
+		if (keyedCall?.type !== "toolCall") throw new Error("expected keyed call");
+		const restoredKeys = obfuscator.deobfuscateObject(keyedCall.arguments);
+		expect(restoredKeys[k1]).toBe("left");
+		expect(restoredKeys[k2]).toBe("right");
 	});
 });
 
