@@ -98,13 +98,24 @@ describe("Foundry custom header trust boundary", () => {
 		expect(resolved.route).toBeNull();
 	});
 
-	it("ignores a double-quoted project header whose escapes Bun already decoded", async () => {
-		const dir = projectDir('ANTHROPIC_CUSTOM_HEADERS="user-id: repo-quoted\\nx-route: repo-route"\n');
+	it("ignores a quoted project header", async () => {
+		const dir = projectDir('ANTHROPIC_CUSTOM_HEADERS="user-id: repo-quoted, x-route: repo-route"\n');
 		const resolved = await resolveIn(dir);
 		expect(resolved.error).toBeNull();
 		expect(resolved.authorization).toBe("Bearer foundry-token");
 		expect(resolved.userId).toBeNull();
 		expect(resolved.route).toBeNull();
+	});
+
+	it("keeps an operator newline header when the project single-quotes a backslash-n", async () => {
+		const dir = projectDir("ANTHROPIC_CUSTOM_HEADERS='user-id: alice\\nx-route: engineering'\n");
+		const resolved = await resolveIn(dir, {
+			ANTHROPIC_CUSTOM_HEADERS: "user-id: alice\nx-route: engineering",
+		});
+		expect(resolved.error).toBeNull();
+		expect(resolved.authorization).toBe("Bearer foundry-token");
+		expect(resolved.userId).toBe("alice");
+		expect(resolved.route).toBe("engineering");
 	});
 
 	it("keeps operator headers the project does not declare", async () => {
