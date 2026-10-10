@@ -10,6 +10,7 @@ import { resolveGjcSessionForRead } from "../gjc-runtime/session-resolution";
 import { ModeStateSchema } from "../gjc-runtime/state-schema";
 import { getSkillManifest } from "../gjc-runtime/workflow-manifest";
 import { LocalProtocolHandler, resolveLocalUrlToPath } from "../internal-urls/local-protocol";
+import { isGithubReadOnlyArgs } from "../tools/github-side-effect";
 import { resolveToCwd } from "../tools/path-utils";
 import { ToolError } from "../tools/tool-errors";
 import { listActiveSkills, readVisibleSkillActiveState, type SkillActiveEntry } from "./active-state";
@@ -38,7 +39,14 @@ function planningPhaseBlockMessage(skill: CanonicalGjcWorkflowSkill): string {
 	return DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE;
 }
 
-const BLOCKED_TOOL_NAMES = new Set(["edit", "write", "ast_edit", "bash"]);
+/** Tools whose execute path can mutate product state. `github` is included so side-effect ops share this guard. */
+export const WORKFLOW_MUTATION_TOOL_NAMES = ["edit", "write", "ast_edit", "bash", "github"] as const;
+
+const BLOCKED_TOOL_NAMES = new Set<string>(WORKFLOW_MUTATION_TOOL_NAMES);
+
+export function isWorkflowMutationTool(name: string): boolean {
+	return BLOCKED_TOOL_NAMES.has(name);
+}
 /**
  * Only `/dev/null` is exempt. `/dev/stdout`, `/dev/stderr`, and `/dev/fd/<n>` are descriptor
  * aliases: `exec 1<>src/product.ts; printf x >/dev/stdout` reaches a real repository file
@@ -1607,11 +1615,22 @@ function extractBashTargets(args: unknown, depth = 0): ExtractedTargets {
 	}
 	return targets;
 }
+/**
+ * Read-only github ops extract no mutation. Every other op fails closed during
+ * planning: remote push, PR creation, and worktree/config writes are not a
+ * filesystem path the planning allowlist can clear.
+ */
+function extractGithubTargets(args: unknown): ExtractedTargets {
+	if (isGithubReadOnlyArgs(args)) return { paths: [], unknown: false };
+	return { paths: [], unknown: true, explicitMutation: true };
+}
+
 function extractTargets(tool: ToolWithEditMode, args: unknown): ExtractedTargets {
 	if (tool.name === "write") return extractWriteTargets(args);
 	if (tool.name === "ast_edit") return extractAstEditTargets(args);
 	if (tool.name === "edit") return extractEditTargets(args, tool);
 	if (tool.name === "bash") return extractBashTargets(args);
+	if (tool.name === "github") return extractGithubTargets(args);
 	return { paths: [], unknown: true };
 }
 
