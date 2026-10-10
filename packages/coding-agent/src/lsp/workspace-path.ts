@@ -12,6 +12,131 @@ function escapes(root: string, candidate: string): boolean {
 	return relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
 }
 
+/**
+ * Split a workspace path without collapsing `..`.
+ * Windows `file://` URIs use `/` while `path.sep` is `\`, so both separators count.
+ */
+export function splitAbsolute(
+	filePath: string,
+	pathApi: Pick<typeof path, "parse" | "sep"> = path,
+): { root: string; parts: string[] } {
+	const root = pathApi.parse(filePath).root;
+	const parts = filePath.slice(root.length).split(/[\\/]/).filter(Boolean);
+	return { root, parts };
+}
+
+function toPlatformSep(filePath: string): string {
+	return path.sep === "\\" ? filePath.replace(/\//g, "\\") : filePath;
+}
+
+/** Absolute path against `cwd`. `..` stays in the string so a symlink can be followed first. */
+function lexicalAbsolute(filePath: string, cwd: string): string {
+	if (path.isAbsolute(filePath)) return toPlatformSep(filePath);
+	const base = cwd.endsWith("/") || cwd.endsWith("\\") ? cwd : `${cwd}${path.sep}`;
+	return toPlatformSep(`${base}${filePath}`);
+}
+
+function joinRaw(parent: string, child: string): string {
+	if (parent.endsWith("/") || parent.endsWith("\\")) return parent + child;
+	return parent + path.sep + child;
+}
+
+function joinRoot(root: string, parts: string[]): string {
+	if (parts.length === 0) return root || path.sep;
+	if (root.endsWith("/") || root.endsWith("\\")) return root + parts.join(path.sep);
+	if (root.length === 0) return parts.join(path.sep);
+	return `${root}${path.sep}${parts.join(path.sep)}`;
+}
+
+function parentDir(filePath: string): string {
+	const { root, parts } = splitAbsolute(filePath);
+	return joinRoot(root, parts.slice(0, -1));
+}
+
+function isSameOrInside(child: string, parent: string): boolean {
+	if (child === parent) return true;
+	const prefix = parent.endsWith("/") || parent.endsWith("\\") ? parent : parent + path.sep;
+	return child.startsWith(prefix);
+}
+
+type Move = { from: string; to: string; linkText: string | null };
+
+function liveLocation(postPath: string, moves: Move[]): string {
+	let current = postPath;
+	for (let i = moves.length - 1; i >= 0; i--) {
+		const move = moves[i];
+		if (isSameOrInside(current, move.to)) current = move.from + current.slice(move.to.length);
+	}
+	return current;
+}
+
+function isMovedAway(postPath: string, moves: Move[]): boolean {
+	let away = false;
+	for (const move of moves) {
+		if (isSameOrInside(postPath, move.from)) away = true;
+		if (isSameOrInside(postPath, move.to)) away = false;
+	}
+	return away;
+}
+
+function absoluteLink(linkText: string, parent: string): string {
+	const text = toPlatformSep(linkText);
+	return path.isAbsolute(text) ? text : joinRaw(parent, text);
+}
+
+async function symlinkText(postPath: string, moves: Move[]): Promise<string | null> {
+	const direct = [...moves].reverse().find(move => move.to === postPath);
+	if (direct) return direct.linkText;
+	if (isMovedAway(postPath, moves)) return null;
+	try {
+		const stat = await fs.lstat(liveLocation(postPath, moves));
+		if (!stat.isSymbolicLink()) return null;
+		return await fs.readlink(liveLocation(postPath, moves));
+	} catch (error) {
+		if (isEnoent(error)) return null;
+		throw error;
+	}
+}
+
+/** Where `filePath` will sit after `moves`, following relative symlinks from their new parents. */
+async function locate(filePath: string, moves: Move[], depth: number): Promise<string> {
+	if (depth > 40) throw new ToolError(`LSP edit escapes the workspace: ${filePath}`);
+	const { root, parts } = splitAbsolute(filePath);
+	let cursor = root || path.sep;
+	for (let i = 0; i < parts.length; i++) {
+		const part = parts[i];
+		if (part === ".") continue;
+		if (part === "..") {
+			const link = await symlinkText(cursor, moves);
+			if (link !== null) {
+				cursor = parentDir(await locate(absoluteLink(link, parentDir(cursor)), moves, depth + 1));
+			} else if (moves.some(move => isSameOrInside(cursor, move.to))) {
+				// A renamed directory's `..` is its new parent, not the old one still on disk.
+				cursor = parentDir(cursor);
+			} else {
+				const live = isMovedAway(cursor, moves) ? cursor : liveLocation(cursor, moves);
+				try {
+					cursor = parentDir(await fs.realpath(live));
+				} catch (error) {
+					if (!isEnoent(error)) throw error;
+					cursor = parentDir(cursor);
+				}
+			}
+			continue;
+		}
+		const next = joinRaw(cursor, part);
+		const link = await symlinkText(next, moves);
+		if (link !== null) {
+			const rest = parts
+				.slice(i + 1)
+				.reduce((acc, piece) => joinRaw(acc, piece), absoluteLink(link, parentDir(next)));
+			return locate(rest, moves, depth + 1);
+		}
+		cursor = next;
+	}
+	return cursor;
+}
+
 /** Resolve a missing path through the nearest existing ancestor. */
 async function canonicalize(filePath: string): Promise<string> {
 	try {
@@ -44,12 +169,16 @@ async function canonicalize(filePath: string): Promise<string> {
 	}
 }
 
+export async function canonicalWorkspacePath(cwd: string, filePath: string): Promise<string> {
+	return canonicalize(lexicalAbsolute(filePath, cwd));
+}
+
 export async function assertInsideWorkspace(cwd: string, filePath: string): Promise<void> {
 	if (cwd.length === 0 || filePath.length === 0) {
 		throw new ToolError(`LSP edit escapes the workspace: ${filePath}`);
 	}
 	const root = await fs.realpath(cwd);
-	const candidate = await canonicalize(filePath);
+	const candidate = await canonicalize(lexicalAbsolute(filePath, cwd));
 	if (escapes(root, candidate)) {
 		throw new ToolError(`LSP edit escapes the workspace: ${filePath}`);
 	}
@@ -59,39 +188,15 @@ export async function assertInsideWorkspace(cwd: string, filePath: string): Prom
  * Real directory that contains the final directory entry. `..` is applied after
  * following a symlink, so `hop/../link.ts` is not collapsed to a lexical parent.
  */
-async function directoryContainingEntry(filePath: string): Promise<string> {
-	const absolute = path.isAbsolute(filePath) ? filePath : path.resolve(filePath);
-	const root = path.parse(absolute).root;
-	const parts = absolute.slice(root.length).split(path.sep).filter(Boolean);
-	let cursor = root;
-	for (const part of parts.slice(0, -1)) {
-		if (part === ".") continue;
-		if (part === "..") {
-			try {
-				cursor = path.dirname(await fs.realpath(cursor));
-			} catch (error) {
-				if (!isEnoent(error)) throw error;
-				cursor = path.dirname(cursor);
-			}
-			continue;
-		}
-		const next = path.join(cursor, part);
-		let stat: Awaited<ReturnType<typeof fs.lstat>>;
-		try {
-			stat = await fs.lstat(next);
-		} catch (error) {
-			if (!isEnoent(error)) throw error;
-			cursor = next;
-			continue;
-		}
-		cursor = stat.isSymbolicLink() ? await fs.realpath(next) : next;
-	}
-	return cursor;
+async function directoryContainingEntry(filePath: string, cwd: string): Promise<string> {
+	const absolute = lexicalAbsolute(filePath, cwd);
+	const { root, parts } = splitAbsolute(absolute);
+	return locate(joinRoot(root, parts.slice(0, -1)), [], 0);
 }
 
 /** The directory entry itself must sit inside the workspace, not only its real target. */
 export async function assertDirectoryEntryInsideWorkspace(cwd: string, filePath: string): Promise<void> {
-	await assertInsideWorkspace(cwd, await directoryContainingEntry(filePath));
+	await assertInsideWorkspace(cwd, await directoryContainingEntry(filePath, cwd));
 }
 
 /** Real content and the directory entry that names it must both stay inside the workspace. */
@@ -106,9 +211,66 @@ export async function assertRenamePaths(cwd: string, source: string, dest: strin
 	await assertWorkspaceTarget(cwd, dest);
 }
 
+export type PlannedResource =
+	| { kind: "create"; filePath: string }
+	| { kind: "rename"; oldPath: string; newPath: string }
+	| { kind: "delete"; filePath: string };
+
+/**
+ * Reject a batch whose own earlier rename would make a later path leave the workspace.
+ * The check runs before any write, so a rejected later target does not leave earlier edits applied.
+ */
+export async function assertBatchStaysInside(cwd: string, ops: PlannedResource[]): Promise<void> {
+	if (ops.length === 0) return;
+	const root = await fs.realpath(cwd);
+	const moves: Move[] = [];
+	const check = async (filePath: string) => {
+		const located = await locate(lexicalAbsolute(filePath, cwd), moves, 0);
+		const candidate = await canonicalize(located);
+		if (escapes(root, candidate)) throw new ToolError(`LSP edit escapes the workspace: ${filePath}`);
+	};
+	for (const op of ops) {
+		if (op.kind === "rename") {
+			await check(op.oldPath);
+			await check(op.newPath);
+			const from = lexicalAbsolute(op.oldPath, cwd);
+			const to = lexicalAbsolute(op.newPath, cwd);
+			let linkText: string | null = null;
+			try {
+				const stat = await fs.lstat(liveLocation(from, moves));
+				if (stat.isSymbolicLink()) linkText = await fs.readlink(liveLocation(from, moves));
+			} catch (error) {
+				if (!isEnoent(error)) throw error;
+			}
+			moves.push({ from, to, linkText });
+			continue;
+		}
+		await check(op.filePath);
+	}
+}
+
+/**
+ * Path the kernel can rename. A literal `missing/..` segment does not exist, so use the
+ * canonical file after the containment check has already walked the original spelling.
+ */
+async function renameOperand(filePath: string, cwd: string): Promise<string> {
+	const absolute = lexicalAbsolute(filePath, cwd);
+	try {
+		await fs.lstat(absolute);
+		return absolute;
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+		return canonicalize(absolute);
+	}
+}
+
 /** Rename only after both real paths and both directory entries stay inside the workspace. */
 export async function renameInsideWorkspace(cwd: string, source: string, dest: string): Promise<void> {
-	await assertRenamePaths(cwd, source, dest);
-	await fs.mkdir(path.dirname(dest), { recursive: true });
-	await fs.rename(source, dest);
+	const sourceAbs = lexicalAbsolute(source, cwd);
+	const destAbs = lexicalAbsolute(dest, cwd);
+	await assertRenamePaths(cwd, sourceAbs, destAbs);
+	const sourceOp = await renameOperand(source, cwd);
+	const destOp = await renameOperand(dest, cwd);
+	await fs.mkdir(parentDir(destOp), { recursive: true });
+	await fs.rename(sourceOp, destOp);
 }

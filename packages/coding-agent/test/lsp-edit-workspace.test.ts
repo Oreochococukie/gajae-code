@@ -12,6 +12,7 @@ import {
 	assertDirectoryEntryInsideWorkspace,
 	assertInsideWorkspace,
 	renameInsideWorkspace,
+	splitAbsolute,
 } from "../src/lsp/workspace-path";
 import type { ToolSession } from "../src/tools";
 
@@ -168,11 +169,18 @@ describe("assertInsideWorkspace", () => {
 		const workspace = await mkdtemp(path.join(tmpdir(), "lsp-dotdot-"));
 		const source = path.join(workspace, "a.ts");
 		await writeFile(source, "ok");
-		const viaMissing = path.join(workspace, "missing", "..", "a.ts");
+		const viaMissing = `${workspace}${path.sep}missing${path.sep}..${path.sep}a.ts`;
+		expect(viaMissing.includes(`${path.sep}missing${path.sep}..${path.sep}`)).toBe(true);
 		const dest = path.join(workspace, "b.ts");
 		await expect(renameInsideWorkspace(workspace, viaMissing, dest)).resolves.toBeUndefined();
 		expect(await readFile(dest, "utf8")).toBe("ok");
 		await expect(lstat(source)).rejects.toMatchObject({ code: "ENOENT" });
+	});
+
+	it("treats a Windows slash file path as inside its drive directory", () => {
+		const split = splitAbsolute("C:/ws/a.ts", path.win32);
+		expect(split.root).toBe("C:/");
+		expect(split.parts.slice(0, -1)).toEqual(["ws"]);
 	});
 
 	it("renames into a directory that does not exist yet", async () => {
@@ -450,4 +458,148 @@ describe("applyWorkspaceEdit containment", () => {
 		expect(await readFile(second, "utf8")).toBe("delta\n");
 		expect(applied).toHaveLength(2);
 	});
+
+	it("applies both edits when two URI spellings name the same file", async () => {
+		const workspace = await mkdtemp(path.join(tmpdir(), "lsp-alias-"));
+		const file = path.join(workspace, "a.ts");
+		await writeFile(file, "ab\n");
+		const plain = fileToUri(file);
+		const encoded = plain.replace(/a\.ts$/, "%61.ts");
+		expect(encoded).not.toBe(plain);
+		const applied = await applyWorkspaceEdit(
+			{
+				changes: {
+					[plain]: [
+						{
+							range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+							newText: "A",
+						},
+					],
+					[encoded]: [
+						{
+							range: { start: { line: 0, character: 1 }, end: { line: 0, character: 2 } },
+							newText: "B",
+						},
+					],
+				},
+			},
+			workspace,
+		);
+		expect(await readFile(file, "utf8")).toBe("AB\n");
+		expect(applied).toHaveLength(1);
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"does not follow a relative symlink that an earlier rename points outside",
+		async () => {
+			const root = await mkdtemp(path.join(tmpdir(), "lsp-relink-"));
+			const workspace = path.join(root, "ws");
+			const outside = path.join(root, "safe");
+			await mkdir(path.join(workspace, "deep"), { recursive: true });
+			await mkdir(path.join(workspace, "safe"), { recursive: true });
+			await mkdir(outside);
+			await symlink("../safe", path.join(workspace, "deep", "link"));
+			const link = path.join(workspace, "deep", "link");
+			const moved = path.join(workspace, "link");
+			await expect(
+				applyWorkspaceEdit(
+					{
+						documentChanges: [
+							{ kind: "rename", oldUri: fileToUri(link), newUri: fileToUri(moved) },
+							{ kind: "create", uri: fileToUri(path.join(moved, "new.txt")) },
+						],
+					},
+					workspace,
+				),
+			).rejects.toThrow(/escapes the workspace/);
+			expect((await lstat(link)).isSymbolicLink()).toBe(true);
+			await expect(lstat(moved)).rejects.toMatchObject({ code: "ENOENT" });
+			await expect(lstat(path.join(outside, "new.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"does not follow a relative symlink inside a directory renamed by the same edit",
+		async () => {
+			const root = await mkdtemp(path.join(tmpdir(), "lsp-nested-link-"));
+			const workspace = path.join(root, "ws");
+			const outside = path.join(root, "data");
+			await mkdir(path.join(workspace, "a", "deep"), { recursive: true });
+			await mkdir(path.join(workspace, "data"), { recursive: true });
+			await mkdir(outside);
+			const sourceDir = path.join(workspace, "a", "deep");
+			await symlink("../../data", path.join(sourceDir, "inner"));
+			const destDir = path.join(workspace, "deep");
+			await expect(
+				applyWorkspaceEdit(
+					{
+						documentChanges: [
+							{ kind: "rename", oldUri: fileToUri(sourceDir), newUri: fileToUri(destDir) },
+							{ kind: "create", uri: fileToUri(path.join(destDir, "inner", "new.txt")) },
+						],
+					},
+					workspace,
+				),
+			).rejects.toThrow(/escapes the workspace/);
+			expect((await lstat(path.join(sourceDir, "inner"))).isSymbolicLink()).toBe(true);
+			await expect(lstat(destDir)).rejects.toMatchObject({ code: "ENOENT" });
+			await expect(lstat(path.join(outside, "new.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"writes through a relative symlink when the rename keeps the target inside",
+		async () => {
+			const workspace = await mkdtemp(path.join(tmpdir(), "lsp-relink-ok-"));
+			await mkdir(path.join(workspace, "sub"));
+			await mkdir(path.join(workspace, "data"));
+			const link = path.join(workspace, "sub", "link");
+			await symlink("../data", link);
+			const moved = path.join(workspace, "sub2", "link");
+			await applyWorkspaceEdit(
+				{
+					documentChanges: [
+						{ kind: "rename", oldUri: fileToUri(link), newUri: fileToUri(moved) },
+						{ kind: "create", uri: fileToUri(path.join(moved, "new.txt")) },
+					],
+				},
+				workspace,
+			);
+			expect(await readFile(path.join(workspace, "data", "new.txt"), "utf8")).toBe("");
+			expect((await lstat(moved)).isSymbolicLink()).toBe(true);
+			await expect(lstat(link)).rejects.toMatchObject({ code: "ENOENT" });
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"refuses a relative hop/.. rename source from applyWorkspaceEdit",
+		async () => {
+			const root = await mkdtemp(path.join(tmpdir(), "lsp-rel-hop-"));
+			const workspace = path.join(root, "ws");
+			const outside = path.join(root, "outside");
+			await mkdir(path.join(outside, "subdir"), { recursive: true });
+			await mkdir(workspace);
+			const inside = path.join(workspace, "a.ts");
+			await writeFile(inside, "ok");
+			const outsideLink = path.join(outside, "link.ts");
+			await symlink(inside, outsideLink);
+			await symlink(path.join(outside, "subdir"), path.join(workspace, "hop"));
+			await expect(
+				applyWorkspaceEdit(
+					{
+						documentChanges: [
+							{
+								kind: "rename",
+								oldUri: `hop${path.sep}..${path.sep}link.ts`,
+								newUri: "new.ts",
+							},
+						],
+					},
+					workspace,
+				),
+			).rejects.toThrow(/escapes the workspace/);
+			expect((await lstat(outsideLink)).isSymbolicLink()).toBe(true);
+			await expect(lstat(path.join(workspace, "new.ts"))).rejects.toMatchObject({ code: "ENOENT" });
+		},
+	);
 });

@@ -77,7 +77,12 @@ import {
 	symbolKindToIcon,
 	uriToFile,
 } from "./utils";
-import { assertRenamePaths, assertWorkspaceTarget, renameInsideWorkspace } from "./workspace-path";
+import {
+	assertRenamePaths,
+	assertWorkspaceTarget,
+	canonicalWorkspacePath,
+	renameInsideWorkspace,
+} from "./workspace-path";
 
 export type { LspServerStatus } from "./client";
 export type { LspToolDetails } from "./types";
@@ -1529,10 +1534,21 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			}
 
 			const acceptedEdits: Array<{ filePath: string; bucket: AcceptedBucket }> = [];
+			const acceptedIndex = new Map<string, number>();
 			for (const [uri, bucket] of acceptedByUri) {
 				const filePath = uriToFile(uri);
 				await assertWorkspaceTarget(this.session.cwd, filePath);
-				acceptedEdits.push({ filePath, bucket });
+				const key = await canonicalWorkspacePath(this.session.cwd, filePath);
+				const at = acceptedIndex.get(key);
+				if (at === undefined) {
+					acceptedIndex.set(key, acceptedEdits.length);
+					acceptedEdits.push({
+						filePath,
+						bucket: { ...bucket, edits: [...bucket.edits], conflictServers: new Set(bucket.conflictServers) },
+					});
+				} else {
+					acceptedEdits[at].bucket.edits.push(...bucket.edits);
+				}
 			}
 			const stagedEdits: Array<{ filePath: string; bucket: AcceptedBucket; next: string }> = [];
 			for (const { filePath, bucket } of acceptedEdits) {

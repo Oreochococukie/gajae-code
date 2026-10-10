@@ -12,7 +12,13 @@ import type {
 	WorkspaceEdit,
 } from "./types";
 import { uriToFile } from "./utils";
-import { assertRenamePaths, assertWorkspaceTarget, renameInsideWorkspace } from "./workspace-path";
+import {
+	assertBatchStaysInside,
+	assertRenamePaths,
+	assertWorkspaceTarget,
+	canonicalWorkspacePath,
+	renameInsideWorkspace,
+} from "./workspace-path";
 
 // =============================================================================
 // Text Edit Application
@@ -135,10 +141,18 @@ export async function applyWorkspaceEdit(edit: WorkspaceEdit, cwd: string): Prom
 	// earlier text edits applied.
 	const textEditsByUri = flattenWorkspaceTextEdits(edit);
 	const textTargets: Array<{ filePath: string; textEdits: TextEdit[] }> = [];
+	const textIndex = new Map<string, number>();
 	for (const [uri, textEdits] of textEditsByUri) {
 		const filePath = uriToFile(uri);
 		await assertWorkspaceTarget(cwd, filePath);
-		textTargets.push({ filePath, textEdits });
+		const key = await canonicalWorkspacePath(cwd, filePath);
+		const at = textIndex.get(key);
+		if (at === undefined) {
+			textIndex.set(key, textTargets.length);
+			textTargets.push({ filePath, textEdits: [...textEdits] });
+		} else {
+			textTargets[at].textEdits.push(...textEdits);
+		}
 	}
 
 	type PendingResource =
@@ -166,6 +180,10 @@ export async function applyWorkspaceEdit(edit: WorkspaceEdit, cwd: string): Prom
 			}
 		}
 	}
+
+	// An earlier rename can retarget a relative symlink. Re-check the post-rename
+	// paths before any text or resource write.
+	await assertBatchStaysInside(cwd, resourceOps);
 
 	const stagedText: Array<{ filePath: string; textEdits: TextEdit[]; next: string }> = [];
 	for (const target of textTargets) {
