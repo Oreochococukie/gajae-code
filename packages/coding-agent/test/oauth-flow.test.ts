@@ -295,10 +295,13 @@ describe("mcp oauth flow", () => {
 
 	it("still probes a public authorization URL that requires client_id", async () => {
 		let probed = false;
-		using _hook = hookFetch(input => {
+		using _hook = hookFetch((input, init) => {
 			const url = String(input);
-			if (url.startsWith("https://provider.example/authorize")) {
+			const parsed = new URL(url);
+			if (parsed.pathname === "/authorize") {
 				probed = true;
+				expect(parsed.hostname).toBe("1.1.1.1");
+				expect(new Headers(init?.headers).get("host")).toBe("provider.example");
 				return new Response("error: client_id is required", { status: 400 });
 			}
 			if (url === "https://provider.example/.well-known/oauth-authorization-server") {
@@ -317,6 +320,114 @@ describe("mcp oauth flow", () => {
 			"OAuth provider requires client_id",
 		);
 		expect(probed).toBe(true);
+	});
+
+	it("pins the client_id probe GET to the address that passed validation", async () => {
+		let allLookups = 0;
+		vi.spyOn(dns, "lookup").mockImplementation((async (hostname: string, options?: unknown) => {
+			const all = options && typeof options === "object" && "all" in options && options.all === true;
+			if (hostname === "rebind.example" && all) {
+				allLookups += 1;
+				if (allLookups === 1) return [{ address: "1.1.1.1", family: 4 }];
+				if (allLookups === 2) return [{ address: "8.8.8.8", family: 4 }];
+				return [{ address: "10.9.8.7", family: 4 }];
+			}
+			if (all) return [{ address: "1.1.1.1", family: 4 }];
+			return { address: "1.1.1.1", family: 4 };
+		}) as typeof dns.lookup);
+		const seen: { href: string; host: string | null }[] = [];
+		using _hook = hookFetch((input, init) => {
+			const href = String(input);
+			seen.push({ href, host: new Headers(init?.headers).get("host") });
+			if (href.includes("/.well-known/oauth-authorization-server")) {
+				return new Response("{}", { status: 404 });
+			}
+			if (new URL(href).pathname === "/authorize") {
+				return new Response("ok", { status: 200 });
+			}
+			throw new Error(`Unexpected fetch: ${href}`);
+		});
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: "https://rebind.example/authorize",
+				tokenUrl: "https://provider.example/token",
+			},
+			{},
+		);
+		const { url } = await flow.generateAuthUrl("state", "http://127.0.0.1:9/callback");
+		const probe = seen.filter(item => new URL(item.href).pathname === "/authorize");
+		expect(probe).toHaveLength(1);
+		expect(new URL(probe[0]?.href ?? "http://invalid").hostname).toBe("8.8.8.8");
+		expect(probe[0]?.host).toBe("rebind.example");
+		expect(allLookups).toBe(2);
+		expect(new URL(url).hostname).toBe("rebind.example");
+		expect(new URL(url).searchParams.get("client_id")).toBeNull();
+	});
+
+	it("login aborts a pending authorization probe lookup and stops the callback server", async () => {
+		let allLookups = 0;
+		const releaseLookup = Promise.withResolvers<void>();
+		vi.spyOn(dns, "lookup").mockImplementation((async (hostname: string, options?: unknown) => {
+			const all = options && typeof options === "object" && "all" in options && options.all === true;
+			if (hostname === "slow.example" && all) {
+				allLookups += 1;
+				if (allLookups === 1) return [{ address: "1.1.1.1", family: 4 }];
+				await releaseLookup.promise;
+				return [{ address: "1.1.1.1", family: 4 }];
+			}
+			if (all) return [{ address: "1.1.1.1", family: 4 }];
+			return { address: "1.1.1.1", family: 4 };
+		}) as typeof dns.lookup);
+		const urls: string[] = [];
+		using _hook = hookFetch(input => {
+			const href = String(input);
+			urls.push(href);
+			if (href.includes("/.well-known/oauth-authorization-server")) {
+				return new Response("{}", { status: 404 });
+			}
+			return new Response("ok", { status: 200 });
+		});
+		const controller = new AbortController();
+		const callbackPort = allocateCallbackPort();
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: "https://slow.example/authorize",
+				tokenUrl: "https://provider.example/token",
+				callbackPort,
+			},
+			{ signal: controller.signal },
+		);
+		const pending = flow.login();
+		try {
+			const deadline = Date.now() + 2000;
+			while (allLookups < 2 && Date.now() < deadline) {
+				await Bun.sleep(10);
+			}
+			expect(allLookups).toBeGreaterThanOrEqual(2);
+			controller.abort(new Error("stop during dns"));
+			const outcome = await Promise.race([
+				pending.then(
+					() => "resolved",
+					() => "rejected",
+				),
+				Bun.sleep(1000).then(() => "timeout"),
+			]);
+			expect(outcome).toBe("rejected");
+			expect(urls.some(href => new URL(href).pathname === "/authorize")).toBe(false);
+			const rebound = Bun.serve({
+				hostname: "127.0.0.1",
+				port: callbackPort,
+				fetch() {
+					return new Response("rebound");
+				},
+			});
+			expect(rebound.port).toBe(callbackPort);
+			rebound.stop(true);
+		} finally {
+			releaseLookup.resolve();
+			controller.abort();
+			await pending.catch(() => undefined);
+		}
 	});
 
 	it("does not probe a non-public authorization URL that already has a client_id", async () => {
