@@ -1730,6 +1730,76 @@ describe("obfuscateMessages", () => {
 		if (!historyCall || typeof historyCall.arguments !== "string") throw new Error("expected history arguments");
 		expect(JSON.parse(historyCall.arguments)).toEqual({});
 	});
+
+	it("preserves unsafe JSON integers and does not treat escapes as literal secrets", () => {
+		const leaf = "SYNTHETIC_TOKEN_42";
+		const slashN = String.raw`SYNTHETIC_\nTOKEN`;
+		const newlineValue = "SYNTHETIC_\nTOKEN";
+		expect(slashN).not.toBe(newlineValue);
+		const obfuscator = new SecretObfuscator(
+			[
+				{ type: "plain", content: leaf },
+				{ type: "plain", content: slashN },
+			],
+			TEST_KEY,
+		);
+		const integer = "9007199254740993";
+		const body = `{"id":${integer},"token":"${leaf}"}`;
+		const escaped = JSON.stringify({ [newlineValue]: newlineValue });
+		expect(escaped.includes(slashN)).toBe(true);
+		const literal = JSON.stringify({ v: slashN });
+		const usage = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const assistant: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{
+					type: "toolCall",
+					id: "call-json-fidelity",
+					name: "bash",
+					arguments: { body, escaped, literal },
+				},
+			],
+			api: "openai-responses",
+			provider: "openai",
+			model: "gpt-4.1-mini",
+			usage,
+			stopReason: "toolUse",
+			timestamp: 1,
+			providerPayload: {
+				type: "openaiResponsesHistory",
+				provider: "openai",
+				dt: true,
+				items: [{ type: "function_call", call_id: "call_fidelity", name: "bash", arguments: body }],
+			},
+		};
+		const [obfuscated] = obfuscateMessages(obfuscator, [assistant]);
+		if (obfuscated?.role !== "assistant") throw new Error("expected assistant");
+		const call = obfuscated.content.find(block => block.type === "toolCall");
+		if (call?.type !== "toolCall") throw new Error("expected tool call");
+		expect(String(call.arguments.body)).toContain(integer);
+		expect(String(call.arguments.body)).not.toContain(leaf);
+		expect(String(call.arguments.escaped)).toBe(escaped);
+		expect(JSON.parse(String(call.arguments.escaped))[newlineValue]).toBe(newlineValue);
+		expect(String(call.arguments.literal)).not.toContain(slashN);
+		const restored = obfuscator.deobfuscateObject(call.arguments);
+		expect(String(restored.body)).toContain(integer);
+		expect(String(restored.body)).toContain(leaf);
+		expect(JSON.parse(String(restored.literal)).v).toBe(slashN);
+		expect(JSON.parse(String(restored.escaped))[newlineValue]).toBe(newlineValue);
+		const historyCall = obfuscated.providerPayload?.items?.find(item => item.type === "function_call");
+		if (!historyCall || typeof historyCall.arguments !== "string") throw new Error("expected history arguments");
+		expect(historyCall.arguments).toContain(integer);
+		expect(historyCall.arguments).not.toContain(leaf);
+		expect(JSON.parse(historyCall.arguments).id.toString()).not.toBe(integer);
+		expect(historyCall.arguments.includes(integer)).toBe(true);
+	});
 });
 
 function revealsSecret(value: unknown, secret: string, depth = 0): boolean {

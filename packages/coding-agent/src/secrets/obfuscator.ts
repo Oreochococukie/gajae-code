@@ -457,6 +457,41 @@ export class SecretObfuscator {
 		return false;
 	}
 
+	/** Spans of configured secrets. Self-replacements are included only when requested. */
+	findSecretSpans(text: string, unintentionalOnly: boolean): Array<[number, number]> {
+		const spans: Array<[number, number]> = [];
+		if (!this.#hasAny || text.length === 0) return spans;
+		const pushLiteral = (secret: string) => {
+			if (secret.length === 0) return;
+			let from = 0;
+			while (from < text.length) {
+				const at = text.indexOf(secret, from);
+				if (at < 0) break;
+				spans.push([at, at + secret.length]);
+				from = at + Math.max(secret.length, 1);
+			}
+		};
+		for (const secret of this.#plainMappings.keys()) pushLiteral(secret);
+		for (const [secret, replacement] of this.#replaceMappings) {
+			if (unintentionalOnly && replacement === secret) continue;
+			pushLiteral(secret);
+		}
+		for (const entry of this.#regexEntries) {
+			entry.regex.lastIndex = 0;
+			for (;;) {
+				const match = entry.regex.exec(text);
+				if (match === null) break;
+				if (match[0].length === 0) {
+					entry.regex.lastIndex++;
+					continue;
+				}
+				if (unintentionalOnly && entry.mode === "replace" && entry.replacement === match[0]) continue;
+				spans.push([match.index, match.index + match[0].length]);
+			}
+		}
+		return spans;
+	}
+
 	#maskRemainingSecrets(text: string): string {
 		let result = text;
 		const replaceSecrets = [...this.#replaceMappings.entries()].sort(
@@ -591,11 +626,15 @@ export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Messag
 
 function textHasSecret(obfuscator: SecretObfuscator, value: string | undefined, depth = 0): boolean {
 	if (value === undefined || value.length === 0) return false;
-	if (obfuscator.containsConfiguredSecret(value)) return true;
-	if (depth >= 4) return false;
-	const parsed = parseJsonValue(value);
-	if (parsed === undefined) return false;
-	return valueTreeHasSecret(obfuscator, parsed, depth + 1);
+	if (depth >= 4) return obfuscator.containsConfiguredSecret(value);
+	const pieces = splitJsonPieces(value);
+	if (pieces) {
+		for (const piece of pieces) {
+			if (piece.kind === "str" && textHasSecret(obfuscator, piece.decoded, depth + 1)) return true;
+		}
+		return jsonSyntaxContainsSecret(obfuscator, value, pieces, false);
+	}
+	return obfuscator.containsConfiguredSecret(value);
 }
 
 /** Decode a JSON object, array, or string. Other text is not JSON. */
@@ -630,76 +669,35 @@ function valueTreeHasSecret(
 }
 
 /**
- * Redact a protocol string. JSON objects, arrays, and strings are decoded so a
- * secret in an escaped leaf or an object key is still replaced. When the
- * decoded pieces are not themselves secrets but the original text is, the
- * whole string is still masked. The original string is kept when nothing matches.
+ * Redact a protocol string. JSON string tokens are decoded before matching so
+ * escapes are not treated as literal secrets, and non-string tokens such as
+ * integers are copied unchanged. A secret that is the whole JSON document
+ * becomes `{}` or `[]` so the result stays JSON.
  */
 function scrubProtocolString(obfuscator: SecretObfuscator, value: string, depth = 0): string {
 	if (depth < 4) {
-		const parsed = parseJsonValue(value);
-		if (typeof parsed === "string") {
-			const scrubbed = scrubProtocolString(obfuscator, parsed, depth + 1);
-			const encoded = scrubbed === parsed ? value : JSON.stringify(scrubbed);
-			return maskWholeStringResidual(obfuscator, encoded);
-		}
-		if (parsed !== undefined && typeof parsed === "object" && parsed !== null) {
-			const walked = scrubJsonNode(obfuscator, parsed, depth + 1);
-			if (walked === parsed) return maskWholeStringResidual(obfuscator, value);
-			try {
-				return maskWholeStringResidual(obfuscator, JSON.stringify(walked));
-			} catch {
-				return obfuscator.scrubOutbound(value);
-			}
+		const rewritten = mapJsonStrings(value, decoded => scrubProtocolString(obfuscator, decoded, depth + 1));
+		if (rewritten !== undefined) {
+			if (rewritten !== value) return rewritten;
+			if (jsonSyntaxContainsSecret(obfuscator, value, splitJsonPieces(value) ?? [], true))
+				return jsonSafeFallback(value);
+			return value;
 		}
 	}
-	return maskWholeStringResidual(obfuscator, obfuscator.scrubOutbound(value));
-}
-
-/**
- * A structural walk can miss a secret that is the whole JSON text, or a
- * replacement can put another secret back in escaped form. Object and array
- * JSON stays valid JSON; a bare placeholder is not sent as arguments.
- */
-function maskWholeStringResidual(obfuscator: SecretObfuscator, value: string): string {
-	if (!stringRevealsSecret(obfuscator, value, 0)) return value;
 	const masked = obfuscator.scrubOutbound(value);
-	if (!stringRevealsSecret(obfuscator, masked, 0) && jsonShapePreserved(value, masked)) return masked;
-	return jsonSafeFallback(value);
+	return obfuscator.hasUnintentionalSecret(masked) ? OUTBOUND_SECRET_MASK : masked;
 }
 
 function stringRevealsSecret(obfuscator: SecretObfuscator, value: string, depth: number): boolean {
-	if (obfuscator.hasUnintentionalSecret(value)) return true;
-	if (depth >= 4) return false;
-	const parsed = parseJsonValue(value);
-	if (parsed === undefined) return false;
-	return decodedRevealsSecret(obfuscator, parsed, depth + 1, new WeakSet());
-}
-
-function decodedRevealsSecret(
-	obfuscator: SecretObfuscator,
-	value: unknown,
-	depth: number,
-	seen: WeakSet<object>,
-): boolean {
-	if (typeof value === "string") return stringRevealsSecret(obfuscator, value, depth);
-	if (typeof value !== "object" || value === null) return false;
-	if (seen.has(value)) return false;
-	seen.add(value);
-	if (Array.isArray(value)) return value.some(item => decodedRevealsSecret(obfuscator, item, depth, seen));
-	for (const key of Object.keys(value)) {
-		if (stringRevealsSecret(obfuscator, key, depth)) return true;
-		if (decodedRevealsSecret(obfuscator, (value as Record<string, unknown>)[key], depth, seen)) return true;
+	if (depth >= 4) return obfuscator.hasUnintentionalSecret(value);
+	const pieces = splitJsonPieces(value);
+	if (pieces) {
+		for (const piece of pieces) {
+			if (piece.kind === "str" && stringRevealsSecret(obfuscator, piece.decoded, depth + 1)) return true;
+		}
+		return jsonSyntaxContainsSecret(obfuscator, value, pieces, true);
 	}
-	return false;
-}
-
-function jsonShapePreserved(original: string, masked: string): boolean {
-	const originalParsed = parseJsonValue(original);
-	if (originalParsed === null || typeof originalParsed !== "object") return true;
-	const maskedParsed = parseJsonValue(masked);
-	if (maskedParsed === null || typeof maskedParsed !== "object") return false;
-	return Array.isArray(originalParsed) === Array.isArray(maskedParsed);
+	return obfuscator.hasUnintentionalSecret(value);
 }
 
 function jsonSafeFallback(value: string): string {
@@ -708,6 +706,135 @@ function jsonSafeFallback(value: string): string {
 	if (parsed !== null && typeof parsed === "object") return "{}";
 	if (typeof parsed === "string") return JSON.stringify(OUTBOUND_SECRET_MASK);
 	return OUTBOUND_SECRET_MASK;
+}
+
+interface JsonPiece {
+	kind: "raw" | "str";
+	text: string;
+	decoded: string;
+	start: number;
+	end: number;
+}
+
+/** Split a JSON document into raw tokens and decoded string tokens. Numbers stay raw. */
+function splitJsonPieces(input: string): JsonPiece[] | undefined {
+	const trimmed = input.trim();
+	if (trimmed.length < 2) return undefined;
+	const first = trimmed[0];
+	if (first !== "{" && first !== "[" && first !== '"') return undefined;
+	try {
+		JSON.parse(input);
+	} catch {
+		return undefined;
+	}
+	const pieces: JsonPiece[] = [];
+	let cursor = 0;
+	while (cursor < input.length) {
+		if (input[cursor] !== '"') {
+			const start = cursor;
+			while (cursor < input.length && input[cursor] !== '"') cursor++;
+			pieces.push({ kind: "raw", text: input.slice(start, cursor), decoded: "", start, end: cursor });
+			continue;
+		}
+		const start = cursor;
+		const read = readJsonString(input, cursor);
+		if (read === undefined) return undefined;
+		cursor = read.end;
+		pieces.push({
+			kind: "str",
+			text: input.slice(start, cursor),
+			decoded: read.decoded,
+			start,
+			end: cursor,
+		});
+	}
+	return pieces;
+}
+
+function readJsonString(input: string, start: number): { decoded: string; end: number } | undefined {
+	let cursor = start + 1;
+	let decoded = "";
+	while (cursor < input.length) {
+		const ch = input[cursor];
+		if (ch === '"') return { decoded, end: cursor + 1 };
+		if (ch === "\\") {
+			cursor++;
+			if (cursor >= input.length) return undefined;
+			const escaped = input[cursor];
+			cursor++;
+			if (escaped === '"' || escaped === "\\" || escaped === "/") {
+				decoded += escaped;
+				continue;
+			}
+			if (escaped === "b") {
+				decoded += "\b";
+				continue;
+			}
+			if (escaped === "f") {
+				decoded += "\f";
+				continue;
+			}
+			if (escaped === "n") {
+				decoded += "\n";
+				continue;
+			}
+			if (escaped === "r") {
+				decoded += "\r";
+				continue;
+			}
+			if (escaped === "t") {
+				decoded += "\t";
+				continue;
+			}
+			if (escaped === "u") {
+				const hex = input.slice(cursor, cursor + 4);
+				if (!/^[0-9a-fA-F]{4}$/.test(hex)) return undefined;
+				decoded += String.fromCharCode(Number.parseInt(hex, 16));
+				cursor += 4;
+				continue;
+			}
+			return undefined;
+		}
+		if (ch !== undefined && ch.charCodeAt(0) < 0x20) return undefined;
+		decoded += ch ?? "";
+		cursor++;
+	}
+	return undefined;
+}
+
+function mapJsonStrings(input: string, mapDecoded: (decoded: string) => string): string | undefined {
+	const pieces = splitJsonPieces(input);
+	if (!pieces) return undefined;
+	let changed = false;
+	let rebuilt = "";
+	for (const piece of pieces) {
+		if (piece.kind === "raw") {
+			rebuilt += piece.text;
+			continue;
+		}
+		const next = mapDecoded(piece.decoded);
+		if (next !== piece.decoded) changed = true;
+		rebuilt += JSON.stringify(next);
+	}
+	return changed ? rebuilt : input;
+}
+
+/** A secret in raw JSON syntax, not one that exists only because an escape looks like it. */
+function jsonSyntaxContainsSecret(
+	obfuscator: SecretObfuscator,
+	text: string,
+	pieces: JsonPiece[],
+	unintentionalOnly: boolean,
+): boolean {
+	for (const [start, end] of obfuscator.findSecretSpans(text, unintentionalOnly)) {
+		const inside = pieces.find(piece => piece.kind === "str" && start >= piece.start && end <= piece.end);
+		if (!inside) return true;
+		const decodedHasIt = unintentionalOnly
+			? obfuscator.hasUnintentionalSecret(inside.decoded)
+			: obfuscator.containsConfiguredSecret(inside.decoded);
+		if (decodedHasIt) return true;
+	}
+	return false;
 }
 
 /** Walk objects and arrays, including keys. Every string is semantic. */
@@ -748,13 +875,7 @@ function treeHasUnintentionalSecret(
 	depth: number,
 	seen: WeakSet<object> = new WeakSet(),
 ): boolean {
-	if (typeof value === "string") {
-		if (obfuscator.hasUnintentionalSecret(value)) return true;
-		if (depth >= 4) return false;
-		const parsed = parseJsonValue(value);
-		if (parsed === undefined) return false;
-		return treeHasUnintentionalSecret(obfuscator, parsed, depth + 1, seen);
-	}
+	if (typeof value === "string") return stringRevealsSecret(obfuscator, value, depth);
 	if (typeof value !== "object" || value === null) return false;
 	if (seen.has(value)) return false;
 	seen.add(value);
@@ -1028,20 +1149,11 @@ function escapeRegex(value: string): string {
 function deobfuscateNode(obfuscator: SecretObfuscator, value: unknown, depth: number): unknown {
 	if (typeof value === "string") {
 		if (depth < 4) {
-			const parsed = parseJsonValue(value);
-			if (typeof parsed === "string") {
-				const inner = deobfuscateNode(obfuscator, parsed, depth + 1);
-				return inner === parsed ? obfuscator.deobfuscate(value) : JSON.stringify(inner);
-			}
-			if (parsed !== undefined && typeof parsed === "object" && parsed !== null) {
-				const walked = deobfuscateNode(obfuscator, parsed, depth + 1);
-				if (walked === parsed) return obfuscator.deobfuscate(value);
-				try {
-					return JSON.stringify(walked);
-				} catch {
-					return obfuscator.deobfuscate(value);
-				}
-			}
+			const rewritten = mapJsonStrings(value, decoded => {
+				const next = deobfuscateNode(obfuscator, decoded, depth + 1);
+				return typeof next === "string" ? next : decoded;
+			});
+			if (rewritten !== undefined) return rewritten;
 		}
 		return obfuscator.deobfuscate(value);
 	}
