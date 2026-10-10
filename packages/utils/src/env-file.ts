@@ -176,10 +176,14 @@ function findClosingQuote(text: string, start: number, quote: '"' | "'" | "`"): 
 	return -1;
 }
 
-/** A bare CR or CRLF inside a quote is one line feed. An escaped CR is not bare. */
+/**
+ * A bare CR or CRLF inside a quote is one line feed. Returning the LF index
+ * without emitting it deletes the break: the caller's increment then skips that
+ * LF, so the project value no longer matches Bun.
+ */
 function pushBareCarriageReturn(raw: string, index: number, out: string[]): number {
-	if (raw[index + 1] === "\n") return index + 1;
 	out.push("\n");
+	if (raw[index + 1] === "\n") return index + 1;
 	return index;
 }
 

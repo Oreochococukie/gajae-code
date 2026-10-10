@@ -174,6 +174,23 @@ assertEqual($env.GJC_ENV_TEST_INHERITED_ONLY, undefined, "deleted key is gone fr
 });
 
 describe("$credentialEnv", () => {
+	it("does not treat a quoted trailing CRLF in the project .env as an inherited credential", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-credential-crlf-"));
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-home-"));
+		const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-agent-"));
+		tempDirs.push(dir, home, agentDir);
+		fs.writeFileSync(path.join(dir, ".env"), 'GJC_ENV_QUOTE_CRLF="project-secret\r\n"\n');
+		const envSourceUrl = pathToFileURL(path.resolve(import.meta.dir, "../src/env.ts")).href;
+		runEnvIsolationScript(
+			`
+import { $credentialEnv } from ${JSON.stringify(envSourceUrl)};
+if ($credentialEnv("GJC_ENV_QUOTE_CRLF") !== undefined) throw new Error("quoted CRLF credential was treated as inherited");
+`,
+			{ HOME: home, GJC_CODING_AGENT_DIR: agentDir },
+			dir,
+		);
+	});
+
 	it("does not treat a quoted trailing newline in the project .env as an inherited credential", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-credential-nl-"));
 		const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-home-"));
