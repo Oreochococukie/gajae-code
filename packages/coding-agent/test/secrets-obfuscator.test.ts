@@ -6,7 +6,7 @@ import { describe, expect, it, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AssistantMessage } from "@gajae-code/ai/core";
+import type { AssistantMessage, ToolResultMessage, UserMessage } from "@gajae-code/ai/core";
 import { streamBedrock } from "@gajae-code/ai/providers/amazon-bedrock";
 import { convertAnthropicMessages } from "@gajae-code/ai/providers/anthropic";
 import { convertMessages as convertGoogleMessages } from "@gajae-code/ai/providers/google-shared";
@@ -1458,6 +1458,192 @@ describe("obfuscateMessages", () => {
 		expect(parts.find(part => part.type === "input_image")?.image_url).toBe(
 			`data:image/png;base64,AAAA${keySecret}BBBB`,
 		);
+	});
+
+	it("redacts image-shaped semantic JSON and a thinking string that is the whole secret", () => {
+		const leaf = "SYNTHETIC_TOKEN_42";
+		const whole = JSON.stringify({ token: "SYNTHETIC" });
+		const imageShaped = JSON.stringify({ type: "image", data: leaf });
+		const imageUrl = `data:image/png;base64,AAAA${leaf}BBBB`;
+		const obfuscator = new SecretObfuscator(
+			[
+				{ type: "plain", content: leaf },
+				{ type: "plain", content: whole },
+			],
+			TEST_KEY,
+		);
+		const usage = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const anthropicModel: Model<"anthropic-messages"> = {
+			api: "anthropic-messages",
+			provider: "anthropic",
+			id: "claude-sonnet-4-6",
+			name: "Claude Sonnet 4.6",
+			baseUrl: "https://api.anthropic.com",
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			maxTokens: 8_192,
+			contextWindow: 200_000,
+			reasoning: true,
+		};
+		const assistant: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "text", text: `visible ${whole}` },
+				{
+					type: "thinking",
+					thinking: whole,
+					summaryText: `note ${whole}`,
+					rawText: imageShaped,
+				},
+				{
+					type: "toolCall",
+					id: "call-shaped",
+					name: "bash",
+					arguments: {
+						payload: { type: "image", data: leaf },
+						encoded: imageShaped,
+						whole,
+					},
+				},
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-6",
+			usage,
+			stopReason: "toolUse",
+			timestamp: 1,
+			providerPayload: {
+				type: "openaiResponsesHistory",
+				provider: "openai",
+				dt: true,
+				items: [
+					{
+						type: "function_call",
+						call_id: "call_whole",
+						name: "bash",
+						arguments: whole,
+					},
+					{
+						type: "message",
+						role: "user",
+						content: [
+							{ type: "input_text", text: whole },
+							{ type: "input_image", image_url: imageUrl, caption: whole },
+							{ type: "output_image", image: { data: leaf } },
+							{ type: "image", data: leaf, mimeType: "image/png", alt: `see ${leaf}` },
+						],
+					},
+				],
+			},
+		};
+		const user: UserMessage = {
+			role: "user",
+			content: [
+				{ type: "text", text: whole },
+				{ type: "image", data: leaf, mimeType: "image/png" },
+			],
+			timestamp: 2,
+		};
+		const toolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call-shaped",
+			toolName: "bash",
+			content: [
+				{ type: "text", text: `result ${whole}` },
+				{ type: "image", data: leaf, mimeType: "image/png" },
+			],
+			isError: false,
+			timestamp: 3,
+		};
+		const [obfuscatedAssistant, obfuscatedUser, obfuscatedResult] = obfuscateMessages(obfuscator, [
+			assistant,
+			user,
+			toolResult,
+		]);
+		if (obfuscatedAssistant?.role !== "assistant") throw new Error("expected assistant");
+		if (obfuscatedUser?.role !== "user") throw new Error("expected user");
+		if (obfuscatedResult?.role !== "toolResult") throw new Error("expected tool result");
+
+		const text = obfuscatedAssistant.content.find(block => block.type === "text");
+		if (text?.type !== "text") throw new Error("expected text");
+		expect(text.text).not.toContain(whole);
+		expect(text.text).toContain("#GJC1_");
+		const thinking = obfuscatedAssistant.content.find(block => block.type === "thinking");
+		if (thinking?.type !== "thinking") throw new Error("expected unsigned thinking");
+		expect(thinking.thinking).not.toContain(whole);
+		expect(thinking.thinking).not.toBe(whole);
+		expect(thinking.thinking).toContain("#GJC1_");
+		expect(thinking.summaryText).not.toContain(whole);
+		expect(thinking.rawText).not.toContain(leaf);
+		expect(thinking.rawText).not.toContain(imageShaped);
+		const call = obfuscatedAssistant.content.find(block => block.type === "toolCall");
+		if (call?.type !== "toolCall") throw new Error("expected tool call");
+		expect(call.id).toBe("call-shaped");
+		expect(call.name).toBe("bash");
+		const payload = call.arguments.payload as { type?: string; data?: string };
+		expect(payload.type).toBe("image");
+		expect(payload.data).not.toContain(leaf);
+		expect(payload.data).toContain("#GJC1_");
+		const decoded = JSON.parse(String(call.arguments.encoded)) as { data?: string };
+		expect(decoded.data).not.toContain(leaf);
+		expect(String(call.arguments.whole)).not.toContain(whole);
+		expect(String(call.arguments.whole)).toContain("#GJC1_");
+
+		const wire = JSON.stringify(
+			convertAnthropicMessages(
+				[{ role: "user", content: "continue", timestamp: 1 }, obfuscatedAssistant],
+				anthropicModel,
+				false,
+			),
+		);
+		expect(wire).not.toContain(leaf);
+		expect(wire).not.toContain(whole);
+		expect(wire).toContain("call-shaped");
+
+		const items = obfuscatedAssistant.providerPayload?.items ?? [];
+		const historyCall = items.find(item => item.type === "function_call");
+		if (!historyCall || typeof historyCall.arguments !== "string") throw new Error("expected history arguments");
+		expect(historyCall.arguments).not.toContain(whole);
+		expect(historyCall.arguments).toContain("#GJC1_");
+		const historyMessage = items.find(item => item.type === "message");
+		const parts = (historyMessage?.content ?? []) as Array<{
+			type?: string;
+			text?: string;
+			image_url?: string;
+			caption?: string;
+			image?: { data?: string };
+			data?: string;
+			alt?: string;
+		}>;
+		expect(parts.find(part => part.type === "input_text")?.text).not.toContain(whole);
+		const inputImage = parts.find(part => part.type === "input_image");
+		expect(inputImage?.image_url).toBe(imageUrl);
+		expect(inputImage?.caption).not.toContain(whole);
+		expect(parts.find(part => part.type === "output_image")?.image?.data).toBe(leaf);
+		const historyImage = parts.find(part => part.type === "image");
+		expect(historyImage?.data).toBe(leaf);
+		expect(historyImage?.alt).not.toContain(leaf);
+
+		if (!Array.isArray(obfuscatedUser.content)) throw new Error("expected user content");
+		const userText = obfuscatedUser.content.find(block => block.type === "text");
+		if (userText?.type !== "text") throw new Error("expected user text");
+		expect(userText.text).not.toContain(whole);
+		const userImage = obfuscatedUser.content.find(block => block.type === "image");
+		if (userImage?.type !== "image") throw new Error("expected user image");
+		expect(userImage.data).toBe(leaf);
+		const resultText = obfuscatedResult.content.find(block => block.type === "text");
+		if (resultText?.type !== "text") throw new Error("expected tool result text");
+		expect(resultText.text).not.toContain(whole);
+		const resultImage = obfuscatedResult.content.find(block => block.type === "image");
+		if (resultImage?.type !== "image") throw new Error("expected tool result image");
+		expect(resultImage.data).toBe(leaf);
 	});
 });
 
