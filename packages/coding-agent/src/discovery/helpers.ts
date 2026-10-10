@@ -28,6 +28,7 @@ import {
 import { parseRuleConditionAndScope, type Rule, type RuleFrontmatter } from "../capability/rule";
 import type { Skill, SkillFrontmatter } from "../capability/skill";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
+import { getCachedPluginPath } from "../extensibility/plugins/marketplace/cache";
 import type { ForkContextPolicy } from "../task/types";
 import { parseThinkingLevel } from "../thinking";
 
@@ -1620,6 +1621,21 @@ async function resolveIsolatedPluginPath(home: string, value: string): Promise<s
 	return canonical;
 }
 
+/** Path the installer records for a plugin. Undefined when the id or version cannot name a cache directory. */
+function installedPluginCachePath(
+	home: string,
+	marketplace: string,
+	pluginName: string,
+	version: string,
+): string | undefined {
+	if (typeof version !== "string" || version.length === 0) return undefined;
+	try {
+		return getCachedPluginPath(path.join(getPluginsDir(home), "cache", "plugins"), marketplace, pluginName, version);
+	} catch {
+		return undefined;
+	}
+}
+
 /**
  * List installed GJC plugin roots from the GJC plugin registry and, when present,
  * the nearest project-scoped registry resolved from `cwd`.
@@ -1717,7 +1733,9 @@ export async function listClaudePluginRoots(
 
 	// ── Project-scoped GJC registry ────────────────────────────────────────
 	// Loaded from the nearest .gjc/plugins/installed_plugins.json relative to cwd.
-	// Project entries take precedence over user entries for the same plugin ID.
+	// A project file can arrive with the repository, so its installPath is adopted
+	// only when it is the cache path the installer records. That cache path is the
+	// root used below. Project entries take precedence over user entries for the same plugin ID.
 	if (resolvedProjectPath) {
 		const projectContent = projectRegistryPath ? await readFile(projectRegistryPath, registryReadOptions) : null;
 		if (isolatedHome && !projectRegistryPath) {
@@ -1747,9 +1765,12 @@ export async function listClaudePluginRoots(
 							continue;
 						}
 						if (entry.enabled === false) continue;
-						const installPath = isolatedHome
-							? await resolveIsolatedPluginPath(home, entry.installPath)
-							: entry.installPath;
+						const cachePath = installedPluginCachePath(home, marketplace, pluginName, entry.version);
+						if (!cachePath || entry.installPath !== cachePath) {
+							warnings.push(`Plugin ${pluginId} installPath is not the installed cache path`);
+							continue;
+						}
+						const installPath = isolatedHome ? await resolveIsolatedPluginPath(home, cachePath) : cachePath;
 						if (!installPath) {
 							warnings.push(`Plugin ${pluginId} installPath escapes the isolated home`);
 							continue;

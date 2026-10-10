@@ -17,26 +17,46 @@ import type { InstalledPluginEntry } from "@gajae-code/coding-agent/extensibilit
 import {
 	addInstalledPlugin,
 	buildPluginId,
+	getCachedPluginPath,
 	readInstalledPluginsRegistry,
 	writeInstalledPluginsRegistry,
 } from "@gajae-code/coding-agent/extensibility/plugins/marketplace";
+import { getPluginsDir } from "@gajae-code/utils";
 import { safeRmSync } from "../../../../scripts/safe-cleanup";
 import {
 	clearClaudePluginRootsCache,
 	listClaudePluginRoots,
 	resolveActiveProjectRegistryPath,
 } from "../../src/discovery/helpers";
+import { loadSkills } from "../../src/extensibility/skills";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
-function makeEntry(installPath: string, scope: InstalledPluginEntry["scope"] = "user"): InstalledPluginEntry {
+function makeEntry(
+	installPath: string,
+	scope: InstalledPluginEntry["scope"] = "user",
+	version = "1.0.0",
+): InstalledPluginEntry {
 	return {
 		scope,
 		installPath,
-		version: "1.0.0",
+		version,
 		installedAt: "2025-01-01T00:00:00.000Z",
 		lastUpdated: "2025-01-01T00:00:00.000Z",
 	};
+}
+
+function installedCachePath(home: string, marketplace: string, pluginName: string, version: string): string {
+	return getCachedPluginPath(path.join(getPluginsDir(home), "cache", "plugins"), marketplace, pluginName, version);
+}
+
+function writePluginSkill(pluginRoot: string, skillName: string, body: string): void {
+	const skillDir = path.join(pluginRoot, "skills", skillName);
+	fs.mkdirSync(skillDir, { recursive: true });
+	fs.writeFileSync(
+		path.join(skillDir, "SKILL.md"),
+		`---\nname: ${skillName}\ndescription: ${skillName} description\n---\n${body}\n`,
+	);
 }
 
 // ── resolveActiveProjectRegistryPath ─────────────────────────────────────────
@@ -220,9 +240,10 @@ describe("listClaudePluginRoots — project shadows user", () => {
 		userReg = addInstalledPlugin(userReg, pluginId, makeEntry("/user/install/shared-plugin"));
 		await writeInstalledPluginsRegistry(userRegPath, userReg);
 
-		// Project registry has the same plugin ID at a project-side install path.
+		// Project registry records the installer cache path for the same plugin ID.
+		const projectInstallPath = installedCachePath(tmpHome, "test-mkt", "shared-plugin", "1.0.0");
 		let projReg = await readInstalledPluginsRegistry(projectRegPath);
-		projReg = addInstalledPlugin(projReg, pluginId, makeEntry("/project/install/shared-plugin", "project"));
+		projReg = addInstalledPlugin(projReg, pluginId, makeEntry(projectInstallPath, "project"));
 		await writeInstalledPluginsRegistry(projectRegPath, projReg);
 
 		const { roots } = await listClaudePluginRoots(tmpHome, tmpProject);
@@ -230,7 +251,83 @@ describe("listClaudePluginRoots — project shadows user", () => {
 
 		// Exactly one entry survives — the user entry is suppressed.
 		expect(matching).toHaveLength(1);
-		expect(matching[0]?.path).toBe("/project/install/shared-plugin");
+		expect(matching[0]?.path).toBe(projectInstallPath);
 		expect(matching[0]?.scope).toBe("project");
+	});
+
+	it("does not let a project registry path outside the cache hide the user install", async () => {
+		const pluginId = buildPluginId("shared-plugin", "test-mkt");
+		let userReg = await readInstalledPluginsRegistry(userRegPath);
+		userReg = addInstalledPlugin(userReg, pluginId, makeEntry("/user/install/shared-plugin"));
+		await writeInstalledPluginsRegistry(userRegPath, userReg);
+
+		let projReg = await readInstalledPluginsRegistry(projectRegPath);
+		projReg = addInstalledPlugin(projReg, pluginId, makeEntry(path.join(tmpProject, "vendored-plugin"), "project"));
+		await writeInstalledPluginsRegistry(projectRegPath, projReg);
+
+		const { roots, warnings } = await listClaudePluginRoots(tmpHome, tmpProject);
+		const matching = roots.filter(r => r.id === pluginId);
+		expect(matching).toHaveLength(1);
+		expect(matching[0]?.path).toBe("/user/install/shared-plugin");
+		expect(matching[0]?.scope).toBe("user");
+		expect(warnings.some(warning => warning.includes("not the installed cache path"))).toBe(true);
+	});
+});
+
+describe("project plugin registry skill loading", () => {
+	const pluginName = "evil-plugin";
+	const marketplace = "evil-market";
+	const version = "6.6.6";
+	const skillName = "evil-skill";
+
+	async function writeProjectRegistry(project: string, installPath: string): Promise<void> {
+		const projectRegPath = path.join(project, ".gjc", "plugins", "installed_plugins.json");
+		fs.mkdirSync(path.dirname(projectRegPath), { recursive: true });
+		const pluginId = buildPluginId(pluginName, marketplace);
+		let registry = await readInstalledPluginsRegistry(projectRegPath);
+		registry = addInstalledPlugin(registry, pluginId, makeEntry(installPath, "project", version));
+		await writeInstalledPluginsRegistry(projectRegPath, registry);
+	}
+
+	it("does not load a repo plugin skill from a project registry installPath outside the cache", async () => {
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-plugin-skill-home-"));
+		const project = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-plugin-skill-proj-"));
+		try {
+			clearClaudePluginRootsCache();
+			const repoPlugin = path.join(project, ".gjc", "plugins", pluginName);
+			writePluginSkill(repoPlugin, skillName, "repo skill body");
+			await writeProjectRegistry(project, repoPlugin);
+
+			const { skills } = await loadSkills({ cwd: project, home, trustUserSkills: false });
+			expect(skills.some(skill => skill.name === `${pluginName}:${skillName}`)).toBe(false);
+		} finally {
+			clearClaudePluginRootsCache();
+			safeRmSync(home, { recursive: true, force: true });
+			safeRmSync(project, { recursive: true, force: true });
+		}
+	});
+
+	it("still loads a project registry skill whose installPath is the installed cache path", async () => {
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-plugin-skill-home-"));
+		const project = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-plugin-skill-proj-"));
+		try {
+			clearClaudePluginRootsCache();
+			const cachePath = installedCachePath(home, marketplace, pluginName, version);
+			writePluginSkill(cachePath, skillName, "installed cache skill body");
+			await writeProjectRegistry(project, cachePath);
+
+			const { skills } = await loadSkills({ cwd: project, home, trustUserSkills: false });
+			const loaded = skills.find(skill => skill.name === `${pluginName}:${skillName}`);
+			expect(loaded?.source).toBe("claude-plugins:project");
+			expect(fs.realpathSync(loaded?.filePath ?? "")).toBe(
+				fs.realpathSync(path.join(cachePath, "skills", skillName, "SKILL.md")),
+			);
+			if (!loaded?.loadContent) throw new Error("Expected the installed cache skill body loader");
+			expect(await loaded.loadContent()).toContain("installed cache skill body");
+		} finally {
+			clearClaudePluginRootsCache();
+			safeRmSync(home, { recursive: true, force: true });
+			safeRmSync(project, { recursive: true, force: true });
+		}
 	});
 });
