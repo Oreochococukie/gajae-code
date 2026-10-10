@@ -6249,13 +6249,15 @@ export class AgentSession {
 			this.#toolRegistry.set(finalTool.name, finalTool);
 			added.push(finalTool.name);
 		}
-		if (options?.mandatoryMCPToolNames) {
-			this.#mandatoryMCPToolNames = new Set(
-				retainPluginMcpMandatoryNames(nextTools, options.mandatoryMCPToolNames)
-					.map(name => name.toLowerCase())
-					.filter(name => this.#toolRegistry.has(name)),
-			);
-		}
+		const requestedMandatory = options?.mandatoryMCPToolNames ?? [...this.#mandatoryMCPToolNames];
+		const retainedMandatory = retainPluginMcpMandatoryNames(nextTools, requestedMandatory).map(name =>
+			name.toLowerCase(),
+		);
+		this.#mandatoryMCPToolNames = new Set(
+			options?.mandatoryMCPToolNames !== undefined
+				? retainedMandatory.filter(name => this.#toolRegistry.has(name))
+				: retainedMandatory,
+		);
 		this.#setDiscoverableMCPTools(this.#collectDiscoverableMCPToolsFromRegistry());
 		await this.#applyActiveToolsByName(
 			[
@@ -12352,13 +12354,15 @@ export class AgentSession {
 		}
 
 		this.#setDiscoverableMCPTools(this.#collectDiscoverableMCPToolsFromRegistry());
-		if (options.mandatoryMCPToolNames !== undefined) {
-			this.#mandatoryMCPToolNames = new Set(
-				retainPluginMcpMandatoryNames(mcpTools, options.mandatoryMCPToolNames)
-					.map(name => name.toLowerCase())
-					.filter(name => this.#toolRegistry.has(name)),
-			);
-		}
+		const requestedMandatory = options.mandatoryMCPToolNames ?? [...this.#mandatoryMCPToolNames];
+		const retainedMandatory = retainPluginMcpMandatoryNames(mcpTools, requestedMandatory).map(name =>
+			name.toLowerCase(),
+		);
+		this.#mandatoryMCPToolNames = new Set(
+			options.mandatoryMCPToolNames !== undefined
+				? retainedMandatory.filter(name => this.#toolRegistry.has(name))
+				: retainedMandatory,
+		);
 		this.#pruneSelectedMCPToolNames();
 		const hasPersistedMCPToolSelection = this.buildDisplaySessionContext().hasPersistedMCPToolSelection;
 		if (options.selectedMCPToolNames) {

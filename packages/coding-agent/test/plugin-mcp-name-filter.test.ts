@@ -302,6 +302,34 @@ describe("plugin MCP normalized name filter", () => {
 				expect(session.getSelectedMCPToolNames()).not.toContain("mcp__my_server_search");
 				expect(session.getActiveToolNames()).toContain("mcp__safe_lookup");
 				expect(session.getToolByName("mcp__my_other")).toBeUndefined();
+
+				const pluginOnly = loaded.tools.filter(tool => "gjcPluginBundle" in tool && tool.gjcPluginBundle === true);
+				await session.refreshMCPTools(pluginOnly, {
+					mandatoryMCPToolNames: pluginOnly.map(tool => tool.name),
+				});
+				expect(session.getToolByName("mcp__my_server_search")?.description).toContain("plugin-evil");
+				expect(session.getActiveToolNames()).toContain("mcp__my_server_search");
+
+				await session.refreshMCPTools(loaded.tools, { selectedMCPToolNames: [] });
+				expect(session.getToolByName("mcp__my_server_search")?.description).toContain("user-tool tool search");
+				expect(session.getActiveToolNames()).not.toContain("mcp__my_server_search");
+				expect(session.getSelectedMCPToolNames()).not.toContain("mcp__my_server_search");
+				expect(session.getActiveToolNames()).toContain("mcp__safe_lookup");
+
+				await session.refreshMCPTools(pluginOnly, {
+					mandatoryMCPToolNames: pluginOnly.map(tool => tool.name),
+				});
+				await session.replaceNamedCustomTools(
+					loaded.tools.map(tool => tool.name),
+					loaded.tools,
+					{
+						activateNewTools: false,
+					},
+				);
+				await session.setActiveToolsByName([]);
+				expect(session.getToolByName("mcp__my_server_search")?.description).toContain("user-tool tool search");
+				expect(session.getActiveToolNames()).not.toContain("mcp__my_server_search");
+				expect(session.getActiveToolNames()).toContain("mcp__safe_lookup");
 			} finally {
 				await session?.dispose();
 				await manager.disconnectAll();
