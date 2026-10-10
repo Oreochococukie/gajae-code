@@ -17,7 +17,9 @@ import {
 	assertRenamePaths,
 	assertWorkspaceTarget,
 	canonicalWorkspacePath,
-	renameInsideWorkspace,
+	type PlannedResource,
+	renameCheckedPaths,
+	workspaceOperand,
 } from "./workspace-path";
 
 // =============================================================================
@@ -143,9 +145,10 @@ export async function applyWorkspaceEdit(edit: WorkspaceEdit, cwd: string): Prom
 	const textTargets: Array<{ filePath: string; textEdits: TextEdit[] }> = [];
 	const textIndex = new Map<string, number>();
 	for (const [uri, textEdits] of textEditsByUri) {
-		const filePath = uriToFile(uri);
-		await assertWorkspaceTarget(cwd, filePath);
-		const key = await canonicalWorkspacePath(cwd, filePath);
+		const rawPath = uriToFile(uri);
+		await assertWorkspaceTarget(cwd, rawPath);
+		const filePath = await workspaceOperand(cwd, rawPath);
+		const key = await canonicalWorkspacePath(cwd, rawPath);
 		const at = textIndex.get(key);
 		if (at === undefined) {
 			textIndex.set(key, textTargets.length);
@@ -155,34 +158,11 @@ export async function applyWorkspaceEdit(edit: WorkspaceEdit, cwd: string): Prom
 		}
 	}
 
-	type PendingResource =
-		| { kind: "create"; filePath: string }
-		| { kind: "rename"; oldPath: string; newPath: string }
-		| { kind: "delete"; filePath: string };
-	const resourceOps: PendingResource[] = [];
-	if (edit.documentChanges) {
-		for (const change of edit.documentChanges) {
-			if (!("kind" in change) || !change.kind) continue;
-			if (change.kind === "create") {
-				const filePath = uriToFile((change as CreateFile).uri);
-				await assertWorkspaceTarget(cwd, filePath);
-				resourceOps.push({ kind: "create", filePath });
-			} else if (change.kind === "rename") {
-				const renameOp = change as RenameFile;
-				const oldPath = uriToFile(renameOp.oldUri);
-				const newPath = uriToFile(renameOp.newUri);
-				await assertRenamePaths(cwd, oldPath, newPath);
-				resourceOps.push({ kind: "rename", oldPath, newPath });
-			} else if (change.kind === "delete") {
-				const filePath = uriToFile((change as DeleteFile).uri);
-				await assertWorkspaceTarget(cwd, filePath);
-				resourceOps.push({ kind: "delete", filePath });
-			}
-		}
-	}
+	const resourceOps = await resourceOpsOf(edit, cwd);
 
-	// An earlier rename can retarget a relative symlink. Re-check the post-rename
-	// paths before any text or resource write.
+	// An earlier rename can retarget a relative symlink, including the directory
+	// entry a later delete or create would mutate. Re-check that post-rename
+	// namespace before any text or resource write.
 	await assertBatchStaysInside(cwd, resourceOps);
 
 	const stagedText: Array<{ filePath: string; textEdits: TextEdit[]; next: string }> = [];
@@ -197,20 +177,59 @@ export async function applyWorkspaceEdit(edit: WorkspaceEdit, cwd: string): Prom
 		applied.push(`Applied ${target.textEdits.length} edit(s) to ${formatPathRelativeToCwd(target.filePath, cwd)}`);
 	}
 
-	for (const op of resourceOps) {
+	applied.push(...(await applyResourceOps(cwd, resourceOps)));
+
+	return applied;
+}
+
+/** Resource operations from a workspace edit, each checked against the workspace before return. */
+export async function resourceOpsOf(edit: WorkspaceEdit, cwd: string): Promise<PlannedResource[]> {
+	const resourceOps: PlannedResource[] = [];
+	if (!edit.documentChanges) return resourceOps;
+	for (const change of edit.documentChanges) {
+		if (!("kind" in change) || !change.kind) continue;
+		if (change.kind === "create") {
+			const filePath = uriToFile((change as CreateFile).uri);
+			await assertWorkspaceTarget(cwd, filePath);
+			resourceOps.push({ kind: "create", filePath });
+		} else if (change.kind === "rename") {
+			const renameOp = change as RenameFile;
+			const oldPath = uriToFile(renameOp.oldUri);
+			const newPath = uriToFile(renameOp.newUri);
+			await assertRenamePaths(cwd, oldPath, newPath);
+			resourceOps.push({ kind: "rename", oldPath, newPath });
+		} else if (change.kind === "delete") {
+			const filePath = uriToFile((change as DeleteFile).uri);
+			await assertWorkspaceTarget(cwd, filePath);
+			resourceOps.push({ kind: "delete", filePath });
+		}
+	}
+	return resourceOps;
+}
+
+/**
+ * Write resource operations that already passed `assertBatchStaysInside`.
+ * Paths are workspace-absolute, so a relative URI cannot follow `process.cwd()`.
+ * This does not re-check after the first mutation: a later containment rejection
+ * has to happen before this function is called.
+ */
+export async function applyResourceOps(cwd: string, ops: PlannedResource[]): Promise<string[]> {
+	const applied: string[] = [];
+	for (const op of ops) {
 		if (op.kind === "create") {
-			await Bun.write(op.filePath, "");
-			applied.push(`Created ${formatPathRelativeToCwd(op.filePath, cwd)}`);
+			const filePath = await workspaceOperand(cwd, op.filePath);
+			await Bun.write(filePath, "");
+			applied.push(`Created ${formatPathRelativeToCwd(filePath, cwd)}`);
 		} else if (op.kind === "rename") {
-			await renameInsideWorkspace(cwd, op.oldPath, op.newPath);
+			await renameCheckedPaths(cwd, op.oldPath, op.newPath);
 			applied.push(
 				`Renamed ${formatPathRelativeToCwd(op.oldPath, cwd)} → ${formatPathRelativeToCwd(op.newPath, cwd)}`,
 			);
 		} else {
-			await fs.rm(op.filePath, { recursive: true });
-			applied.push(`Deleted ${formatPathRelativeToCwd(op.filePath, cwd)}`);
+			const filePath = await workspaceOperand(cwd, op.filePath);
+			await fs.rm(filePath, { recursive: true });
+			applied.push(`Deleted ${formatPathRelativeToCwd(filePath, cwd)}`);
 		}
 	}
-
 	return applied;
 }

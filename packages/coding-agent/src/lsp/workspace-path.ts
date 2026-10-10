@@ -14,14 +14,19 @@ function escapes(root: string, candidate: string): boolean {
 
 /**
  * Split a workspace path without collapsing `..`.
- * Windows `file://` URIs use `/` while `path.sep` is `\`, so both separators count.
+ * `.` is not a distinct entry. On Windows, `file://` URIs use `/` while `path.sep` is `\`.
+ * On POSIX, `\` is a filename character and must not be a separator.
  */
 export function splitAbsolute(
 	filePath: string,
 	pathApi: Pick<typeof path, "parse" | "sep"> = path,
 ): { root: string; parts: string[] } {
 	const root = pathApi.parse(filePath).root;
-	const parts = filePath.slice(root.length).split(/[\\/]/).filter(Boolean);
+	const splitter = pathApi.sep === "\\" ? /[\\/]/ : /\//;
+	const parts = filePath
+		.slice(root.length)
+		.split(splitter)
+		.filter(part => part.length > 0 && part !== ".");
 	return { root, parts };
 }
 
@@ -51,6 +56,12 @@ function joinRoot(root: string, parts: string[]): string {
 function parentDir(filePath: string): string {
 	const { root, parts } = splitAbsolute(filePath);
 	return joinRoot(root, parts.slice(0, -1));
+}
+
+/** Absolute workspace path with `.` removed. `..` stays so a symlink can be followed first. */
+function identityPath(filePath: string, cwd: string): string {
+	const { root, parts } = splitAbsolute(lexicalAbsolute(filePath, cwd));
+	return joinRoot(root, parts);
 }
 
 function isSameOrInside(child: string, parent: string): boolean {
@@ -222,23 +233,31 @@ export type PlannedResource =
  */
 export async function assertBatchStaysInside(cwd: string, ops: PlannedResource[]): Promise<void> {
 	if (ops.length === 0) return;
-	const root = await fs.realpath(cwd);
+	const workspaceRoot = await fs.realpath(cwd);
 	const moves: Move[] = [];
 	const check = async (filePath: string) => {
-		const located = await locate(lexicalAbsolute(filePath, cwd), moves, 0);
-		const candidate = await canonicalize(located);
-		if (escapes(root, candidate)) throw new ToolError(`LSP edit escapes the workspace: ${filePath}`);
+		const absolute = identityPath(filePath, cwd);
+		const { root, parts } = splitAbsolute(absolute);
+		const parent = parts.length <= 1 ? root || path.sep : await locate(joinRoot(root, parts.slice(0, -1)), moves, 0);
+		if (escapes(workspaceRoot, await canonicalize(parent))) {
+			throw new ToolError(`LSP edit escapes the workspace: ${filePath}`);
+		}
+		const located = await locate(absolute, moves, 0);
+		if (escapes(workspaceRoot, await canonicalize(located))) {
+			throw new ToolError(`LSP edit escapes the workspace: ${filePath}`);
+		}
 	};
 	for (const op of ops) {
 		if (op.kind === "rename") {
 			await check(op.oldPath);
 			await check(op.newPath);
-			const from = lexicalAbsolute(op.oldPath, cwd);
-			const to = lexicalAbsolute(op.newPath, cwd);
+			const from = identityPath(op.oldPath, cwd);
+			const to = identityPath(op.newPath, cwd);
 			let linkText: string | null = null;
 			try {
-				const stat = await fs.lstat(liveLocation(from, moves));
-				if (stat.isSymbolicLink()) linkText = await fs.readlink(liveLocation(from, moves));
+				const live = liveLocation(from, moves);
+				const stat = await fs.lstat(live);
+				if (stat.isSymbolicLink()) linkText = await fs.readlink(live);
 			} catch (error) {
 				if (!isEnoent(error)) throw error;
 			}
@@ -250,11 +269,12 @@ export async function assertBatchStaysInside(cwd: string, ops: PlannedResource[]
 }
 
 /**
- * Path the kernel can rename. A literal `missing/..` segment does not exist, so use the
- * canonical file after the containment check has already walked the original spelling.
+ * Absolute path the kernel will use. Relative URIs are anchored at the workspace, not
+ * `process.cwd()`. A literal `missing/..` segment does not exist, so use the canonical
+ * file after containment has walked the original spelling. `.` is not part of the identity.
  */
-async function renameOperand(filePath: string, cwd: string): Promise<string> {
-	const absolute = lexicalAbsolute(filePath, cwd);
+export async function workspaceOperand(cwd: string, filePath: string): Promise<string> {
+	const absolute = identityPath(filePath, cwd);
 	try {
 		await fs.lstat(absolute);
 		return absolute;
@@ -264,13 +284,16 @@ async function renameOperand(filePath: string, cwd: string): Promise<string> {
 	}
 }
 
-/** Rename only after both real paths and both directory entries stay inside the workspace. */
-export async function renameInsideWorkspace(cwd: string, source: string, dest: string): Promise<void> {
-	const sourceAbs = lexicalAbsolute(source, cwd);
-	const destAbs = lexicalAbsolute(dest, cwd);
-	await assertRenamePaths(cwd, sourceAbs, destAbs);
-	const sourceOp = await renameOperand(source, cwd);
-	const destOp = await renameOperand(dest, cwd);
+/** Syscall only. The caller has already rejected any path that leaves the workspace. */
+export async function renameCheckedPaths(cwd: string, source: string, dest: string): Promise<void> {
+	const sourceOp = await workspaceOperand(cwd, source);
+	const destOp = await workspaceOperand(cwd, dest);
 	await fs.mkdir(parentDir(destOp), { recursive: true });
 	await fs.rename(sourceOp, destOp);
+}
+
+/** Rename only after both real paths and both directory entries stay inside the workspace. */
+export async function renameInsideWorkspace(cwd: string, source: string, dest: string): Promise<void> {
+	await assertRenamePaths(cwd, identityPath(source, cwd), identityPath(dest, cwd));
+	await renameCheckedPaths(cwd, source, dest);
 }
