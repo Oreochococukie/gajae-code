@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as dns from "node:dns/promises";
 import { hookFetch } from "../../utils/src/hook-fetch";
 import { canonicalMCPResourceUri, MCPOAuthFlow } from "../src/runtime-mcp/oauth-flow";
+import { assertPublicOAuthUrl } from "../src/runtime-mcp/oauth-public-url";
 
 const originalFetch = global.fetch;
 
@@ -148,6 +149,205 @@ describe("mcp oauth flow", () => {
 		);
 		await flow.generateAuthUrl("state", "http://127.0.0.1:9/callback");
 		expect(urls.some(url => url.includes("oauth-authorization-server"))).toBe(false);
+		expect(urls.some(url => new URL(url).pathname === "/authorize")).toBe(false);
+	});
+
+	it("does not GET a loopback authorization URL while probing for client_id", async () => {
+		const hits: { method: string; path: string; accept: string | null }[] = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(request) {
+				const url = new URL(request.url);
+				hits.push({
+					method: request.method,
+					path: url.pathname,
+					accept: request.headers.get("accept"),
+				});
+				return new Response("ok", { status: 200 });
+			},
+		});
+		const port = server.port;
+		if (port === undefined) {
+			server.stop(true);
+			throw new Error("Expected authorize server port");
+		}
+		const authorizationUrl = `http://127.0.0.1:${port}/authorize`;
+		try {
+			await expect(assertPublicOAuthUrl(authorizationUrl)).rejects.toThrow(/Refusing non-public OAuth endpoint/);
+			const flow = new MCPOAuthFlow(
+				{
+					authorizationUrl,
+					tokenUrl: "https://provider.example/token",
+				},
+				{},
+			);
+			const { url } = await flow.generateAuthUrl("state-probe", "http://127.0.0.1:9/callback");
+			expect(hits).toEqual([]);
+			const parsed = new URL(url);
+			expect(parsed.origin).toBe(`http://127.0.0.1:${port}`);
+			expect(parsed.pathname).toBe("/authorize");
+			expect(parsed.searchParams.get("client_id")).toBeNull();
+		} finally {
+			server.stop(true);
+		}
+	});
+
+	it("login does not GET a loopback authorization URL before opening the browser", async () => {
+		const hits: string[] = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(request) {
+				hits.push(new URL(request.url).pathname);
+				return new Response("ok", { status: 200 });
+			},
+		});
+		const port = server.port;
+		if (port === undefined) {
+			server.stop(true);
+			throw new Error("Expected authorize server port");
+		}
+		const controller = new AbortController();
+		const callbackPort = allocateCallbackPort();
+		try {
+			const flow = new MCPOAuthFlow(
+				{
+					authorizationUrl: `http://127.0.0.1:${port}/authorize`,
+					tokenUrl: "https://provider.example/token",
+					callbackPort,
+				},
+				{
+					signal: controller.signal,
+					onAuth: () => {
+						controller.abort(new Error("stop after auth url"));
+					},
+				},
+			);
+			await expect(flow.login()).rejects.toThrow(/OAuth callback cancelled/);
+			expect(hits).toEqual([]);
+		} finally {
+			controller.abort();
+			server.stop(true);
+		}
+	});
+
+	it("does not GET an authorization host that resolves to a private address", async () => {
+		const lookup = vi.spyOn(dns, "lookup");
+		lookup.mockImplementation((async (hostname: string, options?: unknown) => {
+			const address = hostname === "rebind.example" ? "10.1.2.3" : "1.1.1.1";
+			if (options && typeof options === "object" && "all" in options && options.all === true) {
+				return [{ address, family: 4 }];
+			}
+			return { address, family: 4 };
+		}) as typeof dns.lookup);
+		const urls: string[] = [];
+		using _hook = hookFetch(input => {
+			urls.push(String(input));
+			return new Response("ok", { status: 200 });
+		});
+		const authorizationUrl = "https://rebind.example/authorize";
+		await expect(assertPublicOAuthUrl(authorizationUrl)).rejects.toThrow(/private or reserved address/);
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl,
+				tokenUrl: "https://provider.example/token",
+			},
+			{},
+		);
+		const { url } = await flow.generateAuthUrl("state", "http://127.0.0.1:9/callback");
+		expect(urls.filter(seen => seen.includes("rebind.example"))).toEqual([]);
+		expect(new URL(url).hostname).toBe("rebind.example");
+		expect(new URL(url).searchParams.get("client_id")).toBeNull();
+	});
+
+	it("does not GET link-local, private, or IPv6 loopback authorization URLs", async () => {
+		const targets = [
+			"http://10.0.0.8/authorize",
+			"http://169.254.169.254/latest/meta-data",
+			"http://[::1]/authorize",
+		];
+		for (const authorizationUrl of targets) {
+			const urls: string[] = [];
+			const hook = hookFetch(input => {
+				urls.push(String(input));
+				return new Response("client_id is required", { status: 400 });
+			});
+			try {
+				await expect(assertPublicOAuthUrl(authorizationUrl)).rejects.toThrow(/Refusing non-public OAuth endpoint/);
+				const flow = new MCPOAuthFlow(
+					{
+						authorizationUrl,
+						tokenUrl: "https://provider.example/token",
+					},
+					{},
+				);
+				const { url } = await flow.generateAuthUrl("state", "http://127.0.0.1:9/callback");
+				const host = new URL(authorizationUrl).host;
+				expect(urls.filter(seen => seen.includes(host))).toEqual([]);
+				expect(new URL(url).host).toBe(host);
+			} finally {
+				hook[Symbol.dispose]();
+			}
+		}
+	});
+
+	it("still probes a public authorization URL that requires client_id", async () => {
+		let probed = false;
+		using _hook = hookFetch(input => {
+			const url = String(input);
+			if (url.startsWith("https://provider.example/authorize")) {
+				probed = true;
+				return new Response("error: client_id is required", { status: 400 });
+			}
+			if (url === "https://provider.example/.well-known/oauth-authorization-server") {
+				return new Response("{}", { status: 404 });
+			}
+			throw new Error(`Unexpected fetch: ${url}`);
+		});
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: "https://provider.example/authorize",
+				tokenUrl: "https://provider.example/token",
+			},
+			{},
+		);
+		await expect(flow.generateAuthUrl("state", "http://127.0.0.1:9/callback")).rejects.toThrow(
+			"OAuth provider requires client_id",
+		);
+		expect(probed).toBe(true);
+	});
+
+	it("does not probe a non-public authorization URL that already has a client_id", async () => {
+		const hits: string[] = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(request) {
+				hits.push(new URL(request.url).pathname);
+				return new Response("ok", { status: 200 });
+			},
+		});
+		const port = server.port;
+		if (port === undefined) {
+			server.stop(true);
+			throw new Error("Expected authorize server port");
+		}
+		try {
+			const flow = new MCPOAuthFlow(
+				{
+					authorizationUrl: `http://127.0.0.1:${port}/authorize`,
+					tokenUrl: "https://provider.example/token",
+					clientId: "client-id",
+				},
+				{},
+			);
+			const { url } = await flow.generateAuthUrl("state", "http://127.0.0.1:9/callback");
+			expect(hits).toEqual([]);
+			expect(new URL(url).searchParams.get("client_id")).toBe("client-id");
+		} finally {
+			server.stop(true);
+		}
 	});
 
 	it("does not follow redirects when fetching public registration metadata", async () => {

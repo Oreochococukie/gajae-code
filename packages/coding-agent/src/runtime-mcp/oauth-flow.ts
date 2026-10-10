@@ -408,6 +408,9 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 
 	async #assertClientIdNotRequired(authorizationUrl: string, signal?: AbortSignal): Promise<void> {
 		try {
+			// Same public-URL refusal as the token, registration, and metadata fetches.
+			// A refusal is a probe failure: do not GET, and do not block URL generation.
+			await assertPublicOAuthUrl(authorizationUrl);
 			const response = await fetch(authorizationUrl, {
 				method: "GET",
 				redirect: "manual",
