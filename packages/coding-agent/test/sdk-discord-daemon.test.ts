@@ -76,6 +76,7 @@ class FakeDiscordProvider implements DiscordProvider {
 	readonly messageNonces = new Map<string, { id: string; threadId: string }>();
 	creates = 0;
 	failCreateAfterPersist = false;
+	failFindThread = false;
 	failUnarchive = false;
 	failPost = false;
 	failPostAfterPersist = false;
@@ -106,6 +107,7 @@ class FakeDiscordProvider implements DiscordProvider {
 	}
 
 	async findThreadByNonce(input: { guildId: string; parentId: string; nonce: string }): Promise<DiscordThread | null> {
+		if (this.failFindThread) throw new Error("Discord API request failed (500)");
 		return this.threadsByNonce.get(input.nonce) ?? null;
 	}
 
@@ -2821,6 +2823,30 @@ describe("DiscordNotificationDaemon fake-provider acceptance", () => {
 			);
 			expect(effects).toHaveLength(2);
 			expect(new Set(effects.map(effect => effect.id)).size).toBe(2);
+		});
+	});
+
+	test("keeps a verified mapping and does not publish when the nonce lookup fails", async () => {
+		await withDaemon(async (daemon, provider, agentDir) => {
+			const conversation = await daemon.notify({
+				sessionId: "session",
+				endpointGeneration: 1,
+				content: "first",
+			});
+			if (!conversation.threadId) throw new Error("Discord notify did not bind a thread");
+			const store = new ConversationStore<DiscordConversation>({ agentDir, kind: "discord" });
+			const key = `app:guild:parent:${conversation.threadId}`;
+			provider.failFindThread = true;
+			await expect(
+				daemon.notify({
+					sessionId: "session",
+					endpointGeneration: 1,
+					content: "SESSION-OUTPUT-CANARY",
+				}),
+			).rejects.toThrow("Discord API request failed (500)");
+			expect(await store.read(key)).toMatchObject({ threadId: conversation.threadId, state: "active" });
+			expect(provider.messages.map(message => message.content)).toEqual(["first"]);
+			expect(provider.creates).toBe(1);
 		});
 	});
 

@@ -838,6 +838,43 @@ describe("DiscordLiveProvider protocol", () => {
 		).resolves.toMatchObject({ id: "bot-thread", parentId: "parent" });
 	});
 
+	test("propagates a starter lookup failure instead of treating the nonce thread as missing", async () => {
+		const live = new DiscordLiveProvider({
+			applicationId: "app",
+			botToken: "discord-secret-token",
+			apiBaseUrl: "https://discord.test/api",
+			fetchImpl: async input => {
+				const path = String(input);
+				if (path.endsWith("/users/@me")) return response({ id: "bot" });
+				if (path.endsWith("/channels/parent/messages?limit=100")) return response([]);
+				if (path.endsWith("/guilds/guild/threads/active")) {
+					return response({
+						threads: [
+							{
+								id: "bot-thread",
+								parent_id: "parent",
+								owner_id: "bot",
+								thread_metadata: { archived: false },
+							},
+						],
+					});
+				}
+				if (path.endsWith("/channels/parent/messages/bot-thread"))
+					return new Response("unavailable", { status: 500 });
+				if (path.endsWith("/channels/bot-thread/messages?limit=25")) {
+					return response([
+						{ id: "echo", author: { id: "bot", bot: true }, content: "<!-- gjc-thread-nonce:nonce -->" },
+					]);
+				}
+				if (path.includes("archived/public")) return response({ threads: [] });
+				return response({ threads: [] });
+			},
+		});
+		await expect(live.findThreadByNonce({ guildId: "guild", parentId: "parent", nonce: "nonce" })).rejects.toThrow(
+			"Discord API request failed (500)",
+		);
+	});
+
 	test("starts the thread from a new bot starter when an outsider already posted the nonce marker", async () => {
 		const marker = "<!-- gjc-thread-nonce:nonce -->";
 		const threadPosts: string[] = [];

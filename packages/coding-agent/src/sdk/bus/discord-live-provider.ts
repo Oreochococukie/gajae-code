@@ -207,7 +207,7 @@ export class DiscordLiveProvider implements DiscordProvider, DiscordDiagnosticPr
 				try {
 					starter = await this.#request(`/channels/${input.parentId}/messages/${candidate.id}`, {}, context);
 				} catch (error) {
-					if (!(error instanceof Error) || !/^Discord API request failed \(\d+\)$/.test(error.message))
+					if (!(error instanceof Error) || !/^Discord API request failed \(404\)$/.test(error.message))
 						throw error;
 					continue;
 				}
