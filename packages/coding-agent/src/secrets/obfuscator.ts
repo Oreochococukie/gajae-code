@@ -679,11 +679,9 @@ function scrubProtocolString(obfuscator: SecretObfuscator, value: string, depth 
 		const rewritten = mapJsonStrings(value, decoded => scrubProtocolString(obfuscator, decoded, depth + 1));
 		if (rewritten !== undefined) {
 			const numbered = redactJsonNumberSecrets(obfuscator, rewritten);
-			if (numbered !== rewritten) return numbered;
-			if (rewritten !== value) return rewritten;
-			if (jsonSyntaxContainsSecret(obfuscator, value, splitJsonPieces(value) ?? [], true))
-				return jsonSafeFallback(value);
-			return value;
+			const pieces = splitJsonPieces(numbered);
+			if (pieces && jsonSyntaxContainsSecret(obfuscator, numbered, pieces, true)) return jsonSafeFallback(numbered);
+			return numbered;
 		}
 	}
 	const masked = obfuscator.scrubOutbound(value);

@@ -1841,6 +1841,34 @@ describe("obfuscateMessages", () => {
 		expect(restoredKeys[k1]).toBe("left");
 		expect(restoredKeys[k2]).toBe("right");
 	});
+
+	it("drops a nested JSON secret that remains after another field is replaced", () => {
+		const credential = '{"token":"SYNTHETIC_CREDENTIAL"}';
+		const note = "SYNTHETIC_NOTE";
+		const obfuscator = new SecretObfuscator(
+			[
+				{ type: "plain", content: credential },
+				{ type: "plain", content: note, mode: "replace", replacement: "SAFE_NOTE" },
+			],
+			TEST_KEY,
+		);
+		const document = `{"credential":{"token":"SYNTHETIC_CREDENTIAL"},"note":"${note}"}`;
+		expect(document.includes(credential)).toBe(true);
+		const user: UserMessage = { role: "user", content: document, timestamp: 1 };
+		const developer: DeveloperMessage = { role: "developer", content: document, timestamp: 2 };
+		const [obfuscatedUser, obfuscatedDeveloper] = obfuscateMessages(obfuscator, [user, developer]);
+		if (obfuscatedUser?.role !== "user" || typeof obfuscatedUser.content !== "string") {
+			throw new Error("expected user string");
+		}
+		if (obfuscatedDeveloper?.role !== "developer" || typeof obfuscatedDeveloper.content !== "string") {
+			throw new Error("expected developer string");
+		}
+		for (const content of [obfuscatedUser.content, obfuscatedDeveloper.content]) {
+			expect(content).not.toContain(credential);
+			expect(content).not.toContain("SYNTHETIC_CREDENTIAL");
+			expect(JSON.parse(content)).toEqual({});
+		}
+	});
 });
 
 function revealsSecret(value: unknown, secret: string, depth = 0): boolean {
