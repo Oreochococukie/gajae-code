@@ -1,10 +1,19 @@
 import { describe, expect, it } from "bun:test";
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { SessionManager } from "@gajae-code/coding-agent/session/session-manager";
+import { verifyOwnerOnlyPathSecurity } from "@gajae-code/natives";
 import { getAgentDir, setAgentDir, TempDir } from "@gajae-code/utils";
 
 const posix = process.platform !== "win32";
+
+function aclToolAvailable(): boolean {
+	if (process.platform === "darwin" || process.platform === "win32") return true;
+	if (process.platform !== "linux") return false;
+	const result = spawnSync("setfacl", ["--version"], { encoding: "utf8" });
+	return (result.error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT";
+}
 
 function permissionBits(filePath: string): number {
 	const stat = fs.lstatSync(filePath);
@@ -19,6 +28,48 @@ async function withPermissiveUmask<T>(run: () => Promise<T>): Promise<T> {
 	} finally {
 		process.umask(previous);
 	}
+}
+
+function installInheritedSharedRead(directory: string): void {
+	if (process.platform === "darwin") {
+		const result = spawnSync("/bin/chmod", ["+a", "everyone allow read,file_inherit,directory_inherit", directory], {
+			encoding: "utf8",
+		});
+		if (result.status !== 0) throw new Error(`chmod +a failed: ${result.stderr || result.error?.message}`);
+		return;
+	}
+	if (process.platform === "win32") {
+		const result = spawnSync("icacls", [directory, "/grant", "*S-1-1-0:(OI)(CI)R"], { encoding: "utf8" });
+		if (result.status !== 0) throw new Error(`icacls failed: ${result.stderr || result.error?.message}`);
+		return;
+	}
+	if (process.platform === "linux") {
+		const result = spawnSync("setfacl", ["-m", "d:o:r", directory], { encoding: "utf8" });
+		if (result.status !== 0) throw new Error(`setfacl failed: ${result.stderr || result.error?.message}`);
+	}
+}
+
+function installFileSharedRead(filePath: string): void {
+	if (process.platform === "darwin") {
+		const result = spawnSync("/bin/chmod", ["+a", "everyone allow read", filePath], { encoding: "utf8" });
+		if (result.status !== 0) throw new Error(`chmod +a failed: ${result.stderr || result.error?.message}`);
+		return;
+	}
+	if (process.platform === "win32") {
+		const result = spawnSync("icacls", [filePath, "/grant", "*S-1-1-0:R"], { encoding: "utf8" });
+		if (result.status !== 0) throw new Error(`icacls failed: ${result.stderr || result.error?.message}`);
+		return;
+	}
+	if (process.platform === "linux") {
+		const result = spawnSync("setfacl", ["-m", "o:r", filePath], { encoding: "utf8" });
+		if (result.status !== 0) throw new Error(`setfacl failed: ${result.stderr || result.error?.message}`);
+	}
+}
+
+function expectNativeOwnerOnly(filePath: string): void {
+	const verified = verifyOwnerOnlyPathSecurity(filePath, "file");
+	expect(verified.ok, verified.ok ? "" : verified.code).toBe(true);
+	if (process.platform !== "win32") expect(permissionBits(filePath)).toBe(0o600);
 }
 
 async function flushedExplicitSession(root: string, content: string): Promise<SessionManager> {
@@ -130,6 +181,57 @@ describe("explicit session file mode", () => {
 				if (!sessionFile || !fs.existsSync(sessionFile)) throw new Error("expected a persisted session file");
 				expect(fs.readFileSync(sessionFile, "utf8")).toContain("primary-canary");
 				expect(permissionBits(sessionFile)).toBe(0o600);
+			} finally {
+				await session.close();
+			}
+		});
+	});
+
+	it.skipIf(!aclToolAvailable())("creates an explicit fork transcript with native owner-only security", async () => {
+		await withPermissiveUmask(async () => {
+			using tempDir = TempDir.createSync("@pi-session-fork-acl-");
+			installInheritedSharedRead(tempDir.path());
+			const session = await flushedExplicitSession(tempDir.path(), "fork-acl");
+			const prepared = await session.prepareFork();
+			if (!prepared?.sessionFile) throw new Error("expected a fork transcript");
+			try {
+				expect(fs.readFileSync(prepared.sessionFile, "utf8")).toContain("fork-acl");
+				expectNativeOwnerOnly(prepared.sessionFile);
+			} finally {
+				await session.discardPreparedNewSession(prepared);
+				await session.close();
+			}
+		});
+	});
+
+	it.skipIf(!aclToolAvailable())("creates an explicit branched session with native owner-only security", async () => {
+		await withPermissiveUmask(async () => {
+			using tempDir = TempDir.createSync("@pi-session-branch-acl-");
+			installInheritedSharedRead(tempDir.path());
+			const session = SessionManager.create(tempDir.path(), tempDir.path());
+			const leafId = session.appendMessage({ role: "user", content: "branch-acl", timestamp: 1 });
+			await session.flush();
+			const branched = session.createBranchedSession(leafId);
+			if (!branched) throw new Error("expected a branched session file");
+			expect(fs.readFileSync(branched, "utf8")).toContain("branch-acl");
+			expectNativeOwnerOnly(branched);
+			await session.close();
+		});
+	});
+
+	it.skipIf(!aclToolAvailable())("creates an explicit draft with native owner-only security", async () => {
+		await withPermissiveUmask(async () => {
+			using tempDir = TempDir.createSync("@pi-session-draft-acl-");
+			const session = await flushedExplicitSession(tempDir.path(), "draft-acl");
+			try {
+				await session.saveDraft("draft-acl");
+				const artifactsDir = session.getArtifactsDir();
+				if (!artifactsDir) throw new Error("expected an artifacts directory");
+				const draftPath = path.join(artifactsDir, "draft.txt");
+				installFileSharedRead(draftPath);
+				await session.saveDraft("draft-acl-2");
+				expect(fs.readFileSync(draftPath, "utf8")).toBe("draft-acl-2");
+				expectNativeOwnerOnly(draftPath);
 			} finally {
 				await session.close();
 			}
