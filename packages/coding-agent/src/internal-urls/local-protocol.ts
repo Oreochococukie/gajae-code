@@ -179,6 +179,56 @@ async function assertDirectoryNotSymlink(directoryPath: string): Promise<void> {
 	}
 }
 
+/** Group-write and world-write bits. A shared temp parent must not be able to create files here. */
+const GROUP_OR_WORLD_WRITABLE = 0o022;
+
+interface DirectoryIdentityStat {
+	isDirectory(): boolean;
+	isSymbolicLink(): boolean;
+	dev: number;
+	ino: number;
+	uid: number;
+	mode: number;
+}
+
+interface ManagedRootIdentity {
+	readonly dev: number;
+	readonly ino: number;
+	readonly uid: number;
+	readonly mode: number;
+}
+
+function isUnsafeDirectory(stat: DirectoryIdentityStat): boolean {
+	return !stat.isDirectory() || stat.isSymbolicLink();
+}
+
+function managedRootIdentity(stat: DirectoryIdentityStat): ManagedRootIdentity {
+	return { dev: stat.dev, ino: stat.ino, uid: stat.uid, mode: stat.mode };
+}
+
+function sameManagedRoot(stat: DirectoryIdentityStat, recorded: ManagedRootIdentity): boolean {
+	return (
+		!isUnsafeDirectory(stat) &&
+		stat.dev === recorded.dev &&
+		stat.ino === recorded.ino &&
+		stat.uid === recorded.uid &&
+		stat.mode === recorded.mode
+	);
+}
+
+/**
+ * An existing managed session directory is adopted only when this user owns it
+ * and the group and world cannot write it. Windows has no POSIX owner bits.
+ */
+function assertAdoptedManagedRoot(stat: DirectoryIdentityStat): void {
+	if (isUnsafeDirectory(stat)) throw new Error("Unsafe local:// root");
+	if (process.platform === "win32") return;
+	const uid = process.getuid?.();
+	if (uid === undefined || stat.uid !== uid || (stat.mode & GROUP_OR_WORLD_WRITABLE) !== 0) {
+		throw new Error("Unsafe local:// root");
+	}
+}
+
 const LEGACY_MIGRATION_MARKER = ".gjc-local-legacy-migrated-v1";
 const MAX_LEGACY_LOCAL_BYTES = 64 * 1024 * 1024;
 
@@ -508,8 +558,29 @@ async function migrateLegacyLocal(
 	}
 }
 
-const initializedLocalRoots = new Set<string>();
+const initializedLocalRoots = new Map<string, ManagedRootIdentity>();
 const initializingLocalRoots = new Map<string, Promise<string>>();
+
+function assertRememberedManagedRoot(localRoot: string, recorded: ManagedRootIdentity): void {
+	let stat: fsSync.Stats;
+	try {
+		stat = fsSync.lstatSync(localRoot);
+	} catch {
+		throw new Error("Unsafe local:// root");
+	}
+	if (!sameManagedRoot(stat, recorded)) throw new Error("Unsafe local:// root");
+}
+
+function rememberManagedRoot(localRoot: string, expected: ManagedRootIdentity): void {
+	let stat: fsSync.Stats;
+	try {
+		stat = fsSync.lstatSync(localRoot);
+	} catch {
+		throw new Error("Unsafe local:// root");
+	}
+	if (!sameManagedRoot(stat, expected)) throw new Error("Unsafe local:// root");
+	initializedLocalRoots.set(localRoot, managedRootIdentity(stat));
+}
 
 /**
  * Completes the mandatory legacy migration gate for a local root.
@@ -559,16 +630,19 @@ async function initializeManagedLocalRoot(options: LocalProtocolOptions, localRo
 
 	await fs.mkdir(scratchParent, { recursive: true, mode: 0o700 });
 	await assertDirectoryNotSymlink(scratchParent);
+	let adoptedExisting = false;
 	try {
 		await fs.mkdir(localRoot, { mode: 0o700 });
 	} catch (error) {
 		if (error instanceof Error && "code" in error && error.code === "EEXIST") {
-			await assertDirectoryNotSymlink(localRoot);
+			adoptedExisting = true;
 		} else {
 			throw error;
 		}
 	}
-	await assertDirectoryNotSymlink(localRoot);
+	const rootStat = await fs.lstat(localRoot);
+	if (adoptedExisting) assertAdoptedManagedRoot(rootStat);
+	else if (isUnsafeDirectory(rootStat)) throw new Error("Unsafe local:// root");
 	await migrateLegacyLocal(options, localRoot, scratchParent);
 
 	const resolvedScratchParent = await fs.realpath(scratchParent);
@@ -577,7 +651,10 @@ async function initializeManagedLocalRoot(options: LocalProtocolOptions, localRo
 	if (resolvedLocalRoot === resolvedScratchParent) {
 		throw new Error("Unsafe local:// root");
 	}
-	initializedLocalRoots.add(resolvedLocalRoot);
+	// Key the lexical path the sync resolver checks. realpath(/var -> /private/var)
+	// is a different string for the same directory, so caching only the real path
+	// let a later rename-swap skip this identity check.
+	rememberManagedRoot(localRoot, managedRootIdentity(rootStat));
 	return resolvedLocalRoot;
 }
 
@@ -587,18 +664,25 @@ function initializeLocalRootSyncWhenLegacyAbsent(options: LocalProtocolOptions, 
 		initializeExplicitLocalRootSync(explicitRoot);
 		return;
 	}
-	if (initializedLocalRoots.has(localRoot)) return;
+	const recorded = initializedLocalRoots.get(localRoot);
+	if (recorded) {
+		assertRememberedManagedRoot(localRoot, recorded);
+		return;
+	}
 	const scratchParent = path.dirname(localRoot);
 	fsSync.mkdirSync(scratchParent, { recursive: true, mode: 0o700 });
 	const parentStat = fsSync.lstatSync(scratchParent);
 	if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) throw new Error("Unsafe local:// root");
+	let adoptedExisting = false;
 	try {
 		fsSync.mkdirSync(localRoot, { mode: 0o700 });
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+		adoptedExisting = true;
 	}
 	const rootStat = fsSync.lstatSync(localRoot);
-	if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error("Unsafe local:// root");
+	if (adoptedExisting) assertAdoptedManagedRoot(rootStat);
+	else if (isUnsafeDirectory(rootStat)) throw new Error("Unsafe local:// root");
 	const marker = path.join(localRoot, LEGACY_MIGRATION_MARKER);
 	try {
 		// Accept exactly the marker states the async gate treats as settled. A
@@ -608,7 +692,7 @@ function initializeLocalRootSyncWhenLegacyAbsent(options: LocalProtocolOptions, 
 		// async gate had already completed.
 		if (!isSettledMigrationMarkerValue(fsSync.readFileSync(marker, "utf8")))
 			throw new Error("Unsafe local:// migration marker");
-		initializedLocalRoots.add(localRoot);
+		rememberManagedRoot(localRoot, managedRootIdentity(rootStat));
 		return;
 	} catch (error) {
 		if (!isEnoent(error)) throw error;
@@ -629,7 +713,7 @@ function initializeLocalRootSyncWhenLegacyAbsent(options: LocalProtocolOptions, 
 		if (!isSettledMigrationMarkerValue(fsSync.readFileSync(marker, "utf8")))
 			throw new Error("Unsafe local:// migration marker");
 	}
-	initializedLocalRoots.add(localRoot);
+	rememberManagedRoot(localRoot, managedRootIdentity(rootStat));
 }
 
 export function resolveLocalRoot(options: LocalProtocolOptions): string {

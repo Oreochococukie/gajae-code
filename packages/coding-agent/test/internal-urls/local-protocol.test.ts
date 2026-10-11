@@ -652,4 +652,58 @@ describe("LocalProtocolHandler", () => {
 			});
 		});
 	});
+
+	it("refuses a pre-created group-writable managed local root", async () => {
+		if (process.platform === "win32") return;
+		const sessionId = `group-writable-${crypto.randomUUID()}`;
+		await withLocalRoot(sessionId, async localRoot => {
+			await fs.chmod(localRoot, 0o720);
+			const options = localOptions(sessionId, path.join(os.tmpdir(), `unused-artifacts-${sessionId}`));
+			expect(() => resolveLocalUrlToPath("local://note.txt", options)).toThrow("Unsafe local:// root");
+			await expect(initializeLocalRoot(options)).rejects.toThrow("Unsafe local:// root");
+			await expect(fs.lstat(path.join(localRoot, ".gjc-local-legacy-migrated-v1"))).rejects.toMatchObject({
+				code: "ENOENT",
+			});
+		});
+	});
+
+	it("refuses a managed local root whose inode changes after init", async () => {
+		if (process.platform === "win32") return;
+		const sessionId = `inode-swap-${crypto.randomUUID()}`;
+		await withLocalRoot(sessionId, async localRoot => {
+			await fs.chmod(localRoot, 0o700);
+			const options = localOptions(sessionId, path.join(os.tmpdir(), `unused-artifacts-${sessionId}`));
+			await initializeLocalRoot(options);
+			const before = await fs.stat(localRoot);
+			const parked = `${localRoot}-parked`;
+			await fs.rename(localRoot, parked);
+			try {
+				await fs.mkdir(localRoot, { mode: 0o700 });
+				await fs.chmod(localRoot, 0o700);
+				expect((await fs.stat(localRoot)).ino).not.toBe(before.ino);
+				expect(() => resolveLocalUrlToPath("local://note.txt", options)).toThrow("Unsafe local:// root");
+				await expect(fs.lstat(path.join(localRoot, ".gjc-local-legacy-migrated-v1"))).rejects.toMatchObject({
+					code: "ENOENT",
+				});
+			} finally {
+				await fs.rm(parked, { recursive: true, force: true });
+			}
+		});
+	});
+
+	it("resolves a 0700 managed local root owned by the current user", async () => {
+		if (process.platform === "win32") return;
+		const sessionId = `owner-0700-${crypto.randomUUID()}`;
+		await withLocalRoot(sessionId, async localRoot => {
+			await fs.chmod(localRoot, 0o700);
+			const options = localOptions(sessionId, path.join(os.tmpdir(), `unused-artifacts-${sessionId}`));
+			expect(resolveLocalUrlToPath("local://ok.txt", options)).toBe(path.join(localRoot, "ok.txt"));
+			const stat = await fs.lstat(localRoot);
+			const uid = process.getuid?.();
+			if (uid === undefined) throw new Error("posix uid is required");
+			expect(stat.uid).toBe(uid);
+			expect(stat.mode & 0o777).toBe(0o700);
+			expect(await initializeLocalRoot(options)).toBe(await fs.realpath(localRoot));
+		});
+	});
 });
