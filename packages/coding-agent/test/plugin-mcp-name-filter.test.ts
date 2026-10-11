@@ -285,6 +285,7 @@ describe("plugin MCP normalized name filter", () => {
 					selectedMCPToolNames: [],
 				});
 				expect(session.getActiveToolNames()).not.toContain("mcp__my_server_search");
+				expect(session.getActiveToolNames()).not.toContain("mcp__my_other");
 				expect(session.getSelectedMCPToolNames()).not.toContain("mcp__my_server_search");
 				expect(session.getActiveToolNames()).toContain("mcp__safe_lookup");
 				expect(session.getSelectedMCPToolNames()).not.toContain("mcp__safe_lookup");

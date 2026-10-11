@@ -1,3 +1,3 @@
 ### Fixed
 
-- Kept a user MCP tool registered when a GJC plugin bundle server normalizes to the same name, without giving that user tool the omitted plugin tool's always-on selection.
+- Kept a user MCP tool registered when a GJC plugin bundle server normalizes to the same name, without leaving that user tool or an omitted plugin tool on the required-name list.

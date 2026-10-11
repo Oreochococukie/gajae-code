@@ -162,7 +162,11 @@ import {
 } from "../runtime-mcp";
 import { createMCPFormInputHandler } from "../runtime-mcp/elicitation";
 import type { MCPLoadResult } from "../runtime-mcp/manager";
-import { omitPluginMcpNameShadows, survivingPluginMcpToolNames } from "../runtime-mcp/plugin-mcp-name-filter";
+import {
+	omitPluginMcpNameShadows,
+	retainPluginMcpMandatoryNames,
+	survivingPluginMcpToolNames,
+} from "../runtime-mcp/plugin-mcp-name-filter";
 import { MCP_STARTUP_WAIT_GRACE_MS } from "../runtime-mcp/startup-policy";
 import type { MCPServerConfig } from "../runtime-mcp/types";
 import {
@@ -5749,17 +5753,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						const previousNames = ownedMcpManagerToolNames;
 						const nextToolNames = nextTools.map(tool => tool.name);
 						const previousSet = new Set(previousNames);
-						const survivingPluginNames = survivingPluginMcpToolNames(nextTools);
-						const survivingPluginNameSet = new Set(survivingPluginNames);
-						const visibleToolNames = new Set(omitPluginMcpNameShadows(nextTools).map(tool => tool.name));
-						const nextPluginToolNames = survivingPluginNames;
+						const nextPluginToolNames = survivingPluginMcpToolNames(nextTools);
 						const nextConventionalToolNames = nextTools
 							.filter(tool => tool.mcpServerName && conventionalServerNames.has(tool.mcpServerName))
 							.map(tool => tool.name);
 						const nextMandatoryMcpToolNames = [
-							...pluginMcpToolNames.filter(
-								name =>
-									!previousSet.has(name) && (!visibleToolNames.has(name) || survivingPluginNameSet.has(name)),
+							...retainPluginMcpMandatoryNames(nextTools, pluginMcpToolNames).filter(
+								name => !previousSet.has(name),
 							),
 							...nextPluginToolNames,
 						];

@@ -50,7 +50,7 @@ describe("omitPluginMcpNameShadows", () => {
 				"mcp__safe_lookup",
 				"mcp__kept_elsewhere",
 			]),
-		).toEqual(["mcp__my_other", "mcp__safe_lookup", "mcp__kept_elsewhere"]);
+		).toEqual(["mcp__safe_lookup", "mcp__kept_elsewhere"]);
 		expect(retainPluginMcpMandatoryNames([tool("mcp__docs_search", "docs", false)], ["mcp__docs_search"])).toEqual([
 			"mcp__docs_search",
 		]);

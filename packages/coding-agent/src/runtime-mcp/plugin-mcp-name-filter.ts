@@ -34,9 +34,9 @@ export function survivingPluginMcpToolNames<T extends { name: string }>(tools: r
 }
 
 /**
- * Drop a mandatory name when this batch replaced an omitted plugin tool with a
- * user tool of the same name. Other mandatory names stay, including ordinary
- * MCP tools and plugin tools that are not in this batch.
+ * The required-name list is the plugin tools that survived the name filter,
+ * plus requested names this batch did not omit. An omitted plugin tool, including
+ * a sibling that does not itself collide, is not required.
  */
 export function retainPluginMcpMandatoryNames(
 	tools: readonly { name: string }[],
@@ -49,14 +49,7 @@ export function retainPluginMcpMandatoryNames(
 		const normalized = tool.name.toLowerCase();
 		if (!survivingPluginNames.has(normalized)) omittedPluginNames.add(normalized);
 	}
-	const visibleUserNames = new Set<string>();
-	for (const tool of omitPluginMcpNameShadows(tools)) {
-		if (!isGjcPluginBundleTool(tool)) visibleUserNames.add(tool.name.toLowerCase());
-	}
-	return requested.filter(name => {
-		const normalized = name.toLowerCase();
-		return !(omittedPluginNames.has(normalized) && visibleUserNames.has(normalized));
-	});
+	return requested.filter(name => !omittedPluginNames.has(name.toLowerCase()));
 }
 
 function isGjcPluginBundleTool(tool: object): boolean {
