@@ -121,6 +121,15 @@ function commandCwd(repo: string, fixture: AttackFixture): string {
 	return fixture.trailingSeparator ? `${repo}${path.sep}` : repo;
 }
 
+async function rejectedLaunchMessage(launch: Promise<unknown>): Promise<string> {
+	try {
+		await launch;
+	} catch (error) {
+		return error instanceof Error ? error.message : String(error);
+	}
+	throw new Error("expected the debug launch to reject");
+}
+
 afterEach(async () => {
 	vi.restoreAllMocks();
 	if (dapSessionManager.getActiveSession()) {
@@ -258,11 +267,15 @@ describe("DAP project-controlled adapter binaries", () => {
 			const selected = selectLaunchAdapter(path.join(repo, "main.c"), repo, "gdb");
 			expect(selected?.resolvedCommand).toBe(trustedBinary);
 
-			await expect(
+			const message = await rejectedLaunchMessage(
 				tool.execute("call-trusted", { action: "launch", program: "main.c", adapter: "gdb", timeout: 5 }),
-			).rejects.toThrow(/DAP adapter exited/);
+			);
 			expect(fs.existsSync(projectMarker)).toBe(false);
 			expect(fs.existsSync(trustedMarker)).toBe(true);
+			// The stub closes stdin before the exit notice. EPIPE is the same launch only when both markers hold.
+			if (!message.includes("EPIPE")) {
+				expect(message).toMatch(/DAP adapter exited/);
+			}
 		},
 		20_000,
 	);
@@ -284,10 +297,13 @@ describe("DAP project-controlled adapter binaries", () => {
 			const selected = selectLaunchAdapter(path.join(repo, "main.c"), repo, "gdb");
 			expect(selected?.resolvedCommand).toBe(trustedBinary);
 
-			await expect(
+			const message = await rejectedLaunchMessage(
 				tool.execute("call-allowed", { action: "launch", program: "main.c", adapter: "gdb", timeout: 5 }),
-			).rejects.toThrow(/DAP adapter exited/);
+			);
 			expect(fs.existsSync(trustedMarker)).toBe(true);
+			if (!message.includes("EPIPE")) {
+				expect(message).toMatch(/DAP adapter exited/);
+			}
 		},
 		20_000,
 	);
