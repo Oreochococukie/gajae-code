@@ -13,11 +13,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { InstalledPluginEntry } from "@gajae-code/coding-agent/extensibility/plugins/marketplace";
 import {
 	addInstalledPlugin,
 	buildPluginId,
 	getCachedPluginPath,
+	type InstalledPluginEntry,
+	MarketplaceManager,
 	readInstalledPluginsRegistry,
 	writeInstalledPluginsRegistry,
 } from "@gajae-code/coding-agent/extensibility/plugins/marketplace";
@@ -328,6 +329,97 @@ describe("project plugin registry skill loading", () => {
 			clearClaudePluginRootsCache();
 			safeRmSync(home, { recursive: true, force: true });
 			safeRmSync(project, { recursive: true, force: true });
+		}
+	});
+});
+
+const MARKETPLACE_FIXTURE = path.join(import.meta.dir, "fixtures", "valid-marketplace");
+
+describe("project install cache root", () => {
+	async function installProjectPlugin(home: string, project: string, pluginsCacheDir: string): Promise<string> {
+		fs.mkdirSync(path.join(project, ".gjc", "plugins"), { recursive: true });
+		const manager = new MarketplaceManager({
+			marketplacesRegistryPath: path.join(home, "marketplaces.json"),
+			installedRegistryPath: path.join(home, "installed_plugins.json"),
+			projectInstalledRegistryPath: path.join(project, ".gjc", "plugins", "installed_plugins.json"),
+			marketplacesCacheDir: path.join(home, "marketplaces"),
+			pluginsCacheDir,
+		});
+		await manager.addMarketplace(MARKETPLACE_FIXTURE);
+		const installed = await manager.installPlugin("hello-plugin", "test-marketplace", { scope: "project" });
+		return installed.installPath;
+	}
+
+	it("discovers a project install written under the caller-supplied plugins cache", async () => {
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-cache-root-home-"));
+		const project = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-cache-root-proj-"));
+		const customCache = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-caller-plugin-cache-"));
+		try {
+			const installPath = await installProjectPlugin(home, project, customCache);
+			clearClaudePluginRootsCache();
+			expect(installPath).toBe(getCachedPluginPath(customCache, "test-marketplace", "hello-plugin", "1.0.0"));
+			expect(installPath).not.toBe(installedCachePath(home, "test-marketplace", "hello-plugin", "1.0.0"));
+
+			const hidden = await listClaudePluginRoots(home, project);
+			expect(hidden.roots.some(root => root.path === installPath)).toBe(false);
+
+			const visible = await listClaudePluginRoots(home, project, false, undefined, customCache);
+			const matching = visible.roots.filter(root => root.id === "hello-plugin@test-marketplace");
+			expect(matching).toHaveLength(1);
+			expect(matching[0]?.path).toBe(installPath);
+			expect(matching[0]?.scope).toBe("project");
+		} finally {
+			clearClaudePluginRootsCache();
+			safeRmSync(home, { recursive: true, force: true });
+			safeRmSync(project, { recursive: true, force: true });
+			safeRmSync(customCache, { recursive: true, force: true });
+		}
+	});
+
+	it("still discovers a project install under the canonical installer cache", async () => {
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-cache-root-home-"));
+		const project = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-cache-root-proj-"));
+		const canonicalCache = path.join(getPluginsDir(home), "cache", "plugins");
+		try {
+			const installPath = await installProjectPlugin(home, project, canonicalCache);
+			clearClaudePluginRootsCache();
+			expect(installPath).toBe(installedCachePath(home, "test-marketplace", "hello-plugin", "1.0.0"));
+			const { roots } = await listClaudePluginRoots(home, project);
+			const matching = roots.filter(root => root.id === "hello-plugin@test-marketplace");
+			expect(matching).toHaveLength(1);
+			expect(matching[0]?.path).toBe(installPath);
+			expect(matching[0]?.scope).toBe("project");
+		} finally {
+			clearClaudePluginRootsCache();
+			safeRmSync(home, { recursive: true, force: true });
+			safeRmSync(project, { recursive: true, force: true });
+		}
+	});
+
+	it("does not adopt a registry path that is not the configured cache path", async () => {
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-cache-root-home-"));
+		const project = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-cache-root-proj-"));
+		const customCache = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-caller-plugin-cache-"));
+		try {
+			fs.mkdirSync(path.join(project, ".gjc", "plugins"), { recursive: true });
+			const forged = path.join(customCache, "forged-plugin");
+			fs.mkdirSync(forged, { recursive: true });
+			const pluginId = buildPluginId("hello-plugin", "test-marketplace");
+			const registryPath = path.join(project, ".gjc", "plugins", "installed_plugins.json");
+			let registry = await readInstalledPluginsRegistry(registryPath);
+			registry = addInstalledPlugin(registry, pluginId, makeEntry(forged, "project", "1.0.0"));
+			await writeInstalledPluginsRegistry(registryPath, registry);
+			expect(forged).not.toBe(getCachedPluginPath(customCache, "test-marketplace", "hello-plugin", "1.0.0"));
+
+			clearClaudePluginRootsCache();
+			const { roots, warnings } = await listClaudePluginRoots(home, project, false, undefined, customCache);
+			expect(roots.some(root => root.id === pluginId || root.path === forged)).toBe(false);
+			expect(warnings.some(warning => warning.includes("not the installed cache path"))).toBe(true);
+		} finally {
+			clearClaudePluginRootsCache();
+			safeRmSync(home, { recursive: true, force: true });
+			safeRmSync(project, { recursive: true, force: true });
+			safeRmSync(customCache, { recursive: true, force: true });
 		}
 	});
 });

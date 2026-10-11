@@ -1544,7 +1544,36 @@ export async function invalidateClaudePluginRoots(home: string, cwd?: string, is
 	])) {
 		if (registryPath) invalidateFsCache(registryPath);
 	}
-	pluginRootsCache.delete(`${canonicalHome}:${gjcRegistryPath ?? ""}:${projectRegistryPath ?? ""}`);
+	forgetPluginRootsCache(pluginRootsCachePrefix(canonicalHome, gjcRegistryPath, projectRegistryPath));
+}
+
+/** Cache key shared by the default installer cache and any caller-supplied root. */
+function pluginRootsCachePrefix(
+	canonicalHome: string,
+	gjcRegistryPath: string | undefined,
+	projectRegistryPath: string | undefined,
+): string {
+	return `${canonicalHome}:${gjcRegistryPath ?? ""}:${projectRegistryPath ?? ""}`;
+}
+
+function pluginRootsCacheKey(prefix: string, cacheRoot: string): string {
+	return `${prefix}\0${cacheRoot}`;
+}
+
+function forgetPluginRootsCache(prefix: string): void {
+	for (const key of pluginRootsCache.keys()) {
+		if (key === prefix || key.startsWith(`${prefix}\0`)) pluginRootsCache.delete(key);
+	}
+}
+
+/**
+ * Installer cache root discovery will accept for a project registry entry.
+ * A caller-supplied root is the same `pluginsCacheDir` passed to MarketplaceManager.
+ * It is never read from the registry. Omitted, the root is the home installer cache.
+ */
+function projectPluginCacheRoot(home: string, pluginsCacheDir?: string): string {
+	if (typeof pluginsCacheDir === "string" && pluginsCacheDir.length > 0) return pluginsCacheDir;
+	return path.join(getPluginsDir(home), "cache", "plugins");
 }
 
 async function canonicalizeThroughExistingAncestor(target: string): Promise<string> {
@@ -1623,14 +1652,14 @@ async function resolveIsolatedPluginPath(home: string, value: string): Promise<s
 
 /** Path the installer records for a plugin. Undefined when the id or version cannot name a cache directory. */
 function installedPluginCachePath(
-	home: string,
+	cacheRoot: string,
 	marketplace: string,
 	pluginName: string,
 	version: string,
 ): string | undefined {
 	if (typeof version !== "string" || version.length === 0) return undefined;
 	try {
-		return getCachedPluginPath(path.join(getPluginsDir(home), "cache", "plugins"), marketplace, pluginName, version);
+		return getCachedPluginPath(cacheRoot, marketplace, pluginName, version);
 	} catch {
 		return undefined;
 	}
@@ -1640,8 +1669,8 @@ function installedPluginCachePath(
  * List installed GJC plugin roots from the GJC plugin registry and, when present,
  * the nearest project-scoped registry resolved from `cwd`.
  *
- * Ordinary results are cached per `home:resolvedProjectPath` key to avoid
- * repeated parsing. Isolated results intentionally bypass the shared cache:
+ * Ordinary results are cached per home, registry, and installer cache root.
+ * Isolated results intentionally bypass the shared cache:
  * an ordinary load may contain external install roots that an isolated load
  * must reject, and reusing that result would cross the home boundary.
  */
@@ -1651,6 +1680,7 @@ export async function listClaudePluginRoots(
 	cwd?: string,
 	isolatedHome = false,
 	homeIdentity?: FileIdentity,
+	pluginsCacheDir?: string,
 ): Promise<{ roots: ClaudePluginRoot[]; warnings: string[] }> {
 	const resolvedProjectPath = cwd ? await resolveActiveProjectRegistryPath(cwd, home, isolatedHome) : null;
 	const canonicalHome = await canonicalizeThroughExistingAncestor(home);
@@ -1659,7 +1689,11 @@ export async function listClaudePluginRoots(
 	const projectRegistryPath = resolvedProjectPath
 		? await canonicalizePluginRegistryPath(canonicalHome, resolvedProjectPath, isolatedHome)
 		: undefined;
-	const cacheKey = `${canonicalHome}:${gjcRegistryPath ?? ""}:${projectRegistryPath ?? ""}`;
+	const cacheRoot = projectPluginCacheRoot(home, pluginsCacheDir);
+	const cacheKey = pluginRootsCacheKey(
+		pluginRootsCachePrefix(canonicalHome, gjcRegistryPath, projectRegistryPath),
+		cacheRoot,
+	);
 	if (!isolatedHome) {
 		const cached = pluginRootsCache.get(cacheKey);
 		if (cached) return cached;
@@ -1734,8 +1768,10 @@ export async function listClaudePluginRoots(
 	// ── Project-scoped GJC registry ────────────────────────────────────────
 	// Loaded from the nearest .gjc/plugins/installed_plugins.json relative to cwd.
 	// A project file can arrive with the repository, so its installPath is adopted
-	// only when it is the cache path the installer records. That cache path is the
-	// root used below. Project entries take precedence over user entries for the same plugin ID.
+	// only when it equals the cache path under the installer cache root. That root
+	// is the caller-supplied plugins cache when one was configured, otherwise the
+	// home installer cache. The registry path is not the root used below.
+	// Project entries take precedence over user entries for the same plugin ID.
 	if (resolvedProjectPath) {
 		const projectContent = projectRegistryPath ? await readFile(projectRegistryPath, registryReadOptions) : null;
 		if (isolatedHome && !projectRegistryPath) {
@@ -1765,7 +1801,7 @@ export async function listClaudePluginRoots(
 							continue;
 						}
 						if (entry.enabled === false) continue;
-						const cachePath = installedPluginCachePath(home, marketplace, pluginName, entry.version);
+						const cachePath = installedPluginCachePath(cacheRoot, marketplace, pluginName, entry.version);
 						if (!cachePath || entry.installPath !== cachePath) {
 							warnings.push(`Plugin ${pluginId} installPath is not the installed cache path`);
 							continue;
