@@ -4,7 +4,6 @@ import { startAuthGateway } from "../src/auth-gateway/server";
 import type { AuthGatewayServerHandle } from "../src/auth-gateway/types";
 import type { AuthStorage } from "../src/auth-storage";
 import type { Api, Model } from "../src/types";
-import { hostHeaderMatchesBind, parseBind } from "../src/utils/parse-bind";
 
 const TEST_MODEL = {
 	id: "test-model",
@@ -20,6 +19,37 @@ function startGateway(bearerTokens: string[]): AuthGatewayServerHandle {
 		reloadProviderCredentials: async () => {},
 		validateProviderCredential: () => true,
 		bearerTokens,
+		version: "test",
+		storage: {
+			exportSnapshot: () => ({ credentials: [{ provider: TEST_MODEL.provider }] }),
+		} as unknown as AuthStorage,
+		resolveModel: () => TEST_MODEL,
+		listModels: () => [TEST_MODEL],
+	});
+}
+
+function canListen(port: number): Promise<boolean> {
+	return new Promise(resolve => {
+		const server = net.createServer();
+		server.unref();
+		server.once("error", () => resolve(false));
+		server.listen({ port, host: "127.0.0.1", exclusive: true }, () => {
+			server.close(() => resolve(true));
+		});
+	});
+}
+
+const canListen80 = await canListen(80);
+const canListen443 = await canListen(443);
+
+function startOn(bind: string): AuthGatewayServerHandle {
+	return startAuthGateway({
+		bind,
+		providerScope: { provider: TEST_MODEL.provider },
+		hasProviderCredential: () => true,
+		reloadProviderCredentials: async () => {},
+		validateProviderCredential: () => true,
+		bearerTokens: [],
 		version: "test",
 		storage: {
 			exportSnapshot: () => ({ credentials: [{ provider: TEST_MODEL.provider }] }),
@@ -83,39 +113,43 @@ describe("auth-gateway tokenless host pin", () => {
 		}
 	});
 
-	it("accepts a portless Host when the tokenless listener is on port 80", async () => {
-		expect(hostHeaderMatchesBind("127.0.0.1", parseBind("127.0.0.1:80"))).toBe(true);
-		let gateway: AuthGatewayServerHandle | undefined;
-		try {
-			gateway = startAuthGateway({
-				bind: "127.0.0.1:80",
-				providerScope: { provider: TEST_MODEL.provider },
-				hasProviderCredential: () => true,
-				reloadProviderCredentials: async () => {},
-				validateProviderCredential: () => true,
-				bearerTokens: [],
-				version: "test",
-				storage: {
-					exportSnapshot: () => ({ credentials: [{ provider: TEST_MODEL.provider }] }),
-				} as unknown as AuthStorage,
-				resolveModel: () => TEST_MODEL,
-				listModels: () => [TEST_MODEL],
-			});
-		} catch (error) {
-			const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
-			const message = error instanceof Error ? error.message : String(error);
-			if (/EACCES|EPERM|EADDRINUSE|permission/i.test(`${code} ${message}`)) return;
-			throw error;
-		}
-		try {
-			const response = await httpGet(gateway.port, "127.0.0.1", "/v1/models");
-			expect(response.status).toBe(200);
-			expect(response.raw).toContain("test-model");
-			const rebound = await httpGet(gateway.port, "attacker.example", "/v1/models");
-			expect(rebound.status).toBe(403);
-		} finally {
-			await gateway.close();
-		}
+	describe.serial("default-port Host forms", () => {
+		it.skipIf(!canListen80)("still allows a Host without a port on a port-80 listener", async () => {
+			const gateway = startOn("127.0.0.1:80");
+			try {
+				const response = await httpGet(gateway.port, "127.0.0.1", "/v1/models");
+				expect(response.status).toBe(200);
+				expect(response.raw).toContain("test-model");
+				const rebound = await httpGet(gateway.port, "attacker.example", "/v1/models");
+				expect(rebound.status).toBe(403);
+			} finally {
+				await gateway.close();
+			}
+		});
+
+		it.skipIf(!canListen80)("still allows Host :80 on an http port-80 listener", async () => {
+			const gateway = startOn("127.0.0.1:80");
+			try {
+				const response = await httpGet(gateway.port, "127.0.0.1:80", "/v1/models");
+				expect(response.status).toBe(200);
+				expect(response.raw).toContain("test-model");
+			} finally {
+				await gateway.close();
+			}
+		});
+
+		it.skipIf(!canListen443)("still allows Host :443 on a port-443 listener", async () => {
+			const gateway = startOn("127.0.0.1:443");
+			try {
+				const response = await httpGet(gateway.port, "127.0.0.1:443", "/v1/models");
+				expect(response.status).toBe(200);
+				expect(response.raw).toContain("test-model");
+				const rebound = await httpGet(gateway.port, "attacker.example:443", "/v1/models");
+				expect(rebound.status).toBe(403);
+			} finally {
+				await gateway.close();
+			}
+		});
 	});
 
 	it("does not pin Host when a bearer token is configured", async () => {

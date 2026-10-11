@@ -111,9 +111,11 @@ function parseHostHeader(value: string): { hostname: string; port: number | null
 
 /**
  * Tokenless loopback servers accept a request only when its Host header is the
- * bound hostname and effective port. An omitted port is the HTTP default, 80,
- * and only matches a listener on port 80. A DNS-rebound same-origin GET sends
- * the attacker's name and no Origin header.
+ * bound hostname and effective port. Default-port forms that stay allowed:
+ * a Host with no port, or an explicit :80, on an HTTP listener on port 80;
+ * an explicit :443 on a listener on port 443. Any other omitted port is
+ * rejected. A DNS-rebound same-origin GET sends the attacker's name and no
+ * Origin header.
  */
 export function hostHeaderMatchesBind(hostHeader: string | null, bind: ParsedBind): boolean {
 	if (hostHeader === null) return false;
