@@ -40,6 +40,15 @@ function fakeClient(cwd: string): LspClient {
 	};
 }
 
+function mockDriveRealpath(mapped: Record<string, string>): void {
+	const realpath = fsPromises.realpath;
+	vi.spyOn(fsPromises, "realpath").mockImplementation((async (target: string) => {
+		const text = String(target);
+		if (Object.hasOwn(mapped, text)) return mapped[text];
+		return realpath(target);
+	}) as typeof realpath);
+}
+
 function mockEmptyConfig(): void {
 	vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
 }
@@ -311,6 +320,115 @@ describe("rename_file target checks", () => {
 			expect(fs.existsSync(source)).toBe(true);
 			expect(fs.existsSync(dest)).toBe(false);
 			expect(await Bun.file(inside).text()).toBe(insideText);
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
+	it("still allows a same-volume path when the workspace is a Windows drive root", async () => {
+		const tempDir = TempDir.createSync("@gjc-lsp-rename-drive-allow-");
+		try {
+			const cwd = path.join(tempDir.path(), "repo");
+			const source = path.join(cwd, "old.ts");
+			const dest = path.join(cwd, "fresh", "moved.ts");
+			await Bun.write(source, "export const value = 1;\n");
+			mockEmptyConfig();
+			mockDriveRealpath({
+				[cwd]: "C:\\",
+				[source]: "C:\\repo\\old.ts",
+				[dest]: "C:\\repo\\fresh\\moved.ts",
+			});
+
+			const tool = new LspTool({ cwd } as ToolSession);
+			const result = await tool.execute("rename-drive-allow", {
+				action: "rename_file",
+				file: source,
+				new_name: dest,
+				timeout: 5,
+			});
+
+			expect(fs.existsSync(source)).toBe(false);
+			expect(await Bun.file(dest).text()).toBe("export const value = 1;\n");
+			const output = result.content.map(block => (block.type === "text" ? block.text : "")).join("\n");
+			expect(output).toContain("Renamed");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
+	it("refuses a willRenameFiles edit on another drive when the workspace is a Windows drive root", async () => {
+		const tempDir = TempDir.createSync("@gjc-lsp-rename-drive-deny-");
+		try {
+			const cwd = path.join(tempDir.path(), "repo");
+			const source = path.join(cwd, "old.ts");
+			const dest = path.join(cwd, "new.ts");
+			const outside = path.join(tempDir.path(), "outside.ts");
+			const outsideText = "export const outside = 1;\n";
+			await Bun.write(source, "export const value = 1;\n");
+			await Bun.write(outside, outsideText);
+			mockDriveRealpath({
+				[cwd]: "C:\\",
+				[source]: "C:\\repo\\old.ts",
+				[dest]: "C:\\repo\\new.ts",
+				[outside]: "D:\\outside.ts",
+			});
+			mockServer(cwd, () => ({
+				changes: { [fileToUri(outside)]: [textEdit("LEAKED")] },
+			}));
+
+			const tool = new LspTool({ cwd } as ToolSession);
+			await expect(
+				tool.execute("rename-drive-deny", {
+					action: "rename_file",
+					file: source,
+					new_name: dest,
+					timeout: 5,
+				}),
+			).rejects.toThrow(/LSP edit escapes the workspace:.*outside\.ts/);
+
+			expect(fs.existsSync(source)).toBe(true);
+			expect(fs.existsSync(dest)).toBe(false);
+			expect(await Bun.file(outside).text()).toBe(outsideText);
+			expect(lspClient.sendNotification).not.toHaveBeenCalled();
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
+	it("refuses a willRenameFiles edit on a UNC share when the workspace is a Windows drive root", async () => {
+		const tempDir = TempDir.createSync("@gjc-lsp-rename-share-deny-");
+		try {
+			const cwd = path.join(tempDir.path(), "repo");
+			const source = path.join(cwd, "old.ts");
+			const dest = path.join(cwd, "new.ts");
+			const outside = path.join(tempDir.path(), "share.ts");
+			const outsideText = "export const share = 1;\n";
+			await Bun.write(source, "export const value = 1;\n");
+			await Bun.write(outside, outsideText);
+			mockDriveRealpath({
+				[cwd]: "C:\\",
+				[source]: "C:\\repo\\old.ts",
+				[dest]: "C:\\repo\\new.ts",
+				[outside]: "\\\\server\\share\\share.ts",
+			});
+			mockServer(cwd, () => ({
+				changes: { [fileToUri(outside)]: [textEdit("LEAKED")] },
+			}));
+
+			const tool = new LspTool({ cwd } as ToolSession);
+			await expect(
+				tool.execute("rename-share-deny", {
+					action: "rename_file",
+					file: source,
+					new_name: dest,
+					timeout: 5,
+				}),
+			).rejects.toThrow(/LSP edit escapes the workspace:.*share\.ts/);
+
+			expect(fs.existsSync(source)).toBe(true);
+			expect(fs.existsSync(dest)).toBe(false);
+			expect(await Bun.file(outside).text()).toBe(outsideText);
+			expect(lspClient.sendNotification).not.toHaveBeenCalled();
 		} finally {
 			tempDir.removeSync();
 		}
