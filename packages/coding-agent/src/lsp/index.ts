@@ -77,6 +77,7 @@ import {
 	symbolKindToIcon,
 	uriToFile,
 } from "./utils";
+import { assertInsideWorkspace } from "./workspace-path";
 
 export type { LspServerStatus } from "./client";
 export type { LspToolDetails } from "./types";
@@ -1522,6 +1523,25 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							existing.discarded += discardedNew;
 						}
 					}
+				}
+			}
+
+			// Reject every path this rename will write before the first write. Check the
+			// caller signal after each await, including the last one. A filesystem-root
+			// workspace already contains every absolute path; the shared helper's prefix
+			// for that root is `//`, so do not apply it there.
+			const cwd = this.session.cwd;
+			throwIfAborted(signal);
+			const workspaceRoot = await fs.promises.realpath(cwd);
+			throwIfAborted(signal);
+			if (workspaceRoot !== path.parse(workspaceRoot).root) {
+				await assertInsideWorkspace(cwd, source);
+				throwIfAborted(signal);
+				await assertInsideWorkspace(cwd, dest);
+				throwIfAborted(signal);
+				for (const uri of acceptedByUri.keys()) {
+					await assertInsideWorkspace(cwd, uriToFile(uri));
+					throwIfAborted(signal);
 				}
 			}
 
