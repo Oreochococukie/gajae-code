@@ -109,4 +109,50 @@ describe("ast_edit apply .gjc realpath", () => {
 			await fs.rm(root, { recursive: true, force: true });
 		}
 	});
+
+	it("still allows an ordinary edit through a symlinked workspace", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "ast-edit-gjc-allow-"));
+		try {
+			const workspace = path.join(root, "workspace");
+			const cwd = path.join(root, "via");
+			const source = path.join(workspace, "src", "app.ts");
+			const protectedFile = path.join(workspace, ".gjc", "agent-state.ts");
+			await fs.mkdir(path.dirname(source), { recursive: true });
+			await fs.mkdir(path.dirname(protectedFile), { recursive: true });
+			await fs.symlink(workspace, cwd, "dir");
+			const original = Buffer.from("legacyWrap(x, value)\n");
+			const protectedBytes = Buffer.from("legacyWrap(secret, value)\n");
+			await Bun.write(source, original);
+			await Bun.write(protectedFile, protectedBytes);
+
+			const resolved = await resolveAstEditPreviewWritePaths(cwd, ["src/app.ts"]);
+			expect(resolved).toEqual(["src/app.ts"]);
+
+			const queue = new ToolChoiceQueue();
+			const tools = await createTools(
+				createTestSession(cwd, {
+					getToolChoiceQueue: () => queue,
+					buildToolChoice: () => ({ type: "tool" as const, name: "resolve" }),
+				}),
+			);
+			const tool = tools.find(entry => entry.name === "ast_edit");
+			expect(tool).toBeDefined();
+
+			const preview = await tool!.execute("ast-edit-gjc-ordinary", {
+				ops: [{ pat: "legacyWrap($A, $B)", out: "modernWrap($A, $B)" }],
+				paths: ["src/app.ts"],
+			});
+			expect((preview.details as { totalReplacements?: number } | undefined)?.totalReplacements).toBe(1);
+
+			queue.nextToolChoice();
+			const invoker = queue.peekInFlightInvoker();
+			expect(invoker).toBeDefined();
+			await invoker!({ action: "apply", reason: "apply ordinary file through a symlinked workspace" });
+
+			expect(await Bun.file(source).text()).toContain("modernWrap(x, value)");
+			expect(Buffer.compare(await fs.readFile(protectedFile), protectedBytes)).toBe(0);
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
 });
