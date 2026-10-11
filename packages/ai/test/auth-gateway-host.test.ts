@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
 import * as net from "node:net";
 import { startAuthGateway } from "../src/auth-gateway/server";
 import type { AuthGatewayServerHandle } from "../src/auth-gateway/types";
@@ -28,20 +28,6 @@ function startGateway(bearerTokens: string[]): AuthGatewayServerHandle {
 	});
 }
 
-function canListen(port: number): Promise<boolean> {
-	return new Promise(resolve => {
-		const server = net.createServer();
-		server.unref();
-		server.once("error", () => resolve(false));
-		server.listen({ port, host: "127.0.0.1", exclusive: true }, () => {
-			server.close(() => resolve(true));
-		});
-	});
-}
-
-const canListen80 = await canListen(80);
-const canListen443 = await canListen(443);
-
 function startOn(bind: string): AuthGatewayServerHandle {
 	return startAuthGateway({
 		bind,
@@ -58,6 +44,29 @@ function startOn(bind: string): AuthGatewayServerHandle {
 		listModels: () => [TEST_MODEL],
 	});
 }
+
+function bindDenied(error: unknown): boolean {
+	const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+	const message = error instanceof Error ? error.message : String(error);
+	return /EACCES|EPERM|EADDRINUSE|permission/i.test(`${code} ${message}`);
+}
+
+function openPrivileged(bind: string): AuthGatewayServerHandle | undefined {
+	try {
+		return startOn(bind);
+	} catch (error) {
+		if (bindDenied(error)) return undefined;
+		throw error;
+	}
+}
+
+const gateway80 = openPrivileged("127.0.0.1:80");
+const gateway443 = openPrivileged("127.0.0.1:443");
+
+afterAll(async () => {
+	await gateway80?.close();
+	await gateway443?.close();
+});
 
 function httpGet(
 	port: number,
@@ -114,41 +123,26 @@ describe("auth-gateway tokenless host pin", () => {
 	});
 
 	describe.serial("default-port Host forms", () => {
-		it.skipIf(!canListen80)("still allows a Host without a port on a port-80 listener", async () => {
-			const gateway = startOn("127.0.0.1:80");
-			try {
-				const response = await httpGet(gateway.port, "127.0.0.1", "/v1/models");
-				expect(response.status).toBe(200);
-				expect(response.raw).toContain("test-model");
-				const rebound = await httpGet(gateway.port, "attacker.example", "/v1/models");
-				expect(rebound.status).toBe(403);
-			} finally {
-				await gateway.close();
-			}
+		it.skipIf(!gateway80)("still allows a Host without a port on a port-80 listener", async () => {
+			const response = await httpGet(gateway80!.port, "127.0.0.1", "/v1/models");
+			expect(response.status).toBe(200);
+			expect(response.raw).toContain("test-model");
+			const rebound = await httpGet(gateway80!.port, "attacker.example", "/v1/models");
+			expect(rebound.status).toBe(403);
 		});
 
-		it.skipIf(!canListen80)("still allows Host :80 on an http port-80 listener", async () => {
-			const gateway = startOn("127.0.0.1:80");
-			try {
-				const response = await httpGet(gateway.port, "127.0.0.1:80", "/v1/models");
-				expect(response.status).toBe(200);
-				expect(response.raw).toContain("test-model");
-			} finally {
-				await gateway.close();
-			}
+		it.skipIf(!gateway80)("still allows Host :80 on an http port-80 listener", async () => {
+			const response = await httpGet(gateway80!.port, "127.0.0.1:80", "/v1/models");
+			expect(response.status).toBe(200);
+			expect(response.raw).toContain("test-model");
 		});
 
-		it.skipIf(!canListen443)("still allows Host :443 on a port-443 listener", async () => {
-			const gateway = startOn("127.0.0.1:443");
-			try {
-				const response = await httpGet(gateway.port, "127.0.0.1:443", "/v1/models");
-				expect(response.status).toBe(200);
-				expect(response.raw).toContain("test-model");
-				const rebound = await httpGet(gateway.port, "attacker.example:443", "/v1/models");
-				expect(rebound.status).toBe(403);
-			} finally {
-				await gateway.close();
-			}
+		it.skipIf(!gateway443)("still allows Host :443 on a port-443 listener", async () => {
+			const response = await httpGet(gateway443!.port, "127.0.0.1:443", "/v1/models");
+			expect(response.status).toBe(200);
+			expect(response.raw).toContain("test-model");
+			const rebound = await httpGet(gateway443!.port, "attacker.example:443", "/v1/models");
+			expect(rebound.status).toBe(403);
 		});
 	});
 
