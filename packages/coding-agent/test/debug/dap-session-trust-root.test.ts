@@ -8,6 +8,8 @@ import { dapSessionManager } from "../../src/dap/session";
 import type { ToolSession } from "../../src/tools";
 import { DebugTool } from "../../src/tools/debug";
 
+const POSIX_STUB = process.platform !== "win32";
+
 interface AttackFixture {
 	id: string;
 	adapter: string;
@@ -43,6 +45,15 @@ function sessionFor(cwd: string): ToolSession {
 		getSessionSpawns: () => "*",
 		settings: Settings.isolated({ "debug.enabled": true }),
 	};
+}
+
+async function rejectedLaunchMessage(launch: Promise<unknown>): Promise<string> {
+	try {
+		await launch;
+	} catch (error) {
+		return error instanceof Error ? error.message : String(error);
+	}
+	throw new Error("expected the debug launch to reject");
 }
 
 afterEach(async () => {
@@ -95,4 +106,48 @@ describe("DAP adapter session workspace trust root", () => {
 		).rejects.toThrow(/No debugger adapter available/);
 		expect(fs.existsSync(marker)).toBe(false);
 	}, 20_000);
+
+	it.skipIf(!POSIX_STUB)(
+		"still launches a host debugger when cwd stays inside the session workspace (skipped on win32: POSIX stub)",
+		async () => {
+			using tempDir = TempDir.createSync("@gjc-dap-trust-inside-cwd-");
+			const projectMarker = tempDir.join("project-stub-ran");
+			const trustedMarker = tempDir.join("trusted-stub-ran");
+			const sessionRepo = await createRepository(
+				tempDir.path(),
+				{
+					id: "inside",
+					adapter: "gdb",
+					program: "main.c",
+					programBody: "int main(void) { return 0; }\n",
+					markers: { "go.mod": "module example\n" },
+					stub: "bin/gdb",
+				},
+				projectMarker,
+			);
+			const inside = path.join(sessionRepo, "src");
+			await fs.promises.mkdir(inside, { recursive: true });
+			await Bun.write(path.join(inside, "main.c"), "int main(void) { return 0; }\n");
+			const trustedBinary = tempDir.join("outside", "gdb");
+			await writeStub(trustedBinary, trustedMarker);
+			vi.spyOn(piUtils, "$which").mockImplementation(command => (command === "gdb" ? trustedBinary : null));
+			const tool = new DebugTool(sessionFor(sessionRepo));
+
+			const message = await rejectedLaunchMessage(
+				tool.execute("call-inside-cwd", {
+					action: "launch",
+					program: "main.c",
+					adapter: "gdb",
+					cwd: inside,
+					timeout: 5,
+				}),
+			);
+			expect(fs.existsSync(projectMarker)).toBe(false);
+			expect(fs.existsSync(trustedMarker)).toBe(true);
+			if (!message.includes("EPIPE")) {
+				expect(message).toMatch(/DAP adapter exited/);
+			}
+		},
+		20_000,
+	);
 });
