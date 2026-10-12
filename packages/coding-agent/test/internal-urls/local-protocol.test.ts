@@ -752,6 +752,34 @@ describe("LocalProtocolHandler", () => {
 		});
 	});
 
+	it.skipIf(posixOnly)("retries initialization after a marker write fails on a recreated root", async () => {
+		const sessionId = `marker-retry-${crypto.randomUUID()}`;
+		await withLocalRoot(sessionId, async localRoot => {
+			await fs.chmod(localRoot, 0o700);
+			const options = localOptions(sessionId, path.join(os.tmpdir(), `unused-artifacts-${sessionId}`));
+			await initializeLocalRoot(options);
+			await fs.rm(localRoot, { recursive: true });
+			const markerPath = path.join(localRoot, ".gjc-local-legacy-migrated-v1");
+			const originalWrite = fs.writeFile;
+			let failedOnce = false;
+			const writeSpy = vi.spyOn(fs, "writeFile").mockImplementation((async (file, data, writeOptions) => {
+				if (!failedOnce && String(file) === markerPath) {
+					failedOnce = true;
+					throw Object.assign(new Error("marker write failed"), { code: "EIO" });
+				}
+				return originalWrite(file, data as string, writeOptions);
+			}) as typeof fs.writeFile);
+			try {
+				await expect(initializeLocalRoot(options)).rejects.toThrow("marker write failed");
+			} finally {
+				writeSpy.mockRestore();
+			}
+			expect(await initializeLocalRoot(options)).toBe(await fs.realpath(localRoot));
+			expect(await fs.readFile(markerPath, "utf8")).toBe("absent\n");
+			expect(resolveLocalUrlToPath("local://note.txt", options)).toBe(path.join(localRoot, "note.txt"));
+		});
+	});
+
 	it.skipIf(posixOnly)("refuses a managed local root swapped for a symlink after init", async () => {
 		const sessionId = `symlink-swap-${crypto.randomUUID()}`;
 		const localRoot = resolveLocalRoot({ getSessionId: () => sessionId, isManagedDestination: () => true });
