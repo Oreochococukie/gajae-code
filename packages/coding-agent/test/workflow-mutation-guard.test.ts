@@ -38,15 +38,15 @@ async function makeNonNeutralDir(): Promise<string> {
 }
 
 async function removeDirLeafFirst(dir: string): Promise<void> {
-	let entries: Awaited<ReturnType<typeof fs.readdir>> = [];
+	let names: string[] = [];
 	try {
-		entries = await fs.readdir(dir, { withFileTypes: true });
+		names = await fs.readdir(dir);
 	} catch {
 		return;
 	}
-	for (const entry of entries) {
-		const child = path.join(dir, entry.name);
-		if (entry.isDirectory()) await removeDirLeafFirst(child);
+	for (const name of names) {
+		const child = path.join(dir, name);
+		if ((await fs.lstat(child)).isDirectory()) await removeDirLeafFirst(child);
 		else await fs.rm(child, { force: true });
 	}
 	await fs.rmdir(dir);
