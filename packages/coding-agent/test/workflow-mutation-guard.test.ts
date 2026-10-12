@@ -1118,7 +1118,7 @@ describe("workflow mutation guard", () => {
 		expect(decision.blocked).toBe(true);
 	});
 
-	it("pins a project TMPDIR at import and still allows the real OS temp dir", async () => {
+	it("blocks a project dotenv TMPDIR as a planning temp root", async () => {
 		// The parent already imported the guard. The child imports it after `.env` exists.
 		for (const drop of ["unlink", "chdir"] as const) {
 			const workspace = await makeTempRoot();
@@ -1140,7 +1140,9 @@ describe("workflow mutation guard", () => {
 			expect(decision.message, drop).toBe(DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE);
 			expect(await Bun.file(product).text(), drop).toBe("original\n");
 		}
+	}, 60_000);
 
+	it("still allows the real OS temp dir during an active planning phase", async () => {
 		const workspace = await makeTempRoot();
 		await writeActiveDeepInterview(workspace);
 		const realOsTemp = process.env.TMPDIR?.trim() || os.tmpdir();
