@@ -179,7 +179,7 @@ async function assertDirectoryNotSymlink(directoryPath: string): Promise<void> {
 	}
 }
 
-/** Group-write and world-write bits. A shared temp parent must not be able to create files here. */
+/** Group-write and world-write bits. Either one lets another user rename the session directory. */
 const GROUP_OR_WORLD_WRITABLE = 0o022;
 
 interface DirectoryIdentityStat {
@@ -195,7 +195,6 @@ interface ManagedRootIdentity {
 	readonly dev: number;
 	readonly ino: number;
 	readonly uid: number;
-	readonly mode: number;
 }
 
 function isUnsafeDirectory(stat: DirectoryIdentityStat): boolean {
@@ -203,17 +202,15 @@ function isUnsafeDirectory(stat: DirectoryIdentityStat): boolean {
 }
 
 function managedRootIdentity(stat: DirectoryIdentityStat): ManagedRootIdentity {
-	return { dev: stat.dev, ino: stat.ino, uid: stat.uid, mode: stat.mode };
+	return { dev: stat.dev, ino: stat.ino, uid: stat.uid };
 }
 
 function sameManagedRoot(stat: DirectoryIdentityStat, recorded: ManagedRootIdentity): boolean {
-	return (
-		!isUnsafeDirectory(stat) &&
-		stat.dev === recorded.dev &&
-		stat.ino === recorded.ino &&
-		stat.uid === recorded.uid &&
-		stat.mode === recorded.mode
-	);
+	if (isUnsafeDirectory(stat) || stat.dev !== recorded.dev || stat.ino !== recorded.ino) return false;
+	// A later chmod to 0755 keeps the same directory. Only a writable bit, a new
+	// inode, or a different owner means the root was replaced or opened up.
+	if (process.platform === "win32") return true;
+	return stat.uid === recorded.uid && (stat.mode & GROUP_OR_WORLD_WRITABLE) === 0;
 }
 
 /**
@@ -227,6 +224,16 @@ function assertAdoptedManagedRoot(stat: DirectoryIdentityStat): void {
 	if (uid === undefined || stat.uid !== uid || (stat.mode & GROUP_OR_WORLD_WRITABLE) !== 0) {
 		throw new Error("Unsafe local:// root");
 	}
+}
+
+function assertManagedParentSync(localRoot: string): void {
+	let parentStat: fsSync.Stats;
+	try {
+		parentStat = fsSync.lstatSync(path.dirname(localRoot));
+	} catch {
+		throw new Error("Unsafe local:// root");
+	}
+	assertAdoptedManagedRoot(parentStat);
 }
 
 const LEGACY_MIGRATION_MARKER = ".gjc-local-legacy-migrated-v1";
@@ -630,6 +637,7 @@ async function initializeManagedLocalRoot(options: LocalProtocolOptions, localRo
 
 	await fs.mkdir(scratchParent, { recursive: true, mode: 0o700 });
 	await assertDirectoryNotSymlink(scratchParent);
+	assertAdoptedManagedRoot(await fs.lstat(scratchParent));
 	let adoptedExisting = false;
 	try {
 		await fs.mkdir(localRoot, { mode: 0o700 });
@@ -641,7 +649,10 @@ async function initializeManagedLocalRoot(options: LocalProtocolOptions, localRo
 		}
 	}
 	const rootStat = await fs.lstat(localRoot);
-	if (adoptedExisting) assertAdoptedManagedRoot(rootStat);
+	const recorded = initializedLocalRoots.get(localRoot);
+	if (recorded) {
+		if (!sameManagedRoot(rootStat, recorded)) throw new Error("Unsafe local:// root");
+	} else if (adoptedExisting) assertAdoptedManagedRoot(rootStat);
 	else if (isUnsafeDirectory(rootStat)) throw new Error("Unsafe local:// root");
 	await migrateLegacyLocal(options, localRoot, scratchParent);
 
@@ -666,6 +677,7 @@ function initializeLocalRootSyncWhenLegacyAbsent(options: LocalProtocolOptions, 
 	}
 	const recorded = initializedLocalRoots.get(localRoot);
 	if (recorded) {
+		assertManagedParentSync(localRoot);
 		assertRememberedManagedRoot(localRoot, recorded);
 		return;
 	}
@@ -673,6 +685,7 @@ function initializeLocalRootSyncWhenLegacyAbsent(options: LocalProtocolOptions, 
 	fsSync.mkdirSync(scratchParent, { recursive: true, mode: 0o700 });
 	const parentStat = fsSync.lstatSync(scratchParent);
 	if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) throw new Error("Unsafe local:// root");
+	assertAdoptedManagedRoot(parentStat);
 	let adoptedExisting = false;
 	try {
 		fsSync.mkdirSync(localRoot, { mode: 0o700 });
