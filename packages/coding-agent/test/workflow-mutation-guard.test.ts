@@ -30,6 +30,28 @@ async function makeTempRoot(): Promise<string> {
 	return root;
 }
 
+/** A directory that is not the project cwd and not a platform temp root. */
+async function makeNonNeutralDir(): Promise<string> {
+	const tmpParent = path.dirname(path.resolve(os.tmpdir()));
+	const parent = tmpParent === path.parse(tmpParent).root ? os.homedir() : tmpParent;
+	return fs.mkdtemp(path.join(parent, "gjc-plan-tmpdir-"));
+}
+
+async function removeDirLeafFirst(dir: string): Promise<void> {
+	let entries: Awaited<ReturnType<typeof fs.readdir>> = [];
+	try {
+		entries = await fs.readdir(dir, { withFileTypes: true });
+	} catch {
+		return;
+	}
+	for (const entry of entries) {
+		const child = path.join(dir, entry.name);
+		if (entry.isDirectory()) await removeDirLeafFirst(child);
+		else await fs.rm(child, { force: true });
+	}
+	await fs.rmdir(dir);
+}
+
 async function writeActiveDeepInterview(cwd: string, sessionId = "session-a", phase = "interviewing"): Promise<void> {
 	const now = new Date().toISOString();
 	const sessionDir = sessionStateDir(cwd, sessionId);
@@ -1123,22 +1145,26 @@ describe("workflow mutation guard", () => {
 		for (const drop of ["unlink", "chdir"] as const) {
 			const workspace = await makeTempRoot();
 			await writeActiveDeepInterview(workspace);
-			const projectTmp = path.join(workspace, "tmp");
-			const product = path.join(projectTmp, "src", "product.ts");
-			await fs.mkdir(path.dirname(product), { recursive: true });
-			await Bun.write(product, "original\n");
-			await Bun.write(path.join(workspace, ".env"), `TMPDIR=${projectTmp}\n`);
+			const projectTmp = await makeNonNeutralDir();
+			try {
+				const product = path.join(projectTmp, "src", "product.ts");
+				await fs.mkdir(path.dirname(product), { recursive: true });
+				await Bun.write(product, "original\n");
+				await Bun.write(path.join(workspace, ".env"), `TMPDIR=${projectTmp}\n`);
 
-			const decision = await runProjectTmpdirProbe({
-				cwd: workspace,
-				target: product,
-				sessionId: "session-a",
-				drop,
-				expectedTmpdir: projectTmp,
-			});
-			expect(decision.blocked, drop).toBe(true);
-			expect(decision.message, drop).toBe(DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE);
-			expect(await Bun.file(product).text(), drop).toBe("original\n");
+				const decision = await runProjectTmpdirProbe({
+					cwd: workspace,
+					target: product,
+					sessionId: "session-a",
+					drop,
+					expectedTmpdir: projectTmp,
+				});
+				expect(decision.blocked, drop).toBe(true);
+				expect(decision.message, drop).toBe(DEEP_INTERVIEW_MUTATION_BLOCK_MESSAGE);
+				expect(await Bun.file(product).text(), drop).toBe("original\n");
+			} finally {
+				await removeDirLeafFirst(projectTmp);
+			}
 		}
 	}, 60_000);
 
