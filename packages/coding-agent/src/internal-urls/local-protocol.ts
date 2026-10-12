@@ -236,6 +236,26 @@ function assertManagedParentSync(localRoot: string): void {
 	assertAdoptedManagedRoot(parentStat);
 }
 
+/**
+ * Rebind a pinned root only when this call created it because the path was
+ * absent. An already-present directory must still be the pinned one.
+ */
+function acceptManagedRootForInit(
+	rootStat: DirectoryIdentityStat,
+	recorded: ManagedRootIdentity | undefined,
+	adoptedExisting: boolean,
+): void {
+	if (recorded && adoptedExisting) {
+		if (!sameManagedRoot(rootStat, recorded)) throw new Error("Unsafe local:// root");
+		return;
+	}
+	if (recorded || adoptedExisting) {
+		assertAdoptedManagedRoot(rootStat);
+		return;
+	}
+	if (isUnsafeDirectory(rootStat)) throw new Error("Unsafe local:// root");
+}
+
 const LEGACY_MIGRATION_MARKER = ".gjc-local-legacy-migrated-v1";
 const MAX_LEGACY_LOCAL_BYTES = 64 * 1024 * 1024;
 
@@ -650,10 +670,7 @@ async function initializeManagedLocalRoot(options: LocalProtocolOptions, localRo
 	}
 	const rootStat = await fs.lstat(localRoot);
 	const recorded = initializedLocalRoots.get(localRoot);
-	if (recorded) {
-		if (!sameManagedRoot(rootStat, recorded)) throw new Error("Unsafe local:// root");
-	} else if (adoptedExisting) assertAdoptedManagedRoot(rootStat);
-	else if (isUnsafeDirectory(rootStat)) throw new Error("Unsafe local:// root");
+	acceptManagedRootForInit(rootStat, recorded, adoptedExisting);
 	await migrateLegacyLocal(options, localRoot, scratchParent);
 
 	const resolvedScratchParent = await fs.realpath(scratchParent);
@@ -678,8 +695,17 @@ function initializeLocalRootSyncWhenLegacyAbsent(options: LocalProtocolOptions, 
 	const recorded = initializedLocalRoots.get(localRoot);
 	if (recorded) {
 		assertManagedParentSync(localRoot);
-		assertRememberedManagedRoot(localRoot, recorded);
-		return;
+		let absent = false;
+		try {
+			fsSync.lstatSync(localRoot);
+		} catch (error) {
+			if (!isEnoent(error)) throw new Error("Unsafe local:// root");
+			absent = true;
+		}
+		if (!absent) {
+			assertRememberedManagedRoot(localRoot, recorded);
+			return;
+		}
 	}
 	const scratchParent = path.dirname(localRoot);
 	fsSync.mkdirSync(scratchParent, { recursive: true, mode: 0o700 });
@@ -694,8 +720,7 @@ function initializeLocalRootSyncWhenLegacyAbsent(options: LocalProtocolOptions, 
 		adoptedExisting = true;
 	}
 	const rootStat = fsSync.lstatSync(localRoot);
-	if (adoptedExisting) assertAdoptedManagedRoot(rootStat);
-	else if (isUnsafeDirectory(rootStat)) throw new Error("Unsafe local:// root");
+	acceptManagedRootForInit(rootStat, recorded, adoptedExisting);
 	const marker = path.join(localRoot, LEGACY_MIGRATION_MARKER);
 	try {
 		// Accept exactly the marker states the async gate treats as settled. A

@@ -732,6 +732,26 @@ describe("LocalProtocolHandler", () => {
 		});
 	});
 
+	it.skipIf(posixOnly)("still allows a managed root after its marker-only directory is removed", async () => {
+		const sessionId = `marker-pruned-${crypto.randomUUID()}`;
+		await withLocalRoot(sessionId, async localRoot => {
+			await fs.chmod(localRoot, 0o700);
+			const options = localOptions(sessionId, path.join(os.tmpdir(), `unused-artifacts-${sessionId}`));
+			await initializeLocalRoot(options);
+			expect(await fs.readdir(localRoot)).toEqual([".gjc-local-legacy-migrated-v1"]);
+			const marker = path.join(localRoot, ".gjc-local-legacy-migrated-v1");
+			await fs.rm(localRoot, { recursive: true });
+			expect(await initializeLocalRoot(options)).toBe(await fs.realpath(localRoot));
+			expect(await fs.readFile(marker, "utf8")).toBe("absent\n");
+			expect(resolveLocalUrlToPath("local://note.txt", options)).toBe(path.join(localRoot, "note.txt"));
+			LocalProtocolHandler.setOverride(options);
+			const listed = await InternalUrlRouter.instance().resolve("local://");
+			expect(listed.sourcePath).toBe(await fs.realpath(localRoot));
+			await fs.rm(localRoot, { recursive: true });
+			expect(resolveLocalUrlToPath("local://note.txt", options)).toBe(path.join(localRoot, "note.txt"));
+		});
+	});
+
 	it.skipIf(posixOnly)("refuses a managed local root swapped for a symlink after init", async () => {
 		const sessionId = `symlink-swap-${crypto.randomUUID()}`;
 		const localRoot = resolveLocalRoot({ getSessionId: () => sessionId, isManagedDestination: () => true });
