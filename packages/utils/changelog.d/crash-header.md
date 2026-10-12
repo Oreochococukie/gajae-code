@@ -1,0 +1,3 @@
+### Fixed
+
+- Crash logs redact a stack before splitting it. When the stack starts with `name: message` and no credential replacement crosses that boundary, only the header is flattened and later frame lines stay. If a credential crosses the boundary, or the stack does not start with that prefix, the redacted stack is one field so the credential is still removed.

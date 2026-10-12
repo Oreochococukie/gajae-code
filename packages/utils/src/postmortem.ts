@@ -603,6 +603,38 @@ function getHandledErrorEventsTarget(target: string, configuredPath: string | un
 		: path.join(path.dirname(target), path.basename(getHandledErrorEventsPath()));
 }
 
+/**
+ * Redact the whole stack before any split. The header ends at the first frame
+ * (`\n`, optional indent, `at `), not at the raw `name: message`: redaction
+ * rewrites that prefix, and a forged newline inside it must still flatten.
+ * The header uses the same single-line control replacement as a crash-event
+ * field. Frame newlines stay. Other C0/C1 controls in the frames become spaces.
+ * No frame means the whole redacted stack is one field.
+ */
+/**
+ * Redact the whole stack before splitting. Nothing is inserted into the text
+ * the redactor sees. When the stack starts with `name: message` and no
+ * credential replacement crosses that boundary, only the redacted header is
+ * flattened and frame newlines stay. A crossing replacement, or a stack that
+ * does not start with that prefix, flattens the whole redacted stack so the
+ * credential is still removed.
+ */
+function crashLogStack(name: string, message: string, stack: string): string {
+	const allControls = /[\u0000-\u001f\u007f-\u009f]/g;
+	const frameControls = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g;
+	const redacted = redactCrashSecrets(stack);
+	const rawHeader = `${name}: ${message}`;
+	if (rawHeader.length > 0 && stack.startsWith(rawHeader)) {
+		const boundary = rawHeader.length;
+		const head = redactCrashSecrets(stack.slice(0, boundary));
+		const tail = redactCrashSecrets(stack.slice(boundary));
+		if (head + tail === redacted) {
+			return `${head.replace(allControls, " ")}${redacted.slice(head.length).replace(frameControls, " ")}`;
+		}
+	}
+	return redacted.replace(allControls, " ");
+}
+
 function writeCrashRecord(
 	label: string,
 	fatal: FatalDiagnostic,
@@ -611,7 +643,9 @@ function writeCrashRecord(
 	try {
 		const target = options.path ?? getCrashLogPath();
 		const now = options.now ?? new Date();
-		const stack = fatal.stack ? `${redactCrashSecrets(fatal.stack)}\n` : "";
+		const name = redactCrashSecrets(fatal.name).replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
+		const message = redactCrashSecrets(fatal.message).replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
+		const stack = fatal.stack ? `${crashLogStack(fatal.name, fatal.message, fatal.stack)}\n` : "";
 		const payload = fatal.payload ? `${redactCrashSecrets(fatal.payload)}\n` : "";
 		// Identity is computed from the already-captured diagnostic text only; the
 		// throwable is never read again here.
@@ -622,7 +656,7 @@ function writeCrashRecord(
 		// after truncation: an oversized body can never evict it.
 		const body = boundCrashRecord(
 			`${now.toISOString()} pid=${process.pid} [${label}${options.provenance && options.provenance !== "product" ? `;provenance=${options.provenance}` : ""}] ` +
-				`${redactCrashSecrets(fatal.name)}: ${redactCrashSecrets(fatal.message)}\n` +
+				`${name}: ${message}\n` +
 				`${stack}${payload}`,
 			CRASH_RECORD_MAX_BYTES - Buffer.byteLength(markerLine, "utf8") - 1,
 		);
