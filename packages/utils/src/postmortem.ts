@@ -606,26 +606,51 @@ function getHandledErrorEventsTarget(target: string, configuredPath: string | un
 
 /**
  * Redact the whole stack before splitting. Nothing is inserted into the text
- * the redactor sees. When the stack starts with `name: message` and no
- * credential replacement crosses that boundary, only the redacted header is
- * flattened and frame newlines stay. A crossing replacement, or a stack that
- * does not start with that prefix, flattens the whole redacted stack so the
- * credential is still removed.
+ * the redactor sees. When the stack starts with `name: message`, or with a
+ * name-only header for an empty message (`Error\n    at …`), and no credential
+ * replacement crosses that boundary, only the redacted header is flattened and
+ * frame newlines stay. A crossing replacement, or any other shape, flattens
+ * the whole redacted stack so the credential is still removed.
  */
 function crashLogStack(name: string, message: string, stack: string): string {
 	const allControls = /[\u0000-\u001f\u007f-\u009f]/g;
 	const frameControls = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g;
 	const redacted = redactCrashSecrets(stack);
+	const preserved = preserveFrameBoundary(
+		stack,
+		redacted,
+		headerBoundary(name, message, stack),
+		allControls,
+		frameControls,
+	);
+	return preserved ?? redacted.replace(allControls, " ");
+}
+
+function headerBoundary(name: string, message: string, stack: string): number | undefined {
 	const rawHeader = `${name}: ${message}`;
-	if (rawHeader.length > 0 && stack.startsWith(rawHeader)) {
-		const boundary = rawHeader.length;
-		const head = redactCrashSecrets(stack.slice(0, boundary));
-		const tail = redactCrashSecrets(stack.slice(boundary));
-		if (head + tail === redacted) {
-			return `${head.replace(allControls, " ")}${redacted.slice(head.length).replace(frameControls, " ")}`;
-		}
-	}
-	return redacted.replace(allControls, " ");
+	if (rawHeader.length > 0 && stack.startsWith(rawHeader)) return rawHeader.length;
+	// Bun prints an empty-message Error as `Error\n    at …`, while the stored
+	// message is `(no message)`. That prefix is not `name: message`.
+	if (message !== "" && message !== "(no message)") return undefined;
+	if (name.length === 0) return undefined;
+	const newline = stack.indexOf("\n");
+	if (newline <= 0) return undefined;
+	const first = stack.slice(0, newline).replace(/\r$/, "");
+	return first === name ? newline : undefined;
+}
+
+function preserveFrameBoundary(
+	stack: string,
+	redacted: string,
+	boundary: number | undefined,
+	allControls: RegExp,
+	frameControls: RegExp,
+): string | undefined {
+	if (boundary === undefined || boundary <= 0 || boundary > stack.length) return undefined;
+	const head = redactCrashSecrets(stack.slice(0, boundary));
+	const tail = redactCrashSecrets(stack.slice(boundary));
+	if (head + tail !== redacted) return undefined;
+	return `${head.replace(allControls, " ")}${redacted.slice(head.length).replace(frameControls, " ")}`;
 }
 
 /** The name, message, and stack strings that the crash log actually stores. */

@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { computeHandledErrorFingerprint, NO_APP_FRAME } from "../src/crash-fingerprint";
 import { CRASH_LOG_MAX_BYTES, CRASH_RECORD_MAX_BYTES, recordFatalCrash, recordHandledError } from "../src/postmortem";
 
 function tempCrashLog(): string {
@@ -123,6 +124,45 @@ describe("recordFatalCrash", () => {
 		expect(lines.join("\n")).not.toContain(token);
 		expect(lines).toContain(first);
 		expect(lines).toContain(second);
+	});
+
+	it("keeps frames for a name-only empty-message stack", () => {
+		const root = path.resolve(import.meta.dir, "..", "..", "..");
+		const frameA = `    at firstSite (${path.join(root, "packages/utils/src/empty-a.ts")}:1:1)`;
+		const frameB = `    at secondSite (${path.join(root, "packages/utils/src/empty-b.ts")}:2:1)`;
+		const err = new Error("");
+		err.stack = `Error\n${frameA}`;
+		const target = tempCrashLog();
+
+		expect(recordFatalCrash("Uncaught Exception", err, { path: target })).toBe(target);
+		const lines = fs.readFileSync(target, "utf8").split("\n");
+		expect(lines.some(line => line.includes("Error: (no message)"))).toBe(true);
+		expect(lines).toContain(frameA);
+		expect(lines.some(line => line.includes(`Error ${frameA.trim()}`))).toBe(false);
+
+		const identity = (frame: string) =>
+			computeHandledErrorFingerprint({
+				name: "Error",
+				message: "(no message)",
+				stack: `Error\n${frame}`,
+			});
+		const first = identity(frameA);
+		const second = identity(frameB);
+		expect(first.frames[0]).not.toBe(NO_APP_FRAME);
+		expect(second.frames[0]).not.toBe(NO_APP_FRAME);
+		expect(first.fingerprint).not.toBe(second.fingerprint);
+
+		const handledLog = tempCrashLog();
+		const siteA = new Error("");
+		siteA.stack = `Error\n${frameA}`;
+		const siteB = new Error("");
+		siteB.stack = `Error\n${frameB}`;
+		expect(recordHandledError("tool", siteA, { path: handledLog })).toBe(handledLog);
+		expect(recordHandledError("tool", siteB, { path: handledLog })).toBe(handledLog);
+		expect(recordHandledError("tool", siteA, { path: handledLog })).toBeUndefined();
+		const handled = fs.readFileSync(handledLog, "utf8").split("\n");
+		expect(handled).toContain(frameA);
+		expect(handled).toContain(frameB);
 	});
 
 	it("keeps at frame lines of a normal multi-line stack", () => {

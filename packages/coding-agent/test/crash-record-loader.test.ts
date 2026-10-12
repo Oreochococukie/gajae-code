@@ -147,6 +147,27 @@ describe("parseCrashRecords", () => {
 		expect(parseRecoverableCrashRecords(valid.text).map(record => record.fingerprint)).toEqual([valid.fingerprint]);
 	});
 
+	it("rebinds a name-only empty-message stack with its frame", () => {
+		const root = path.resolve(import.meta.dir, "..", "..");
+		const frame = `    at emptySite (${path.join(root, "packages/coding-agent/src/empty-message.ts")}:3:1)`;
+		const err = new Error("");
+		err.stack = `Error\n${frame}`;
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crash-empty-"));
+		const target = path.join(dir, "gjc-crash.log");
+		expect(postmortem.recordFatalCrash("Uncaught Exception", err, { path: target })).toBe(target);
+
+		const text = fs.readFileSync(target, "utf8");
+		const preserved = computeCrashFingerprint({
+			name: "Error",
+			message: "(no message)",
+			stack: `Error\n${frame}`,
+		});
+		const records = parseRecoverableCrashRecords(text);
+		expect(text.split("\n")).toContain(frame);
+		expect(preserved.frames[0]).not.toBe("<no-app-frame>");
+		expect(records.map(record => record.fingerprint)).toEqual([preserved.fingerprint]);
+	});
+
 	it("rebinds a flattened control and a boundary-spanning credential", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crash-rebind-"));
 		const target = path.join(dir, "gjc-crash.log");
