@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import type * as nodeFs from "node:fs";
+import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -36,6 +36,46 @@ async function withLocalRoot<T>(sessionId: string, fn: (root: string) => Promise
 
 function localOptions(sessionId: string, artifactsDir: string) {
 	return { getArtifactsDir: () => artifactsDir, isManagedDestination: () => true, getSessionId: () => sessionId };
+}
+
+function withForeignOwner(real: nodeFs.Stats): nodeFs.Stats {
+	const uid = (process.getuid?.() ?? 0) + 1;
+	const mode = (real.mode & ~0o777) | 0o755;
+	return new Proxy(real, {
+		get(target, prop, receiver) {
+			if (prop === "uid") return uid;
+			if (prop === "mode") return mode;
+			const value = Reflect.get(target, prop, receiver);
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+	});
+}
+
+async function withForeignOwnerStat<T>(foreignPath: string, fn: () => Promise<T>): Promise<T> {
+	const wanted = path.resolve(foreignPath);
+	const lstat = fs.lstat.bind(fs);
+	const lstatSync = nodeFs.lstatSync.bind(nodeFs);
+	const matches = (target: nodeFs.PathLike) => path.resolve(String(target)) === wanted;
+	const asyncSpy = vi.spyOn(fs, "lstat").mockImplementation((async (
+		target: nodeFs.PathLike,
+		options?: nodeFs.StatOptions,
+	) => {
+		const stat = await lstat(target, options);
+		return matches(target) && !options?.bigint ? withForeignOwner(stat as nodeFs.Stats) : stat;
+	}) as unknown as typeof fs.lstat);
+	const syncSpy = vi.spyOn(nodeFs, "lstatSync").mockImplementation(((
+		target: nodeFs.PathLike,
+		options?: nodeFs.StatOptions,
+	) => {
+		const stat = lstatSync(target, options);
+		return matches(target) && !options?.bigint ? withForeignOwner(stat) : stat;
+	}) as unknown as typeof nodeFs.lstatSync);
+	try {
+		return await fn();
+	} finally {
+		asyncSpy.mockRestore();
+		syncSpy.mockRestore();
+	}
 }
 
 it("keeps explicit local roots under artifacts while managed roots stay external", async () => {
@@ -738,6 +778,36 @@ describe("LocalProtocolHandler", () => {
 		} finally {
 			await fs.rm(tmp, { recursive: true, force: true });
 		}
+	});
+
+	it.skipIf(posixOnly)("refuses a managed local parent owned by another user", async () => {
+		const sessionId = `foreign-parent-${crypto.randomUUID()}`;
+		await withLocalRoot(sessionId, async localRoot => {
+			await fs.chmod(localRoot, 0o755);
+			const options = localOptions(sessionId, path.join(os.tmpdir(), `unused-artifacts-${sessionId}`));
+			await withForeignOwnerStat(path.dirname(localRoot), async () => {
+				expect(() => resolveLocalUrlToPath("local://note.txt", options)).toThrow("Unsafe local:// root");
+				await expect(initializeLocalRoot(options)).rejects.toThrow("Unsafe local:// root");
+			});
+			await expect(fs.lstat(path.join(localRoot, ".gjc-local-legacy-migrated-v1"))).rejects.toMatchObject({
+				code: "ENOENT",
+			});
+		});
+	});
+
+	it.skipIf(posixOnly)("refuses a managed session directory owned by another user", async () => {
+		const sessionId = `foreign-root-${crypto.randomUUID()}`;
+		await withLocalRoot(sessionId, async localRoot => {
+			await fs.chmod(localRoot, 0o755);
+			const options = localOptions(sessionId, path.join(os.tmpdir(), `unused-artifacts-${sessionId}`));
+			await withForeignOwnerStat(localRoot, async () => {
+				expect(() => resolveLocalUrlToPath("local://note.txt", options)).toThrow("Unsafe local:// root");
+				await expect(initializeLocalRoot(options)).rejects.toThrow("Unsafe local:// root");
+			});
+			await expect(fs.lstat(path.join(localRoot, ".gjc-local-legacy-migrated-v1"))).rejects.toMatchObject({
+				code: "ENOENT",
+			});
+		});
 	});
 
 	it.skipIf(posixOnly)("still allows a private 0700 managed local root", async () => {
