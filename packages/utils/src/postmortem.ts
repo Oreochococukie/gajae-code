@@ -14,6 +14,7 @@ import { isMainThread } from "node:worker_threads";
 import { BROKEN_PIPE_EXIT_CODE, createProcessStdoutEpipeClassifier } from "./broken-pipe";
 import {
 	type CrashFingerprint,
+	type CrashFingerprintInput,
 	computeCrashFingerprint,
 	computeHandledErrorFingerprint,
 	formatCrashRecordMarker,
@@ -532,7 +533,7 @@ export function recordHandledError(
 		)
 			return undefined;
 		const fatal = describeFatal(error);
-		const fingerprint = computeHandledErrorFingerprint(fatal).fingerprint;
+		const fingerprint = computeHandledErrorFingerprint(persistedCrashInput(fatal)).fingerprint;
 		if (handledErrorFingerprints.has(fingerprint)) {
 			// Still hot: dedupe, but refresh recency so an actively failing class
 			// is not the one evicted under pressure.
@@ -548,7 +549,7 @@ export function recordHandledError(
 		const written = writeCrashRecord(label, fatal, {
 			path: options.path ?? getHandledErrorLogPath(),
 			now: options.now,
-			fingerprint: computeHandledErrorFingerprint(fatal),
+			fingerprint: computeHandledErrorFingerprint(persistedCrashInput(fatal)),
 		});
 		if (!written) {
 			handledErrorFingerprints.delete(fingerprint);
@@ -604,14 +605,6 @@ function getHandledErrorEventsTarget(target: string, configuredPath: string | un
 }
 
 /**
- * Redact the whole stack before any split. The header ends at the first frame
- * (`\n`, optional indent, `at `), not at the raw `name: message`: redaction
- * rewrites that prefix, and a forged newline inside it must still flatten.
- * The header uses the same single-line control replacement as a crash-event
- * field. Frame newlines stay. Other C0/C1 controls in the frames become spaces.
- * No frame means the whole redacted stack is one field.
- */
-/**
  * Redact the whole stack before splitting. Nothing is inserted into the text
  * the redactor sees. When the stack starts with `name: message` and no
  * credential replacement crosses that boundary, only the redacted header is
@@ -635,6 +628,15 @@ function crashLogStack(name: string, message: string, stack: string): string {
 	return redacted.replace(allControls, " ");
 }
 
+/** The name, message, and stack strings that the crash log actually stores. */
+function persistedCrashInput(fatal: FatalDiagnostic): CrashFingerprintInput {
+	return {
+		name: redactCrashSecrets(fatal.name).replace(/[\u0000-\u001f\u007f-\u009f]/g, " "),
+		message: redactCrashSecrets(fatal.message).replace(/[\u0000-\u001f\u007f-\u009f]/g, " "),
+		stack: fatal.stack ? crashLogStack(fatal.name, fatal.message, fatal.stack) : "",
+	};
+}
+
 function writeCrashRecord(
 	label: string,
 	fatal: FatalDiagnostic,
@@ -643,20 +645,18 @@ function writeCrashRecord(
 	try {
 		const target = options.path ?? getCrashLogPath();
 		const now = options.now ?? new Date();
-		const name = redactCrashSecrets(fatal.name).replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
-		const message = redactCrashSecrets(fatal.message).replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
-		const stack = fatal.stack ? `${crashLogStack(fatal.name, fatal.message, fatal.stack)}\n` : "";
+		const persisted = persistedCrashInput(fatal);
+		const stack = persisted.stack ? `${persisted.stack}\n` : "";
 		const payload = fatal.payload ? `${redactCrashSecrets(fatal.payload)}\n` : "";
-		// Identity is computed from the already-captured diagnostic text only; the
-		// throwable is never read again here.
-		const fingerprint = options.fingerprint ?? computeCrashFingerprint(fatal);
+		// The marker must match the diagnostic a reader rebuilds from this text.
+		const fingerprint = options.fingerprint ?? computeCrashFingerprint(persisted);
 		const recordId = randomBytes(8).toString("hex");
 		const markerLine = `${formatCrashRecordMarker(fingerprint.fingerprint, fingerprint.version, recordId)}\n`;
 		// The marker is the record's identity, so it is budgeted first and appended
 		// after truncation: an oversized body can never evict it.
 		const body = boundCrashRecord(
 			`${now.toISOString()} pid=${process.pid} [${label}${options.provenance && options.provenance !== "product" ? `;provenance=${options.provenance}` : ""}] ` +
-				`${name}: ${message}\n` +
+				`${persisted.name}: ${persisted.message}\n` +
 				`${stack}${payload}`,
 			CRASH_RECORD_MAX_BYTES - Buffer.byteLength(markerLine, "utf8") - 1,
 		);
