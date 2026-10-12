@@ -68,7 +68,7 @@ async function withForeignOwnerStat<T>(foreignPath: string, fn: () => Promise<T>
 		options?: nodeFs.StatOptions,
 	) => {
 		const stat = lstatSync(target, options);
-		return matches(target) && !options?.bigint ? withForeignOwner(stat) : stat;
+		return matches(target) && !options?.bigint ? withForeignOwner(stat as nodeFs.Stats) : stat;
 	}) as unknown as typeof nodeFs.lstatSync);
 	try {
 		return await fn();
