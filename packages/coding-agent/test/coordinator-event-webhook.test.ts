@@ -13,6 +13,12 @@ import {
 	parseEventWebhookConfig,
 	type WebhookDelivery,
 } from "../src/coordinator-mcp/event-webhook";
+import { buildCoordinatorMcpConfig, coordinatorNamespacePath } from "../src/coordinator-mcp/policy";
+import {
+	appendCoordinatorEventForTest,
+	awaitEventWebhookDeliveriesForTest,
+	createCoordinatorMcpServer,
+} from "../src/coordinator-mcp/server";
 
 const tempDirs: string[] = [];
 
@@ -391,5 +397,48 @@ describe("deliverEventWebhook", () => {
 				.then(() => true)
 				.catch(() => false),
 		).resolves.toBe(false);
+	});
+
+	it("does not write a second diagnostic line when the event id contains a newline", async () => {
+		const root = await tempRoot();
+		const env = {
+			GJC_COORDINATOR_MCP_WORKDIR_ROOTS: root,
+			GJC_COORDINATOR_MCP_STATE_ROOT: path.join(root, ".gjc", "coordinator-state"),
+			GJC_COORDINATOR_MCP_MUTATIONS: "sessions",
+			GJC_COORDINATOR_MCP_PROFILE: "local",
+			GJC_COORDINATOR_MCP_REPO: "repo",
+			GJC_COORDINATOR_MCP_EVENT_WEBHOOK_URL: "https://sink.example.test/hook",
+		};
+		createCoordinatorMcpServer({
+			env,
+			services: {
+				eventWebhookDelivery: {
+					post: async () => ({ ok: false, status: 500, error: "unused" }),
+					sleep: async () => {},
+					now: () => Date.now(),
+				},
+			},
+		});
+		const namespaceDir = coordinatorNamespacePath(buildCoordinatorMcpConfig(env));
+		// Finish the empty startup replay before appending, so the diagnostic is one write.
+		await awaitEventWebhookDeliveriesForTest(namespaceDir);
+		const forged = "2099-01-01T00:00:00.000Z event=forged error=injected_line";
+		await appendCoordinatorEventForTest(namespaceDir, {
+			kind: "turn.completed",
+			summary: "hostile webhook event id",
+			stableId: `evt-real\r\n${forged}`,
+		});
+		await awaitEventWebhookDeliveriesForTest(namespaceDir);
+		const diagnostic = await fs.readFile(path.join(namespaceDir, "event-webhook-errors.log"), "utf8");
+		const lines = diagnostic.split("\n").filter(line => line.length > 0);
+		expect(lines).toHaveLength(1);
+		const record = lines[0] ?? "";
+		expect(record).toContain("event=evt-real");
+		expect(record).toContain("error=coordinator_event_webhook_event_id_invalid");
+		expect(record.startsWith("2099-")).toBe(false);
+		expect(diagnostic.endsWith("\n")).toBe(true);
+		expect(diagnostic.slice(0, -1)).not.toContain("\n");
+		expect(diagnostic).not.toContain("\r");
+		expect(Buffer.byteLength(diagnostic)).toBeLessThanOrEqual(512);
 	});
 });
