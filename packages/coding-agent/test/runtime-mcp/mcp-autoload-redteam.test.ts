@@ -104,7 +104,8 @@ describe("red-team: conventional MCP autoload", () => {
 			agentDir,
 			modelRegistry,
 			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({}),
+			// Project stdio autoload requires an explicit user opt-in.
+			settings: Settings.isolated({ "mcp.enableProjectConfig": true }),
 			model: getBundledModel("openai", "gpt-4o-mini"),
 			disableExtensionDiscovery: true,
 			skills: [],
