@@ -222,21 +222,34 @@ describe("issue #5497: session startup loads filesystem extension modules", () =
 		}
 	}, 30_000);
 
-	it("does not import a project settings.json extensions entry and still loads a user extension", async () => {
+	const projectNamedExtension = async (): Promise<{ settings: Settings; userEntry: string; projectEntry: string }> => {
 		const userEntry = installProbe();
-		const projectDir = path.join(tempDir, "project-named");
-		fs.mkdirSync(projectDir, { recursive: true });
-		const projectEntry = path.join(projectDir, "index.ts");
+		const namedDir = path.join(tempDir, "project-named");
+		fs.mkdirSync(namedDir, { recursive: true });
+		const projectEntry = path.join(namedDir, "index.ts");
 		fs.writeFileSync(projectEntry, PROBE_MODULE);
 		fs.mkdirSync(path.join(tempDir, ".gjc"), { recursive: true });
 		fs.writeFileSync(path.join(tempDir, ".gjc", "settings.json"), JSON.stringify({ extensions: [projectEntry] }));
-
 		const settings = await Settings.loadForScope({ cwd: tempDir, agentDir: sessionAgentDir });
+		return { settings, userEntry, projectEntry };
+	};
+
+	it("does not import a module named only by project settings.json extensions", async () => {
+		const { settings, projectEntry } = await projectNamedExtension();
 		const { session, extensionsResult } = await createSession({ settings });
 		try {
-			const loaded = extensionsResult.extensions.map(extension => extension.resolvedPath);
-			expect(loaded).toContain(userEntry);
-			expect(loaded).not.toContain(projectEntry);
+			expect(extensionsResult.extensions.map(extension => extension.resolvedPath)).not.toContain(projectEntry);
+		} finally {
+			await session.dispose();
+			await settings.close();
+		}
+	}, 30_000);
+
+	it("still loads a user agent extension when project settings.json names another module", async () => {
+		const { settings, userEntry } = await projectNamedExtension();
+		const { session, extensionsResult } = await createSession({ settings });
+		try {
+			expect(extensionsResult.extensions.map(extension => extension.resolvedPath)).toContain(userEntry);
 			await expect(session.extensionRunner?.emitInput("ooo status", undefined, "interactive")).resolves.toEqual({
 				handled: true,
 				text: HANDLED_TEXT,
