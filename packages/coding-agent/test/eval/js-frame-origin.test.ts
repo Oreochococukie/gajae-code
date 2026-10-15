@@ -56,7 +56,7 @@ describe("js host-worker frame origin", () => {
 		await disposeAllVmContexts();
 	});
 
-	it("still returns the host tool frame for tool.read", async () => {
+	it("still allows a host tool frame for tool.read", async () => {
 		const calls: string[] = [];
 		const sessionId = `frame-ok-${crypto.randomUUID()}`;
 		const result = await executeJs("return await tool.read({ path: 'ok.txt' });", {
