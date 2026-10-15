@@ -19,7 +19,9 @@ describe("extensions discovery", () => {
 	});
 
 	const discoverForTest = async (configuredPaths: string[] = []) => {
-		const result = await discoverAndLoadExtensions(configuredPaths, tempDir.path());
+		// Implicit project discovery no longer imports `<cwd>/.gjc/extensions`.
+		// These cases still pass that directory as an explicit path.
+		const result = await discoverAndLoadExtensions([extensionsDir, ...configuredPaths], tempDir.path());
 		return {
 			...result,
 			extensions: filterUserScoped(result.extensions),

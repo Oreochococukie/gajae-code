@@ -793,6 +793,9 @@ export async function discoverAndLoadExtensions(
 	});
 	for (const ext of discovered.items) {
 		if (ext._source.provider !== "native") continue;
+		// `<cwd>/.gjc/extensions` and the project `extensions` list are repository
+		// files. Importing them runs that code. User-scope modules still load.
+		if (ext.level === "project") continue;
 		addPath(ext.path);
 	}
 
