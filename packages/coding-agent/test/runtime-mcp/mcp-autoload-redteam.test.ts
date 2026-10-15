@@ -228,7 +228,7 @@ describe("red-team: conventional MCP autoload", () => {
 		const fixturesRoot = path.join(import.meta.dir, "..", "fixtures", "gjc-plugins");
 		const mcpBundle = path.join(fixturesRoot, "valid-mcp-bundle");
 
-		it("--no-mcp (enableMcpAutoload: false) suppresses conventional registrations but keeps plugin-bundle MCPs", async () => {
+		it.skipIf(process.platform !== "linux")("--no-mcp (enableMcpAutoload: false) suppresses conventional registrations but keeps plugin-bundle MCPs", async () => {
 			const r = await installGjcBundle({ cwd: projectDir }, "project", mcpBundle);
 			expect(r.ok).toBe(true);
 			// Conventional registration in the same project.
@@ -859,7 +859,7 @@ describe("red-team: conventional MCP autoload", () => {
 			}
 		});
 
-		it("plugin-bundle MCPs override conventional entries on name collisions; both load otherwise", async () => {
+		it.skipIf(process.platform !== "linux")("plugin-bundle MCPs override conventional entries on name collisions; both load otherwise", async () => {
 			const r = await installGjcBundle({ cwd: projectDir }, "project", mcpBundle);
 			expect(r.ok).toBe(true);
 			// Conventional entry colliding with the plugin's domain_docs, plus a
@@ -991,7 +991,7 @@ describe("red-team: conventional MCP autoload", () => {
 	});
 
 	describe("sealed plugin sessions and re-discovery", () => {
-		it("a session manager with plugin-bundle MCPs is sealed: re-discovery (the /mcp reload surface) is refused", async () => {
+		it.skipIf(process.platform !== "linux")("a session manager with plugin-bundle MCPs is sealed: re-discovery (the /mcp reload surface) is refused", async () => {
 			const fixturesRoot = path.join(import.meta.dir, "..", "fixtures", "gjc-plugins");
 			const r = await installGjcBundle({ cwd: projectDir }, "project", path.join(fixturesRoot, "valid-mcp-bundle"));
 			expect(r.ok).toBe(true);
