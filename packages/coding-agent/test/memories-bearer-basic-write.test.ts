@@ -60,7 +60,8 @@ async function persistMemory(input: {
 	rawMemory: string;
 	memoryMd: string;
 	memorySummary: string;
-}): Promise<{ memory: string; summary: string; raw: string }> {
+	skill: string;
+}): Promise<{ memory: string; summary: string; raw: string; skill: string }> {
 	const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "mem-bearer-"));
 	createdDirs.add(agentDir);
 	const sessionDir = path.join(agentDir, "sessions");
@@ -96,7 +97,11 @@ async function persistMemory(input: {
 		const body =
 			calls === 1
 				? { rollout_summary: "Rollout summary", rollout_slug: threadId, raw_memory: input.rawMemory }
-				: { memory_md: input.memoryMd, memory_summary: input.memorySummary, skills: [] };
+				: {
+						memory_md: input.memoryMd,
+						memory_summary: input.memorySummary,
+						skills: [{ name: "deploy-playbook", content: input.skill }],
+					};
 		return createAssistantMessage(JSON.stringify(body));
 	});
 
@@ -130,7 +135,8 @@ async function persistMemory(input: {
 		expect(summary.length).toBeGreaterThan(0);
 	});
 	const raw = await fs.readFile(path.join(memoryRoot, "raw_memories.md"), "utf8");
-	return { memory, summary, raw };
+	const skill = await fs.readFile(path.join(memoryRoot, "skills", "deploy-playbook", "SKILL.md"), "utf8");
+	return { memory, summary, raw, skill };
 }
 
 test("redacts bearer and basic-auth assignments in written memory", async () => {
@@ -145,9 +151,10 @@ test("redacts bearer and basic-auth assignments in written memory", async () => 
 		rawMemory: `${ORDINARY}\n${secretLines}`,
 		memoryMd: `# Memory\n\n${ORDINARY}\n${secretLines}`,
 		memorySummary: `${ORDINARY} Bearer ${BEARER} Basic ${BASIC}`,
+		skill: `# Deploy\n${ORDINARY}\nAuthorization: Bearer ${BEARER}\nAuthorization: Basic ${BASIC}`,
 	});
 
-	for (const body of [written.memory, written.summary, written.raw]) {
+	for (const body of [written.memory, written.summary, written.raw, written.skill]) {
 		expect(body).not.toContain(BEARER);
 		expect(body).not.toContain(BASIC);
 		expect(body).not.toContain(GITHUB);
@@ -155,6 +162,8 @@ test("redacts bearer and basic-auth assignments in written memory", async () => 
 	}
 	expect(written.memory).toContain("Authorization: Bearer [REDACTED]");
 	expect(written.memory).toContain("Authorization: Basic [REDACTED]");
+	expect(written.skill).toContain("Authorization: Bearer [REDACTED]");
+	expect(written.skill).toContain("Authorization: Basic [REDACTED]");
 });
 
 test("keeps an ordinary sentence in written memory", async () => {
@@ -163,11 +172,14 @@ test("keeps an ordinary sentence in written memory", async () => {
 		rawMemory: body,
 		memoryMd: `# Memory\n\n${body}`,
 		memorySummary: body,
+		skill: `# Deploy\n${body}\nBearer [REDACTED] stays`,
 	});
 
 	expect(written.memory).toBe(`# Memory\n\n${body}\n`);
 	expect(written.summary).toBe(`${body}\n`);
 	expect(written.raw).toContain(body);
+	expect(written.skill).toContain(body);
+	expect(written.skill).toContain("Bearer [REDACTED] stays");
 	expect(written.memory).not.toContain("[REDACTED]");
 	expect(written.summary).not.toContain("[REDACTED]");
 	expect(written.raw).not.toContain("[REDACTED]");
