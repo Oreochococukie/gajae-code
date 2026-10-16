@@ -117,7 +117,9 @@ function stripMemoryTagFamily(content: string, name: string): string {
 /** Drop tag delimiters only, so a recalled fact cannot close the outer frame. */
 function stripMemoryTagTokens(text: string): string {
 	let out = text;
-	for (const name of MEMORY_TAG_NAMES) out = out.replace(memoryTagExpression(name), "");
+	for (const name of MEMORY_TAG_NAMES) {
+		out = out.replace(memoryTagExpression(name), tag => tag.replace("<", "&lt;"));
+	}
 	return out;
 }
 
@@ -132,8 +134,12 @@ function stripMemoryTagTokens(text: string): string {
  */
 export function stripMemoryTags(content: string): string {
 	let out = content;
-	for (const name of MEMORY_TAG_NAMES) out = stripMemoryTagFamily(out, name);
-	return out;
+	while (true) {
+		let stripped = out;
+		for (const name of MEMORY_TAG_NAMES) stripped = stripMemoryTagFamily(stripped, name);
+		if (stripped === out) return out;
+		out = stripped;
+	}
 }
 
 /** Format recall results into a bullet list for context injection. */

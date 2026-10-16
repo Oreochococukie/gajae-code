@@ -10,6 +10,109 @@ import {
 	truncateRecallQuery,
 } from "@gajae-code/coding-agent/hindsight/content";
 
+const MEMORY_TAG_NAMES = ["memories", "hindsight_memories", "relevant_memories", "mental_models"] as const;
+const MEMORY_TAG_EXPRESSION = /<\s*\/?\s*(?:memories|hindsight_memories|relevant_memories|mental_models)\s*>/i;
+const MEMORY_TAG_VARIANTS = MEMORY_TAG_NAMES.flatMap(name => [
+	`<${name}>`,
+	`</${name}>`,
+	`<${name.toUpperCase()}>`,
+	`</${name.toUpperCase()}>`,
+	`< ${name} >`,
+	`</ ${name} >`,
+	`<\t${name.toUpperCase()}\n>`,
+	`</\n${name}\t>`,
+]);
+
+function generatedMemoryDelimiterInputs(): string[] {
+	let state = 0x6822cafe;
+	const random = () => {
+		state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0;
+		return state / 0x1_0000_0000;
+	};
+	const fragments = [
+		"fact",
+		"notes",
+		" ",
+		"\n",
+		"<",
+		"</",
+		"/",
+		">",
+		"mem",
+		"ories",
+		"hindsight_",
+		"relevant_",
+		"mental_",
+		"models",
+		...MEMORY_TAG_VARIANTS,
+	];
+	const separators = ["", " ", "\n", "\t"];
+	const inputs = [
+		"<<memories>/memories>",
+		"<memories><hindsight_memories></MEMORIES></hindsight_memories>",
+		...MEMORY_TAG_VARIANTS,
+	];
+	for (let sample = 0; sample < 256; sample++) {
+		const fragmentCount = 1 + Math.floor(random() * 48);
+		let text = "";
+		for (let index = 0; index < fragmentCount; index++) {
+			const fragment = fragments[Math.floor(random() * fragments.length)];
+			const separator = separators[Math.floor(random() * separators.length)];
+			text += `${separator}${fragment}`;
+		}
+		inputs.push(text);
+	}
+	return inputs;
+}
+
+function generatedUntaggedProse(): string[] {
+	let state = 0x306f1d;
+	const random = () => {
+		state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0;
+		return state / 0x1_0000_0000;
+	};
+	const fragments = [
+		"Ordinary memories stay in my notes.",
+		"hindsight_memories is a field name.",
+		"relevant_memories and mental_models are identifiers.",
+		"a < b comparison",
+		"paths may contain /memories/",
+		"the model remembers preferences",
+	];
+	const inputs: string[] = [];
+	for (let sample = 0; sample < 64; sample++) {
+		const count = 1 + Math.floor(random() * 8);
+		const selected: string[] = [];
+		for (let index = 0; index < count; index++) {
+			selected.push(fragments[Math.floor(random() * fragments.length)] ?? "");
+		}
+		inputs.push(selected.join(" | "));
+	}
+	return inputs;
+}
+
+describe("generated memory delimiter inputs", () => {
+	it("keeps formatted facts delimiter-free and both normalizers idempotent", () => {
+		for (const input of generatedMemoryDelimiterInputs()) {
+			const formatted = formatMemories([{ text: input }]);
+			const factText = formatted.slice(2);
+			expect(factText).not.toMatch(MEMORY_TAG_EXPRESSION);
+			expect(formatMemories([{ text: factText }])).toBe(formatted);
+
+			const stripped = stripMemoryTags(input);
+			expect(stripped).not.toMatch(MEMORY_TAG_EXPRESSION);
+			expect(stripMemoryTags(stripped)).toBe(stripped);
+		}
+	});
+
+	it("preserves generated prose without recognized delimiters", () => {
+		for (const prose of generatedUntaggedProse()) {
+			expect(formatMemories([{ text: prose }])).toBe(`- ${prose}`);
+			expect(stripMemoryTags(prose)).toBe(prose);
+		}
+	});
+});
+
 describe("stripMemoryTags", () => {
 	it("removes both <memories> and legacy memory blocks", () => {
 		const text = [
