@@ -950,24 +950,29 @@ export class DapSessionManager {
 		const session = this.#getActiveSessionOrNull();
 		if (!session) return null;
 		session.lastUsedAt = Date.now();
-		if (session.status !== "terminated") {
-			if (session.capabilities?.supportsTerminateRequest) {
+		// Close before the first await. A runInTerminal paused on cwd resolution
+		// must not spawn while terminate or disconnect is still outstanding.
+		session.closing = true;
+		try {
+			if (session.status !== "terminated") {
+				if (session.capabilities?.supportsTerminateRequest) {
+					await untilAborted(
+						signal,
+						session.client.sendRequest("terminate", undefined, signal, timeoutMs).catch(() => undefined),
+					);
+				}
 				await untilAborted(
 					signal,
-					session.client.sendRequest("terminate", undefined, signal, timeoutMs).catch(() => undefined),
+					session.client
+						.sendRequest("disconnect", { terminateDebuggee: true }, signal, timeoutMs)
+						.catch(() => undefined),
 				);
 			}
-			await untilAborted(
-				signal,
-				session.client
-					.sendRequest("disconnect", { terminateDebuggee: true }, signal, timeoutMs)
-					.catch(() => undefined),
-			);
+			session.status = "terminated";
+			return buildSummary(session);
+		} finally {
+			await this.#disposeSession(session);
 		}
-		session.status = "terminated";
-		const summary = buildSummary(session);
-		await this.#disposeSession(session);
-		return summary;
 	}
 
 	#startCleanupTimer(): void {

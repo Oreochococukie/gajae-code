@@ -4,10 +4,14 @@
  */
 import { afterEach, beforeEach, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { Agent, type AgentTool } from "@gajae-code/agent-core";
 import { getBundledModel } from "@gajae-code/ai";
 import { AssistantMessageEventStream } from "@gajae-code/ai/utils/event-stream";
 import { Settings } from "@gajae-code/coding-agent/config/settings";
+import { dapSessionManager } from "@gajae-code/coding-agent/dap/session";
+import type { DapLaunchSessionOptions, DapSessionSummary } from "@gajae-code/coding-agent/dap/types";
 import {
 	activeSnapshotPath,
 	modeStatePath,
@@ -17,6 +21,9 @@ import { AgentSession } from "@gajae-code/coding-agent/session/agent-session";
 import type { ClientBridge, ClientBridgePermissionOutcome } from "@gajae-code/coding-agent/session/client-bridge";
 import { convertToLlm } from "@gajae-code/coding-agent/session/messages";
 import { SessionManager } from "@gajae-code/coding-agent/session/session-manager";
+import type { ToolSession } from "@gajae-code/coding-agent/tools";
+import { DebugTool } from "@gajae-code/coding-agent/tools/debug";
+import * as piUtils from "@gajae-code/utils";
 import { TempDir } from "@gajae-code/utils";
 import * as z from "zod/v4";
 
@@ -229,4 +236,111 @@ it("still allows a debug sessions read while a planning workflow is active", asy
 	);
 
 	expect(debugTool.executeCalls).toBe(1);
+});
+
+function summaryFor(cwd: string, program?: string): DapSessionSummary {
+	const now = new Date().toISOString();
+	return {
+		id: "stub-session",
+		adapter: "gdb",
+		cwd,
+		program,
+		status: "running",
+		launchedAt: now,
+		lastUsedAt: now,
+		breakpointFiles: 0,
+		breakpointCount: 0,
+		functionBreakpointCount: 0,
+		outputBytes: 0,
+		outputTruncated: false,
+		needsConfigurationDone: false,
+	};
+}
+
+it("passes the session workspace through DebugTool when the execution cwd is a subdirectory", async () => {
+	const workspace = tempDir.path();
+	await fs.mkdir(path.join(workspace, ".git"), { recursive: true });
+	await Bun.write(path.join(workspace, "main.c"), "int main(void) { return 0; }\n");
+	const inside = path.join(workspace, "src");
+	await fs.mkdir(inside, { recursive: true });
+	const host = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-gdb-host-"));
+	const gdb = path.join(host, "gdb");
+	await Bun.write(gdb, "#!/bin/sh\nexit 0\n");
+	await fs.chmod(gdb, 0o755);
+	const whichSpy = spyOn(piUtils, "$which").mockImplementation(command => (command === "gdb" ? gdb : null));
+	const seen: Array<DapLaunchSessionOptions & { workspace?: string }> = [];
+	const original = dapSessionManager.launch.bind(dapSessionManager);
+	dapSessionManager.launch = (async options => {
+		seen.push(options);
+		return summaryFor(options.cwd, options.program);
+	}) as typeof dapSessionManager.launch;
+	const debugTool = new DebugTool({
+		cwd: workspace,
+		hasUI: false,
+		getSessionFile: () => null,
+		getSessionSpawns: () => "*",
+		settings: Settings.isolated({ "debug.enabled": true }),
+	} as ToolSession);
+	try {
+		session = await createSession(debugTool as unknown as AgentTool, undefined, "allow");
+		const wrapped = await wrappedDebug(session);
+		await wrapped.execute(
+			"call-debug-workspace",
+			{ action: "launch", program: "main.c", adapter: "gdb", cwd: inside, timeout: 5 },
+			undefined,
+			undefined as never,
+			undefined as never,
+		);
+		expect(seen).toHaveLength(1);
+		expect(seen[0]?.workspace).toBe(workspace);
+		expect(seen[0]?.cwd).toBe(inside);
+	} finally {
+		dapSessionManager.launch = original;
+		whichSpy.mockRestore();
+		await fs.rm(host, { recursive: true, force: true });
+	}
+});
+
+it("does not launch when DebugTool's execution cwd is outside the session workspace", async () => {
+	const workspace = tempDir.path();
+	await fs.mkdir(path.join(workspace, ".git"), { recursive: true });
+	await Bun.write(path.join(workspace, "main.c"), "int main(void) { return 0; }\n");
+	const outside = tempDir.join("other");
+	await fs.mkdir(path.join(outside, ".git"), { recursive: true });
+	await Bun.write(path.join(outside, "main.c"), "int main(void) { return 0; }\n");
+	const gdb = path.join(workspace, "bin", "gdb");
+	await fs.mkdir(path.dirname(gdb), { recursive: true });
+	await Bun.write(gdb, "#!/bin/sh\nexit 0\n");
+	await fs.chmod(gdb, 0o755);
+	const whichSpy = spyOn(piUtils, "$which").mockImplementation(command => (command === "gdb" ? gdb : null));
+	const seen: unknown[] = [];
+	const original = dapSessionManager.launch.bind(dapSessionManager);
+	dapSessionManager.launch = (async options => {
+		seen.push(options);
+		return summaryFor(options.cwd, options.program);
+	}) as typeof dapSessionManager.launch;
+	const debugTool = new DebugTool({
+		cwd: workspace,
+		hasUI: false,
+		getSessionFile: () => null,
+		getSessionSpawns: () => "*",
+		settings: Settings.isolated({ "debug.enabled": true }),
+	} as ToolSession);
+	try {
+		session = await createSession(debugTool as unknown as AgentTool, undefined, "allow");
+		const wrapped = await wrappedDebug(session);
+		await expect(
+			wrapped.execute(
+				"call-debug-outside",
+				{ action: "launch", program: "main.c", adapter: "gdb", cwd: outside, timeout: 5 },
+				undefined,
+				undefined as never,
+				undefined as never,
+			),
+		).rejects.toThrow(/No debugger adapter available/);
+		expect(seen).toHaveLength(0);
+	} finally {
+		dapSessionManager.launch = original;
+		whichSpy.mockRestore();
+	}
 });
