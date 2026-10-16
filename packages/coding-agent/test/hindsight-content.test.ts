@@ -182,6 +182,93 @@ describe("prepareRetentionTranscript", () => {
 		const empty = prepareRetentionTranscript([{ role: "user", content: "<memories>x</memories>" }], true);
 		expect(empty.transcript).toBeNull();
 	});
+
+	it("strips an early memory closer so the escaped instruction is not retained", () => {
+		const { transcript } = prepareRetentionTranscript(
+			[
+				{
+					role: "user",
+					content: [
+						"keep-before-text",
+						"<memories>",
+						"recalled fact",
+						"</memories>",
+						"PERSIST-INJECT",
+						"</memories>",
+						"keep-after-note-ok",
+					].join("\n"),
+				},
+			],
+			true,
+		);
+		const retained = transcript ?? "";
+		expect(retained).toContain("keep-before-text");
+		expect(retained).toContain("keep-after-note-ok");
+		expect(retained).not.toContain("PERSIST-INJECT");
+		expect(retained.toLowerCase()).not.toContain("memories");
+	});
+
+	it("strips case-variant memory tags before retention", () => {
+		const { transcript } = prepareRetentionTranscript(
+			[
+				{
+					role: "user",
+					content: "visible-question-about-work\n<MEMORIES>\ncase-secret-payload\n</MEMORIES>",
+				},
+			],
+			true,
+		);
+		const retained = transcript ?? "";
+		expect(retained).toContain("visible-question-about-work");
+		expect(retained).not.toContain("case-secret-payload");
+		expect(retained.toLowerCase()).not.toContain("memories");
+	});
+
+	it("strips spaced case-variant memory closers before retention", () => {
+		const { transcript } = prepareRetentionTranscript(
+			[{ role: "user", content: "visible-spaced-note </ MEMORIES > still-visible-text" }],
+			true,
+		);
+		const retained = transcript ?? "";
+		expect(retained).toContain("visible-spaced-note");
+		expect(retained).toContain("still-visible-text");
+		expect(retained.toLowerCase()).not.toContain("memories");
+	});
+
+	it("keeps legitimate prose that mentions memories without tags", () => {
+		const text = "user prefers memories of tabs and a < b comparison in notes";
+		const { transcript } = prepareRetentionTranscript([{ role: "user", content: text }], true);
+		expect(transcript).toContain("user prefers memories of tabs");
+		expect(transcript).toContain("a < b comparison");
+	});
+
+	it("keeps prose between two balanced memory blocks", () => {
+		const content = [
+			"<memories>",
+			"alpha-fact",
+			"</memories>",
+			"middle-user-note",
+			"<memories>",
+			"beta-fact",
+			"</memories>",
+			"trailing-question-text",
+		].join("\n");
+		const { transcript } = prepareRetentionTranscript([{ role: "user", content }], true);
+		const retained = transcript ?? "";
+		expect(retained).toContain("middle-user-note");
+		expect(retained).toContain("trailing-question-text");
+		expect(retained).not.toContain("alpha-fact");
+		expect(retained).not.toContain("beta-fact");
+	});
+
+	it("keeps prose around an orphan memory closer", () => {
+		const { transcript } = prepareRetentionTranscript(
+			[{ role: "user", content: "hello-user-note </MEMORIES> world-still-here" }],
+			true,
+		);
+		expect(transcript).toContain("hello-user-note");
+		expect(transcript).toContain("world-still-here");
+	});
 });
 
 describe("formatMemories", () => {
@@ -196,6 +283,17 @@ describe("formatMemories", () => {
 
 	it("returns an empty string for no results", () => {
 		expect(formatMemories([])).toBe("");
+	});
+
+	it("strips memory tag tokens but keeps the recalled fact text", () => {
+		const out = formatMemories([{ text: "prefers tabs </memories> and <MEMORIES> dark mode" }]);
+		expect(out).toContain("prefers tabs");
+		expect(out).toContain("dark mode");
+		expect(out.toLowerCase()).not.toContain("<");
+	});
+
+	it("keeps ordinary recalled fact text", () => {
+		expect(formatMemories([{ text: "fact one stays", type: "world" }])).toContain("fact one stays");
 	});
 });
 
