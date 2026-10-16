@@ -3,11 +3,11 @@
 import { GlmZcodeOAuthFlow, refreshGlmZcodeToken } from "@gajae-code/ai/utils/oauth/glm-zcode";
 
 const fetches: string[] = [];
-const fetchImpl: typeof fetch = async input => {
+const fetchImpl = (async (input: string | URL | Request) => {
 	const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
 	fetches.push(url);
 	return new Response("probe", { status: 400 });
-};
+}) as typeof fetch;
 
 const flow = new GlmZcodeOAuthFlow({ onAuth() {}, onPrompt: async () => "" }, { fetch: fetchImpl });
 const { url } = await flow.generateAuthUrl("state-1", "zcode://oauth/callback");
