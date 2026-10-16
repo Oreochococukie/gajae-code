@@ -91,6 +91,21 @@ describe("expandInternalUrls skill://", () => {
 		await rm(root, { recursive: true, force: true });
 	});
 
+	it("keeps an in-root symlink within the skill named by the URL when roots are nested", async () => {
+		const root = await mkdtemp(path.join(tmpdir(), "skill-bash-"));
+		const outerDir = path.join(root, "outer");
+		const innerDir = path.join(outerDir, "inner");
+		await mkdir(innerDir, { recursive: true });
+		const note = path.join(outerDir, "note.txt");
+		await writeFile(note, "ok");
+		await symlink(note, path.join(innerDir, "alias.txt"));
+		const skills = [skill("outer", outerDir), skill("inner", innerDir)];
+
+		const expanded = await expandInternalUrls("cat skill://outer/inner/alias.txt", { skills });
+		expect(unquote(expanded)).toBe(await realpath(note));
+		await rm(root, { recursive: true, force: true });
+	});
+
 	it("allows a missing file inside the skill directory", async () => {
 		const root = await mkdtemp(path.join(tmpdir(), "skill-bash-"));
 		const dir = path.join(root, "skill");

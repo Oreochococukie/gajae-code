@@ -40,7 +40,7 @@ export interface InternalUrlExpansionOptions {
  * Resolve a single skill:// URL to its absolute filesystem path.
  * Does NOT read file content or verify existence.
  */
-export function resolveSkillUrlToPath(url: string, skills: readonly Skill[]): string {
+export function resolveSkillUrl(url: string, skills: readonly Skill[]): { skill: Skill; lexicalPath: string } {
 	const parsed = /^skill:\/\/([^/?#]+)(\/[^?#]*)?(?:[?#].*)?$/.exec(url);
 	if (!parsed) {
 		throw new ToolError(`Invalid skill:// URL: ${url}`);
@@ -72,7 +72,7 @@ export function resolveSkillUrlToPath(url: string, skills: readonly Skill[]): st
 	const hasRelativePath = rawPath !== "" && rawPath !== "/";
 
 	if (!hasRelativePath) {
-		return path.resolve(skill.filePath);
+		return { skill, lexicalPath: path.resolve(skill.filePath) };
 	}
 
 	let relativePath: string;
@@ -95,7 +95,11 @@ export function resolveSkillUrlToPath(url: string, skills: readonly Skill[]): st
 		throw new ToolError("Path traversal is not allowed in skill:// URLs");
 	}
 
-	return resolvedPath;
+	return { skill, lexicalPath: resolvedPath };
+}
+
+export function resolveSkillUrlToPath(url: string, skills: readonly Skill[]): string {
+	return resolveSkillUrl(url, skills).lexicalPath;
 }
 
 /**
@@ -179,17 +183,6 @@ async function canonicalLocalPath(localRoot: string, lexicalPath: string): Promi
 
 const SKILL_ESCAPE = "Path traversal is not allowed in skill:// URLs";
 
-function skillBaseContaining(skills: readonly Skill[], lexicalPath: string): string | undefined {
-	let best: string | undefined;
-	for (const skill of skills) {
-		const base = path.resolve(skill.baseDir);
-		if (lexicalPath === base || lexicalPath.startsWith(`${base}${path.sep}`)) {
-			if (!best || base.length > best.length) best = base;
-		}
-	}
-	return best;
-}
-
 /** Real path of `target`, or the real ancestor plus the missing suffix. */
 async function canonicalPathOrAncestor(target: string, escapeMessage: string): Promise<string> {
 	try {
@@ -269,10 +262,8 @@ async function resolveInternalUrlToPath(
 	}
 
 	if (scheme === "skill") {
-		const lexicalPath = resolveSkillUrlToPath(url, skills);
-		const baseDir = skillBaseContaining(skills, lexicalPath);
-		if (!baseDir) return lexicalPath;
-		return canonicalSkillExpansionPath(baseDir, lexicalPath);
+		const { skill, lexicalPath } = resolveSkillUrl(url, skills);
+		return canonicalSkillExpansionPath(skill.baseDir, lexicalPath);
 	}
 
 	// Managed artifact and agent resources carry session authority. Expanding
