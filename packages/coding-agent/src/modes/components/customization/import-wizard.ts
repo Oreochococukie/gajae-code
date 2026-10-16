@@ -313,6 +313,14 @@ export class ImportWizard extends Container {
 			counts.set(entry.outcome, (counts.get(entry.outcome) ?? 0) + 1);
 		}
 		const summary = [...counts.entries()].map(([outcome, count]) => `${count} ${outcome}`).join(", ");
+		const storedOnlyProjectHooks =
+			this.#result.ok &&
+			this.#plan?.preview.destinationScope === "project" &&
+			this.#result.entries.some(
+				entry =>
+					entry.surface === "hooks" &&
+					(entry.outcome === "imported" || entry.outcome === "renamed" || entry.outcome === "overwritten"),
+			);
 		this.#headerText.setText(
 			this.#result.ok
 				? theme.bold(theme.fg("success", "Import complete"))
@@ -325,7 +333,27 @@ export class ImportWizard extends Container {
 				"",
 				...failed.map(e => theme.fg("error", ` ✗ ${e.surface}: ${safe(e.sourceName)} — ${safe(e.reason ?? "")}`)),
 				...(this.#result.ok
-					? [theme.fg("muted", "Imported entries take effect after the documented reload/new-session boundary.")]
+					? storedOnlyProjectHooks
+						? [
+								theme.fg(
+									"warning",
+									"Project-scope hooks are stored-only; ordinary sessions do not load repository hook modules.",
+								),
+								theme.fg(
+									"muted",
+									"Import hooks into Global .gjc or configure an explicit hook path to activate them.",
+								),
+								theme.fg(
+									"muted",
+									"Other imported entries take effect after the documented reload/new-session boundary.",
+								),
+							]
+						: [
+								theme.fg(
+									"muted",
+									"Imported entries take effect after the documented reload/new-session boundary.",
+								),
+							]
 					: []),
 			].join("\n"),
 		);

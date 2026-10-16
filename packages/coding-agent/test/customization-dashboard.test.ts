@@ -95,6 +95,19 @@ describe("CustomizationDashboard", () => {
 		expect(lines).not.toContain("fixture");
 	});
 
+	test("project hooks are displayed as stored-only and cannot be enabled", async () => {
+		await fs.mkdir(path.join(projectDir, ".gjc", "hooks", "pre"), { recursive: true });
+		await fs.writeFile(path.join(projectDir, ".gjc", "hooks", "pre", "bash.ts"), "export {}\n");
+		const dashboard = await CustomizationDashboard.create(projectDir, undefined, homeDir);
+		dashboard.handleInput("\x1b[C"); // hooks section
+		let lines = Bun.stripANSI(dashboard.render(240).join("\n"));
+		expect(lines).toContain("stored-only");
+
+		dashboard.handleInput("e");
+		lines = Bun.stripANSI(dashboard.render(240).join("\n"));
+		expect(lines).toContain("project hooks are stored-only");
+	});
+
 	test("skills master switch marks native skills disabled", async () => {
 		await seedProjectSkill();
 		const settings = {
@@ -170,6 +183,8 @@ describe("ImportWizard", () => {
 	test("drives product → scope → surfaces → policy → preview, enter applies", async () => {
 		await fs.mkdir(path.join(projectDir, ".claude", "skills", "wiz-skill"), { recursive: true });
 		await fs.writeFile(path.join(projectDir, ".claude", "skills", "wiz-skill", "SKILL.md"), SKILL_MD);
+		await fs.mkdir(path.join(projectDir, ".claude", "hooks", "pre"), { recursive: true });
+		await fs.writeFile(path.join(projectDir, ".claude", "hooks", "pre", "bash.ts"), "export {}\n");
 		const wizard = new ImportWizard(projectDir, "project", homeDir);
 		const previewReady = Promise.withResolvers<void>();
 		const applyFinished = Promise.withResolvers<void>();
@@ -188,11 +203,18 @@ describe("ImportWizard", () => {
 		expect(wizard.step).toBe("preview");
 		expect(wizard.hasVisibleSelector).toBe(false);
 		expect(wizard.preview?.entries.some(e => e.surface === "skills" && e.destinationName === "wiz-skill")).toBe(true);
+		expect(wizard.preview?.warnings.join(" ")).toContain("Project-scope hooks are stored-only");
+		expect(Bun.stripANSI(wizard.render(120).join("\n"))).toContain("Project-scope hooks are stored-only");
 		wizard.handleInput("\r"); // confirm apply
 		await applyFinished.promise;
 		expect(wizard.step).toBe("result");
 		expect(wizard.result?.ok).toBe(true);
+		expect(wizard.result?.entries.some(entry => entry.surface === "hooks" && entry.outcome === "imported")).toBe(
+			true,
+		);
+		expect(Bun.stripANSI(wizard.render(120).join("\n"))).toContain("Project-scope hooks are stored-only");
 		await fs.stat(path.join(projectDir, ".gjc", "skills", "wiz-skill", "SKILL.md"));
+		await fs.stat(path.join(projectDir, ".gjc", "hooks", "pre", "bash.ts"));
 	});
 
 	test("a failed apply closes with applied=false, never a false success", async () => {
