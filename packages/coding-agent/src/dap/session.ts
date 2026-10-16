@@ -107,8 +107,18 @@ interface DapSession {
 	initializedSeen: boolean;
 	needsConfigurationDone: boolean;
 	configurationDoneSent: boolean;
+	/** Containment root. Distinct from `cwd`, which is the caller execution directory. */
+	workspace: string;
+	closing: boolean;
+	disposed: boolean;
+	inflightTerminal: number;
+	terminalIdle?: Promise<void>;
+	resolveTerminalIdle?: () => void;
 	runInTerminalProcesses: Set<OwnedProcess>;
 }
+
+/** Test seam: pauses after cwd containment and before the debuggee spawn. */
+export const runInTerminalTestHooks: { beforeSpawn?: () => Promise<void> } = {};
 
 export interface DapOutputSnapshot {
 	snapshot: DapSessionSummary;
@@ -282,13 +292,19 @@ export class DapSessionManager {
 	}
 
 	async launch(
-		options: DapLaunchSessionOptions,
+		options: DapLaunchSessionOptions & { workspace?: string },
 		signal?: AbortSignal,
 		timeoutMs: number = 30_000,
 	): Promise<DapSessionSummary> {
 		await this.#ensureLaunchSlot();
 		const client = await DapClient.spawn({ adapter: options.adapter, cwd: options.cwd });
-		const session = this.#registerSession(client, options.adapter, options.cwd, options.program);
+		const session = this.#registerSession(
+			client,
+			options.adapter,
+			options.cwd,
+			options.workspace ?? options.cwd,
+			options.program,
+		);
 		try {
 			session.capabilities = await client.initialize(
 				this.#buildInitializeArguments(options.adapter),
@@ -347,13 +363,13 @@ export class DapSessionManager {
 	}
 
 	async attach(
-		options: DapAttachSessionOptions,
+		options: DapAttachSessionOptions & { workspace?: string },
 		signal?: AbortSignal,
 		timeoutMs: number = 30_000,
 	): Promise<DapSessionSummary> {
 		await this.#ensureLaunchSlot();
 		const client = await DapClient.spawn({ adapter: options.adapter, cwd: options.cwd });
-		const session = this.#registerSession(client, options.adapter, options.cwd);
+		const session = this.#registerSession(client, options.adapter, options.cwd, options.workspace ?? options.cwd);
 		try {
 			session.capabilities = await client.initialize(
 				this.#buildInitializeArguments(options.adapter),
@@ -993,12 +1009,22 @@ export class DapSessionManager {
 		throw new Error(`Debug session ${active.id} is still active. Terminate it before launching another.`);
 	}
 
-	#registerSession(client: DapClient, adapter: DapResolvedAdapter, cwd: string, program?: string): DapSession {
+	#registerSession(
+		client: DapClient,
+		adapter: DapResolvedAdapter,
+		cwd: string,
+		workspace: string,
+		program?: string,
+	): DapSession {
 		const session: DapSession = {
 			id: `debug-${++this.#nextId}`,
 			adapter,
 			cwd,
+			workspace,
 			program,
+			closing: false,
+			disposed: false,
+			inflightTerminal: 0,
 			client,
 			status: "launching",
 			launchedAt: Date.now(),
@@ -1023,25 +1049,40 @@ export class DapSessionManager {
 			if (!Array.isArray(args.args) || args.args.length === 0) {
 				throw new Error("runInTerminal request did not include a command");
 			}
-			const env = Object.fromEntries(
-				Object.entries(args.env ?? {}).filter((entry): entry is [string, string] => entry[1] !== null),
-			);
-			const cwd = await resolveRunInTerminalCwd(session.cwd, args.cwd);
-			const owner = spawnOwnedProcess(args.args, {
-				cwd,
-				stdin: "ignore",
-				env: {
-					...Bun.env,
-					...NON_INTERACTIVE_ENV,
-					...env,
-				},
-				name: `dap:${session.id}:runInTerminal`,
-			});
-			drainStream(owner.child.stdout);
-			drainStream(owner.child.stderr);
-			session.runInTerminalProcesses.add(owner);
-			owner.exited.finally(() => session.runInTerminalProcesses.delete(owner));
-			return { processId: owner.pid } satisfies DapRunInTerminalResponse;
+			if (session.closing) throw new Error("runInTerminal session is closed");
+			this.#beginTerminal(session);
+			try {
+				if (session.closing) throw new Error("runInTerminal session is closed");
+				const env = Object.fromEntries(
+					Object.entries(args.env ?? {}).filter((entry): entry is [string, string] => entry[1] !== null),
+				);
+				const cwd = await resolveRunInTerminalCwd(session.workspace, args.cwd ?? session.cwd);
+				await runInTerminalTestHooks.beforeSpawn?.();
+				if (session.closing || !this.#sessions.has(session.id)) {
+					throw new Error("runInTerminal session is closed");
+				}
+				const owner = spawnOwnedProcess(args.args, {
+					cwd,
+					stdin: "ignore",
+					env: {
+						...Bun.env,
+						...NON_INTERACTIVE_ENV,
+						...env,
+					},
+					name: `dap:${session.id}:runInTerminal`,
+				});
+				if (session.closing || !this.#sessions.has(session.id)) {
+					await owner.dispose();
+					throw new Error("runInTerminal session is closed");
+				}
+				drainStream(owner.child.stdout);
+				drainStream(owner.child.stderr);
+				session.runInTerminalProcesses.add(owner);
+				owner.exited.finally(() => session.runInTerminalProcesses.delete(owner));
+				return { processId: owner.pid } satisfies DapRunInTerminalResponse;
+			} finally {
+				this.#endTerminal(session);
+			}
 		});
 		client.onReverseRequest("startDebugging", async rawArgs => {
 			const startArgs = (rawArgs ?? {}) as Partial<DapStartDebuggingArguments>;
@@ -1368,7 +1409,36 @@ export class DapSessionManager {
 		return session;
 	}
 
+	#beginTerminal(session: DapSession): void {
+		session.inflightTerminal++;
+		if (session.inflightTerminal !== 1) return;
+		session.terminalIdle = new Promise(resolve => {
+			session.resolveTerminalIdle = resolve;
+		});
+	}
+
+	#endTerminal(session: DapSession): void {
+		session.inflightTerminal = Math.max(0, session.inflightTerminal - 1);
+		if (session.inflightTerminal !== 0) return;
+		session.resolveTerminalIdle?.();
+		session.resolveTerminalIdle = undefined;
+		session.terminalIdle = undefined;
+	}
+
+	async #waitTerminalIdle(session: DapSession): Promise<void> {
+		while (session.inflightTerminal > 0 && session.terminalIdle) {
+			await session.terminalIdle;
+		}
+	}
+
 	async #disposeSession(session: DapSession) {
+		session.closing = true;
+		if (session.disposed) {
+			await this.#waitTerminalIdle(session);
+			return;
+		}
+		session.disposed = true;
+		await this.#waitTerminalIdle(session);
 		if (this.#activeSessionId === session.id) {
 			this.#activeSessionId = null;
 		}

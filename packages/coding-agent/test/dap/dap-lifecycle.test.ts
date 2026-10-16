@@ -342,6 +342,67 @@ describe("DAP lifecycle behavior", () => {
 	});
 
 	it.skipIf(process.platform === "win32")(
+		"rejects runInTerminal when the execution cwd is outside the session workspace",
+		async () => {
+			const workspace = await tempDir("gjc-dap-runterminal-ws-");
+			const outside = await tempDir("gjc-dap-runterminal-exec-");
+			const marker = path.join(outside, "ran");
+			try {
+				const manager = new DapSessionManager();
+				const fake = new RunInTerminalFakeClient(workspace, {
+					cwd: outside,
+					args: [BUN, "-e", `await Bun.write(${JSON.stringify(marker)}, "ran")`],
+				});
+				const originalSpawn = DapClient.spawn;
+				DapClient.spawn = async () => fake as unknown as DapClient;
+				try {
+					const before = liveOwnedProcessCount();
+					await expect(
+						manager.launch({ adapter: STDIO_ADAPTER, program: "fake", cwd: outside, workspace }, undefined, 25),
+					).rejects.toThrow(/escapes the workspace/);
+					expect(liveOwnedProcessCount()).toBe(before);
+					expect(await Bun.file(marker).exists()).toBe(false);
+				} finally {
+					DapClient.spawn = originalSpawn;
+				}
+			} finally {
+				await fs.rm(workspace, { recursive: true, force: true });
+				await fs.rm(outside, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"still allows runInTerminal when the execution cwd stays inside the session workspace",
+		async () => {
+			const workspace = await tempDir("gjc-dap-runterminal-ws-ok-");
+			const nested = path.join(workspace, "nested");
+			await fs.mkdir(nested);
+			try {
+				const manager = new DapSessionManager();
+				const fake = new RunInTerminalFakeClient(workspace, { cwd: nested });
+				const originalSpawn = DapClient.spawn;
+				DapClient.spawn = async () => fake as unknown as DapClient;
+				try {
+					const before = liveOwnedProcessCount();
+					const summary = await manager.launch(
+						{ adapter: STDIO_ADAPTER, program: "fake", cwd: nested, workspace },
+						undefined,
+						25,
+					);
+					expect(liveOwnedProcessCount()).toBeGreaterThan(before);
+					await manager.terminate(undefined, 25);
+					expect(manager.listSessions().some(session => session.id === summary.id)).toBe(false);
+				} finally {
+					DapClient.spawn = originalSpawn;
+				}
+			} finally {
+				await fs.rm(workspace, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
 		"still allows runInTerminal when cwd stays inside the workspace",
 		async () => {
 			const cwd = await tempDir("gjc-dap-runterminal-inside-");
