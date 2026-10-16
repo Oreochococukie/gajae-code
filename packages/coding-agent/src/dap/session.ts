@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as timers from "node:timers/promises";
 import { logger, untilAborted } from "@gajae-code/utils";
@@ -208,6 +209,53 @@ function buildSummary(session: DapSession): DapSessionSummary {
 		exitCode: session.exitCode,
 		needsConfigurationDone: session.needsConfigurationDone && !session.configurationDoneSent,
 	};
+}
+
+function isEnoent(error: unknown): boolean {
+	return (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
+}
+
+/** Walk missing leaves so a not-yet-created debug cwd can still be contained. */
+async function canonicalizeRunInTerminalCwd(absolute: string): Promise<string> {
+	try {
+		return await fs.realpath(absolute);
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+	}
+	const missing: string[] = [];
+	let cursor = absolute;
+	for (;;) {
+		const parent = path.dirname(cursor);
+		if (parent === cursor) throw new Error("runInTerminal cwd escapes the workspace");
+		missing.unshift(path.basename(cursor));
+		cursor = parent;
+		try {
+			return path.join(await fs.realpath(cursor), ...missing);
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+		}
+	}
+}
+
+function cwdEscapesWorkspace(root: string, candidate: string): boolean {
+	const relative = path.relative(root, candidate);
+	return relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+}
+
+/**
+ * The validated cwd is the cwd that is spawned. Relative paths resolve against
+ * the session workspace, then both sides are canonicalized before containment.
+ */
+async function resolveRunInTerminalCwd(workspace: string, requested: string | undefined): Promise<string> {
+	if (typeof requested === "string" && requested.trim() === "") {
+		throw new Error("runInTerminal cwd escapes the workspace");
+	}
+	const root = await fs.realpath(workspace);
+	const candidate = await canonicalizeRunInTerminalCwd(path.resolve(workspace, requested ?? workspace));
+	if (cwdEscapesWorkspace(root, candidate)) {
+		throw new Error("runInTerminal cwd escapes the workspace");
+	}
+	return candidate;
 }
 
 export class DapSessionManager {
@@ -978,8 +1026,9 @@ export class DapSessionManager {
 			const env = Object.fromEntries(
 				Object.entries(args.env ?? {}).filter((entry): entry is [string, string] => entry[1] !== null),
 			);
+			const cwd = await resolveRunInTerminalCwd(session.cwd, args.cwd);
 			const owner = spawnOwnedProcess(args.args, {
-				cwd: args.cwd ?? session.cwd,
+				cwd,
 				stdin: "ignore",
 				env: {
 					...Bun.env,
