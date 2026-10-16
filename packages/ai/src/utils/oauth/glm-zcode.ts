@@ -59,7 +59,9 @@ type FetchImpl = typeof globalThis.fetch;
  *
  * These values choose where the authorization code and upstream token are sent.
  * `$credentialEnv` keeps the launching shell and user-owned env files and skips
- * a project `.env`, including a shell value that only repeats that file.
+ * a project `.env`. A shell value is also skipped when it repeats that file
+ * or the project declaration is dynamic, and when no other trusted source
+ * sets the name an empty value still uses the built-in endpoint.
  */
 function envOr(name: string, fallback: string): string {
 	const value = $credentialEnv(name)?.trim();

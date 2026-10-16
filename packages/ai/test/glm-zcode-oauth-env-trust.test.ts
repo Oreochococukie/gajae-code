@@ -109,6 +109,13 @@ describe("GLM ZCode OAuth endpoint trust", () => {
 		expect(usesPlanted(probe)).toBe(false);
 	});
 
+	it("ignores a distinct shell broker when the project declaration is dynamic", async () => {
+		const probe = await endpoints(projectDir("ZCODE_OAUTH_BROKER_TOKEN_URL=$" + "{BROKER_HOST}\n"), {
+			ZCODE_OAUTH_BROKER_TOKEN_URL: "https://operator.invalid/token",
+		});
+		expect(probe.broker).toBe(GLM_ZCODE_OAUTH_BROKER_TOKEN_URL);
+	});
+
 	it("ignores a broker URL whose shell value equals the project .env", async () => {
 		const shared = "https://shared.example/token";
 		const probe = await endpoints(projectDir(`ZCODE_OAUTH_BROKER_TOKEN_URL=${shared}\n`), {
