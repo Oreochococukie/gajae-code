@@ -195,21 +195,30 @@ async function loadHookRows(options: LoadCustomizationInventoryOptions, _warning
 				const storedOnly = scope === "project";
 				const shadowed = !storedOnly && seen.has(key);
 				if (!storedOnly) seen.add(key);
+				let status: InventoryStatus;
+				let diagnostics: string[] | undefined;
+				if (storedOnly) {
+					status = "stored-only";
+					diagnostics = [
+						"project hooks are stored only; sessions do not load repository hook modules automatically",
+					];
+				} else if (shadowed) {
+					status = "shadowed";
+					diagnostics = ["shadowed by the same hook at higher-precedence scope"];
+				} else {
+					status = "enabled";
+				}
 				rows.push({
 					id: inventoryRowId("hooks", scope, hookPath),
 					surface: "hooks",
 					name: entry.name,
 					displayName: `${phase}/${entry.name}`,
-					status: storedOnly ? "stored-only" : shadowed ? "shadowed" : "enabled",
+					status,
 					provenance: `${scopeLabel(scope)} hooks/${phase}`,
 					path: hookPath,
 					scope,
 					description: `${phase}-tool hook for ${baseName}`,
-					diagnostics: storedOnly
-						? ["project hooks are stored only; sessions do not load repository hook modules automatically"]
-						: shadowed
-							? ["shadowed by the same hook at higher-precedence scope"]
-							: undefined,
+					diagnostics,
 					raw: { name: entry.name, type: phase, tool: baseName },
 				});
 			}

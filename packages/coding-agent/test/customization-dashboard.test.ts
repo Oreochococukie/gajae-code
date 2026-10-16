@@ -97,15 +97,28 @@ describe("CustomizationDashboard", () => {
 
 	test("project hooks are displayed as stored-only and cannot be enabled", async () => {
 		await fs.mkdir(path.join(projectDir, ".gjc", "hooks", "pre"), { recursive: true });
-		await fs.writeFile(path.join(projectDir, ".gjc", "hooks", "pre", "bash.ts"), "export {}\n");
+		const hookPath = path.join(projectDir, ".gjc", "hooks", "pre", "bash.ts");
+		await fs.writeFile(hookPath, "export {}\n");
 		const dashboard = await CustomizationDashboard.create(projectDir, undefined, homeDir);
 		dashboard.handleInput("\x1b[C"); // hooks section
-		let lines = Bun.stripANSI(dashboard.render(240).join("\n"));
-		expect(lines).toContain("stored-only");
+		const before = Bun.stripANSI(dashboard.render(240).join("\n")).split("\n");
+		expect(before.join("\n")).toContain("stored-only");
 
 		dashboard.handleInput("e");
-		lines = Bun.stripANSI(dashboard.render(240).join("\n"));
-		expect(lines).toContain("project hooks are stored-only");
+		const after = Bun.stripANSI(dashboard.render(240).join("\n")).split("\n");
+		expect(after.join("\n")).toContain("project hooks are stored-only");
+		expect(after).toHaveLength(before.length);
+		const changedCells = before.reduce((total, line, index) => {
+			const afterLine = after[index] ?? "";
+			const lineWidth = Math.max(line.length, afterLine.length);
+			let changed = 0;
+			for (let column = 0; column < lineWidth; column++) {
+				if (line[column] !== afterLine[column]) changed++;
+			}
+			return total + changed;
+		}, 0);
+		expect(changedCells / (before.length * 240)).toBeLessThan(0.1);
+		expect(await fs.readFile(hookPath, "utf-8")).toBe("export {}\n");
 	});
 
 	test("skills master switch marks native skills disabled", async () => {

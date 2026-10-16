@@ -54,6 +54,7 @@ import {
 	isCanonicalGjcWorkflowSkillFilesystemAlias,
 } from "../skill-state/canonical-skills";
 import { expandTilde } from "../tools/path-utils";
+import { resolveDiscoveryPrecedence } from "./customize-doctor-precedence";
 
 // =============================================================================
 // Public types (stable JSON contract)
@@ -407,45 +408,34 @@ async function discoverCapability<T extends { _source: SourceMeta }>(
 		includeDisabledProviders: true,
 	});
 
-	// First item per dedup key wins (highest priority provider first in `all`).
-	const winners = new Map<string, { provider: string; scope: "user" | "project" | "native" }>();
-	const excludedPrecedenceKeys = new Set<string>();
-	const entries: DiscoveredEntry<T>[] = [];
-	for (const item of result.all) {
-		const key = capability.key(item);
-		const scope = scopeOf(item._source);
-		const precedenceEligible = options.precedenceEligible?.(item) ?? true;
-		let shadowed = precedenceEligible && (item as { _shadowed?: boolean })._shadowed === true;
-		let shadowedBy: { provider: string; scope: string } | undefined;
-		if (!precedenceEligible && key !== undefined) excludedPrecedenceKeys.add(key);
-		if (precedenceEligible && key !== undefined) {
-			const winner = winners.get(key);
-			if (winner) {
-				shadowed = true;
-				shadowedBy = winner;
-			} else if (!disabledProviders.has(item._source.provider)) {
-				if (excludedPrecedenceKeys.has(key)) shadowed = false;
-				// Only enabled providers can own a dedup key; a disabled
-				// higher-priority provider must never shadow an enabled
-				// lower-priority source (includeDisabledProviders reports it
-				// as a listed item without giving it effective precedence).
-				winners.set(key, { provider: item._source.provider, scope });
-			}
-		}
-		entries.push({
+	// Resolve provider-order winners only after applying surface eligibility and
+	// the configured provider-disabled policy.
+	const resolvedPrecedence = resolveDiscoveryPrecedence(
+		result.all.map(item => ({
+			key: capability.key(item),
+			provider: item._source.provider,
+			scope: scopeOf(item._source),
+			eligible: options.precedenceEligible?.(item) ?? true,
+			enabled: !disabledProviders.has(item._source.provider),
+		})),
+	);
+	const entries: DiscoveredEntry<T>[] = result.all.map((item, index) => {
+		const precedence = resolvedPrecedence[index];
+		if (!precedence) throw new Error("discovery precedence result is missing an item");
+		return {
 			item,
 			name: options.nameOf(item),
 			path: options.pathOf(item),
 			provider: item._source.provider,
 			providerName: item._source.providerName,
-			scope,
+			scope: scopeOf(item._source),
 			priority: capability.providers.find(p => p.id === item._source.provider)?.priority ?? 0,
-			shadowed,
-			shadowedBy,
+			shadowed: precedence.shadowed,
+			shadowedBy: precedence.shadowedBy,
 			invalidReason: capability.validate?.(item),
 			extensionId: options.extensionIdOf?.(item),
-		});
-	}
+		};
+	});
 
 	entries.sort((a, b) => a.name.localeCompare(b.name) || a.provider.localeCompare(b.provider));
 

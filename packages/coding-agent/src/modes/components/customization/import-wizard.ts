@@ -327,34 +327,32 @@ export class ImportWizard extends Container {
 				: theme.bold(theme.fg("error", "Import failed — rolled back, no partial import")),
 		);
 		const failed = this.#result.entries.filter(e => e.outcome === "failed").slice(0, 5);
+		const completionMessages: string[] = [];
+		if (this.#result.ok) {
+			if (storedOnlyProjectHooks) {
+				completionMessages.push(
+					theme.fg(
+						"warning",
+						"Project-scope hooks are stored-only; ordinary sessions do not load repository hook modules.",
+					),
+					theme.fg("muted", "Import hooks into Global .gjc or configure an explicit hook path to activate them."),
+					theme.fg(
+						"muted",
+						"Other imported entries take effect after the documented reload/new-session boundary.",
+					),
+				);
+			} else {
+				completionMessages.push(
+					theme.fg("muted", "Imported entries take effect after the documented reload/new-session boundary."),
+				);
+			}
+		}
 		this.#bodyText.setText(
 			[
 				summary,
 				"",
 				...failed.map(e => theme.fg("error", ` ✗ ${e.surface}: ${safe(e.sourceName)} — ${safe(e.reason ?? "")}`)),
-				...(this.#result.ok
-					? storedOnlyProjectHooks
-						? [
-								theme.fg(
-									"warning",
-									"Project-scope hooks are stored-only; ordinary sessions do not load repository hook modules.",
-								),
-								theme.fg(
-									"muted",
-									"Import hooks into Global .gjc or configure an explicit hook path to activate them.",
-								),
-								theme.fg(
-									"muted",
-									"Other imported entries take effect after the documented reload/new-session boundary.",
-								),
-							]
-						: [
-								theme.fg(
-									"muted",
-									"Imported entries take effect after the documented reload/new-session boundary.",
-								),
-							]
-					: []),
+				...completionMessages,
 			].join("\n"),
 		);
 		this.#footerText.setText(theme.fg("muted", "enter/esc: close"));
