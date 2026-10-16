@@ -699,6 +699,26 @@ export interface CredentialDisabledEvent {
 export type CredentialRankingMode = "balanced" | "earliest-reset";
 
 /**
+ * One entry of a provider's ordered, persisted soft preference list.
+ *
+ * Entries are consulted in list order when a credential is selected. Usable
+ * entries under their cap are tried first, in list order; the remaining
+ * credentials follow in the normal ranking order. An entry whose most-used
+ * known usage window has reached `maxUsedFraction` is demoted behind every
+ * other credential, so it is used only when nothing else is available. A
+ * blocked or missing entry is skipped. Unknown usage never counts as over the
+ * cap.
+ *
+ * Runtime selectors (`--credential`, `--prefer-credential`) and session
+ * stickiness take precedence over configured preferences.
+ */
+export interface ConfiguredCredentialPreference {
+	selector: AuthCredentialSelector;
+	/** Used fraction in (0, 1] at which this entry stops being preferred. Absent means only blocking moves past it. */
+	maxUsedFraction?: number;
+}
+
+/**
  * Whether credential selection may probe provider usage endpoints.
  *
  * - `network` (default): ranking and quota checks fetch usage when the shared
@@ -714,6 +734,8 @@ export type AuthStorageOptions = {
 	usageProviderResolver?: (provider: Provider) => UsageProvider | undefined;
 	rankingStrategyResolver?: (provider: Provider) => CredentialRankingStrategy | undefined;
 	credentialRankingMode?: CredentialRankingMode;
+	/** Persisted ordered soft preferences keyed by provider id. */
+	credentialPreferences?: Readonly<Record<string, readonly ConfiguredCredentialPreference[]>>;
 	usageFetch?: typeof fetch;
 	usageRequestTimeoutMs?: number;
 	usageLogger?: UsageLogger;
@@ -1527,6 +1549,10 @@ export class AuthStorage {
 	#runtimeCredentialSelectors: Map<string, AuthCredentialSelector> = new Map();
 	/** Soft runtime credential preference per provider; quota failures may rotate away from it. */
 	#runtimePreferredCredentialSelectors: Map<string, AuthCredentialSelector> = new Map();
+	/** Persisted ordered soft credential preferences per provider; usage caps and quota failures move past entries. */
+	#configuredCredentialPreferences: Map<string, readonly ConfiguredCredentialPreference[]> = new Map();
+	/** Providers already warned that their preference list names one stored row twice. */
+	#warnedDuplicateCredentialPreferences = new Set<string>();
 	/** Credential selectors explicitly attached to a credential session scope. */
 	#sessionCredentialSelectors: Map<string, Map<string, AuthCredentialSelector>> = new Map();
 	/** Explicit AUTO masks suppress both scoped and process-global selectors for a scope/provider. */
@@ -1617,6 +1643,11 @@ export class AuthStorage {
 				: DEFAULT_USAGE_REQUEST_TIMEOUT_MS;
 		this.#usageFetchLeaseMs = usageTimeoutForLease + USAGE_FETCH_LEASE_GRACE_MS;
 		this.#credentialRankingMode = options.credentialRankingMode ?? "balanced";
+		for (const [provider, preferences] of Object.entries(options.credentialPreferences ?? {})) {
+			if (preferences.length > 0) {
+				this.#configuredCredentialPreferences.set(resolveOAuthStorageProvider(provider), preferences);
+			}
+		}
 		this.#refreshOAuthCredentialOverride = options.refreshOAuthCredential;
 		this.#fetchUsageReportsOverride = options.fetchUsageReports;
 		this.#fetchUsageReportsForProviderOverride = options.fetchUsageReportsForProvider;
@@ -3195,6 +3226,138 @@ export class AuthStorage {
 			options?.preferredCredentialSelector ??
 			this.#runtimePreferredCredentialSelectors.get(resolveOAuthStorageProvider(provider))
 		);
+	}
+
+	/**
+	 * Providers whose configured preference list names one stored credential row through more than one entry, for
+	 * example `email:` and `account:` selectors for the same login. Startup rejects such a list.
+	 */
+	findDuplicateCredentialPreferences(): Array<{ provider: string; credentialId: number }> {
+		const duplicates: Array<{ provider: string; credentialId: number }> = [];
+		for (const [provider, preferences] of this.#configuredCredentialPreferences) {
+			const credentialId = this.#duplicateConfiguredPreferenceRow(provider, preferences);
+			if (credentialId !== undefined) duplicates.push({ provider, credentialId });
+		}
+		return duplicates;
+	}
+
+	/** Id of the first stored row that two entries of `preferences` both designate; undefined when every entry differs. */
+	#duplicateConfiguredPreferenceRow(
+		provider: string,
+		preferences: readonly ConfiguredCredentialPreference[],
+	): number | undefined {
+		const designatedIds = new Set<number>();
+		for (const { selector } of preferences) {
+			const credentialId = this.#findCredentialBySelector(provider, selector)?.id;
+			if (credentialId === undefined) continue;
+			if (designatedIds.has(credentialId)) return credentialId;
+			designatedIds.add(credentialId);
+		}
+		return undefined;
+	}
+
+	/**
+	 * Reorder `candidates` by the provider's configured preference list: usable entries under their cap first, in list
+	 * order; then the remaining candidates in their ranked order; then entries at or over their cap, in list order.
+	 * Missing and blocked entries are skipped and keep their ranked position. A list that names one stored row twice
+	 * (startup rejects it, but a later login can make two entries resolve to one row) is ignored as a whole rather than
+	 * applying one entry's position and cap and dropping the other's.
+	 */
+	async #applyConfiguredCredentialPreferences(
+		provider: string,
+		providerKey: string,
+		candidates: Array<{
+			selection: OAuthCredentialSelection;
+			usage: UsageReport | null;
+			usageChecked: boolean;
+		}>,
+		strategy: CredentialRankingStrategy | undefined,
+		options?: AuthApiKeyOptions,
+	): Promise<void> {
+		const preferences = this.#configuredCredentialPreferences.get(resolveOAuthStorageProvider(provider));
+		if (!preferences) return;
+		const duplicateCredentialId = this.#duplicateConfiguredPreferenceRow(provider, preferences);
+		if (duplicateCredentialId !== undefined) {
+			const storageProvider = resolveOAuthStorageProvider(provider);
+			if (!this.#warnedDuplicateCredentialPreferences.has(storageProvider)) {
+				this.#warnedDuplicateCredentialPreferences.add(storageProvider);
+				logger.warn("Configured credential preferences name one account twice; using normal ranking", {
+					provider: storageProvider,
+					credentialId: duplicateCredentialId,
+				});
+			}
+			return;
+		}
+		type Candidate = (typeof candidates)[number];
+		const matched: Array<{ candidate: Candidate; maxUsedFraction: number | undefined }> = [];
+		const claimed = new Set<Candidate>();
+		for (const preference of preferences) {
+			const position = this.#findUsableOAuthCandidate(provider, providerKey, candidates, preference.selector);
+			if (position < 0) continue;
+			const candidate = candidates[position]!;
+			claimed.add(candidate);
+			matched.push({ candidate, maxUsedFraction: preference.maxUsedFraction });
+		}
+		if (matched.length === 0) return;
+		// Ranking already fetched usage for strategy-backed providers; fetch only what a cap still needs.
+		await Promise.all(
+			matched.map(async ({ candidate, maxUsedFraction }) => {
+				if (maxUsedFraction === undefined || candidate.usageChecked) return;
+				candidate.usage = await this.#getUsageReport(provider, candidate.selection.credential, {
+					baseUrl: options?.baseUrl,
+					timeoutMs: this.#usageRequestTimeoutMs,
+					signal: options?.signal,
+				});
+				candidate.usageChecked = true;
+			}),
+		);
+		const preferred: Candidate[] = [];
+		const capped: Candidate[] = [];
+		for (const { candidate, maxUsedFraction } of matched) {
+			const usedFraction =
+				maxUsedFraction === undefined ? undefined : this.#maxKnownUsedFraction(candidate.usage, strategy);
+			if (maxUsedFraction !== undefined && usedFraction !== undefined && usedFraction >= maxUsedFraction) {
+				capped.push(candidate);
+			} else {
+				preferred.push(candidate);
+			}
+		}
+		const rest = candidates.filter(candidate => !claimed.has(candidate));
+		candidates.splice(0, candidates.length, ...preferred, ...rest, ...capped);
+	}
+
+	/**
+	 * Position in `candidates` of the OAuth row `selector` designates, or -1 when it is missing, not OAuth, or blocked.
+	 * Candidates are matched by stored row id: `#findCredentialBySelector` indexes the full provider list (API-key rows
+	 * included) while candidate selections and the OAuth backoff map use OAuth-only indices.
+	 */
+	#findUsableOAuthCandidate(
+		provider: string,
+		providerKey: string,
+		candidates: ReadonlyArray<{ selection: OAuthCredentialSelection }>,
+		selector: AuthCredentialSelector,
+	): number {
+		const designated = this.#findCredentialBySelector(provider, selector);
+		if (designated?.credential.type !== "oauth") return -1;
+		const position = candidates.findIndex(candidate => candidate.selection.id === designated.id);
+		if (position < 0) return -1;
+		return this.#isCredentialBlocked(providerKey, candidates[position]!.selection.index) ? -1 : position;
+	}
+
+	/** Highest reported used fraction across known usage windows; undefined when no window reports one. */
+	#maxKnownUsedFraction(
+		usage: UsageReport | null,
+		strategy: CredentialRankingStrategy | undefined,
+	): number | undefined {
+		if (!usage) return undefined;
+		const limits = strategy ? Object.values(strategy.findWindowLimits(usage)) : usage.limits;
+		let maxUsed: number | undefined;
+		for (const limit of limits) {
+			const usedFraction = limit?.amount.usedFraction;
+			if (typeof usedFraction !== "number" || !Number.isFinite(usedFraction)) continue;
+			maxUsed = maxUsed === undefined ? usedFraction : Math.max(maxUsed, usedFraction);
+		}
+		return maxUsed;
 	}
 
 	#assertCredentialSelectorUsable(provider: string, selector: AuthCredentialSelector, owner?: object): void {
@@ -5896,20 +6059,18 @@ export class AuthStorage {
 					options?.owner,
 				);
 			}
-			const preferredSelection = preferredSelector
-				? this.#findCredentialBySelector(provider, preferredSelector)
-				: undefined;
-			if (
-				preferredSelection?.credential.type === "oauth" &&
-				!this.#isCredentialBlocked(providerKey, preferredSelection.index)
-			) {
-				const preferredCandidate = candidates.findIndex(
-					candidate => candidate.selection.index === preferredSelection.index,
-				);
+			const preferredCandidate = preferredSelector
+				? this.#findUsableOAuthCandidate(provider, providerKey, candidates, preferredSelector)
+				: -1;
+			if (preferredCandidate >= 0) {
 				if (preferredCandidate > 0) {
 					const [preferred] = candidates.splice(preferredCandidate, 1);
 					candidates.unshift(preferred);
 				}
+			} else if (!preferredSelector && !sessionPreferredIsAvailable) {
+				// Configured preferences choose a credential; a session that already sticks to a usable one keeps it, so
+				// the list (and any usage fetch its caps need) is consulted only at selection time.
+				await this.#applyConfiguredCredentialPreferences(provider, providerKey, candidates, strategy, options);
 			}
 		}
 

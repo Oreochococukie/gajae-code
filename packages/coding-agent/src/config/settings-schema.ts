@@ -1,5 +1,6 @@
 import type { Effort } from "@gajae-code/ai/model-thinking";
 import { PET_MODE_IDS, PET_SKIN_IDS, PET_SKINS } from "@gajae-code/tui/components/gajae-pet";
+import { type CredentialPreferenceEntryValue, parseCredentialPreferenceList } from "../session/startup-auth-config";
 import { TASK_SIMPLE_MODES } from "../task/simple-mode";
 import { getThinkingLevelMetadata } from "../thinking-metadata";
 import { DEFAULT_EDIT_MODE_SETTING, EDIT_MODE_SETTINGS, EDIT_MODES, type EditMode } from "../utils/edit-mode";
@@ -214,7 +215,11 @@ interface ArrayDef<T> {
 type RecordValueDef =
 	| { type: "model-selector-value" }
 	| { type: "string-enum"; values: readonly string[] }
-	| { type: "credential-selector" };
+	| { type: "credential-selector" }
+	| { type: "credential-preference-list" };
+
+/** A provider's `auth.credentialPreferences` value: one account or a non-empty ordered list of entries. */
+export type CredentialPreferenceSettingValue = string | CredentialPreferenceEntryValue[];
 
 interface ConstrainedRecordValueDef {
 	type: "autorouting-selector-value";
@@ -452,6 +457,13 @@ export const SETTINGS_SCHEMA = {
 		valueSchema: { type: "credential-selector" } as const,
 	},
 	"auth.credentialPinStoreIdentity": { type: "string", default: undefined },
+	// Ordered soft per-provider OAuth account preferences with optional per-entry usage caps. Global-only, like pins;
+	// read at startup.
+	"auth.credentialPreferences": {
+		type: "record",
+		default: {} as Record<string, CredentialPreferenceSettingValue>,
+		valueSchema: { type: "credential-preference-list" } as const,
+	},
 	"session.directoryMigration": {
 		type: "enum",
 		values: ["copy-retain", "disabled"] as const,
@@ -2834,6 +2846,12 @@ export const SETTINGS_SCHEMA = {
 		type: "string",
 		default: undefined,
 	},
+	// xxHash64 hex pin for settingsPath. Only the user/global value is a pin;
+	// a project file cannot authorize the TOML path it names.
+	"shellMinimizer.settingsHash": {
+		type: "string",
+		default: undefined,
+	},
 	"shellMinimizer.only": { type: "array", default: EMPTY_STRING_ARRAY },
 	"shellMinimizer.except": { type: "array", default: EMPTY_STRING_ARRAY },
 	"shellMinimizer.maxCaptureBytes": {
@@ -3804,6 +3822,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"task.compactSubagentPanel": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			label: "Compact Subagent Panel",
+			description:
+				"Collapse awaited subagents into one summary line (expand tool output to see each one) and refresh only when the summary changes",
+		},
+	},
+
 	"task.enableLsp": {
 		type: "boolean",
 		default: false,
@@ -4382,6 +4411,9 @@ function validRecordValue(valueSchema: RecordValueDef, value: unknown): boolean 
 				/^account:\S+$/.test(value))
 		);
 	}
+	if (valueSchema.type === "credential-preference-list") {
+		return parseCredentialPreferenceList(value) !== undefined;
+	}
 	return typeof value === "string" && valueSchema.values.includes(value);
 }
 
@@ -4724,6 +4756,7 @@ export interface BashInterceptorRule {
 export interface ShellMinimizerSettings {
 	enabled: boolean;
 	settingsPath: string | undefined;
+	settingsHash: string | undefined;
 	only: string[];
 	except: string[];
 	maxCaptureBytes: number;

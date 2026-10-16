@@ -2001,14 +2001,31 @@ async function discardPreparedNewSessionAfterFailure(
 // ============================================================================
 
 /** Tools that require user permission before execution when an ACP client is connected. */
-const PERMISSION_REQUIRED_TOOLS = new Set(["bash", "monitor", "eval", "edit", "delete", "move", "github"]);
+const PERMISSION_REQUIRED_TOOLS = new Set([
+	"bash",
+	"monitor",
+	"eval",
+	"edit",
+	"delete",
+	"move",
+	"github",
+	"computer",
+	"python",
+	"recipe",
+	"ssh",
+]);
 
 function isShellExecutionPermissionTool(toolName: string): boolean {
-	return toolName === "bash" || toolName === "monitor";
+	return toolName === "bash" || toolName === "monitor" || toolName === "ssh";
 }
 
 function isExecutionPermissionTool(toolName: string): boolean {
-	return isShellExecutionPermissionTool(toolName) || toolName === "eval";
+	return (
+		isShellExecutionPermissionTool(toolName) ||
+		toolName === "eval" ||
+		toolName === "python" ||
+		toolName === "recipe"
+	);
 }
 
 /** Permission options presented to the client on each gated tool call. */
@@ -2090,6 +2107,16 @@ function getPermissionIntent(
 			cacheKey: toolName,
 		};
 	}
+	if (toolName === "python") {
+		const action = getStringProperty(a, "action");
+		if (action === "clear") return { toolName, title: "python clear", cacheKey: toolName };
+		const code = getStringProperty(a, "code")?.slice(0, 80);
+		return { toolName, title: code && code.length > 0 ? code : "python", cacheKey: toolName };
+	}
+	if (toolName === "recipe") {
+		const op = getStringProperty(a, "op")?.slice(0, 80);
+		return { toolName, title: op && op.length > 0 ? op : "recipe", cacheKey: toolName };
+	}
 	if (toolName === "delete") {
 		const p = getStringProperty(a, "path");
 		return { toolName, title: p ? `Delete ${p}` : toolName, paths: p ? [p] : undefined, cacheKey: toolName };
@@ -2126,6 +2153,10 @@ function getPermissionIntent(
 		};
 	}
 	if (toolName === "github") return githubPermissionIntent(args);
+	if (toolName === "computer") {
+		const action = getStringProperty(a, "action");
+		return { toolName, title: action ? `Computer ${action}` : toolName, cacheKey: toolName };
+	}
 	return undefined;
 }
 
@@ -22147,6 +22178,20 @@ export class AgentSession {
 			if (compactionStatus.kind === "compacted") return result("compacted", true);
 			if (compactionStatus.kind === "aborted") {
 				return compactionStatus.source === "hook" ? result("not-needed") : result("aborted");
+			}
+			// A skipped compaction (most often: nothing before the keep window to
+			// summarize, e.g. one oversized early message) leaves the context
+			// unchanged. Crossing the threshold is not an overflow: while the
+			// unchanged context still fits the model window with its reserve, send
+			// it, as the agent_end threshold path does. Failing here would end every
+			// later turn of the session with the same error. A prune committed above
+			// has already rewritten durable history, so the run must restart on it
+			// rather than send its pre-prune snapshot.
+			if (
+				compactionStatus.kind === "skipped" &&
+				contextTokens + effectiveReserveTokens(contextWindow, compactionSettings) <= contextWindow
+			) {
+				return pruneResult?.committed ? result("pruned", true) : result("not-needed");
 			}
 			return result(
 				"failed",

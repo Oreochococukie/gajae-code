@@ -144,6 +144,19 @@ This boundary prevents a child from newly loading caller-cwd or user-global Bun 
 
 Broker and per-session discovery tokens remain in their authoritative private discovery files for SDK-core resolution. Launch errors, logs, and diagnostics redact those tokens and never include the child environment or isolation configuration contents.
 
+### Recovering legacy broker locks
+
+Broker lock records written before host qualification do not identify which machine created them. A machine cannot safely infer that such a lock belongs to it from a locally absent or reused PID when the agent directory is shared. GJC therefore refuses to reclaim a host-unqualified lock automatically; the error links here rather than treating an unverifiable owner as dead.
+
+For a legacy lock that blocks startup, recover it only after confirming that every GJC broker using the same agent directory has stopped on every host that can access that directory:
+
+1. Stop the GJC processes or supervisor services that can start the broker on each host using that agent directory. Do not proceed while any broker may still be serving sessions or renewing discovery.
+2. Copy `sdk/broker.lock` and `sdk/broker.json` to a backup location outside the agent directory. Preserve the originals until startup and session state have been checked.
+3. Move both `sdk/broker.lock` and `sdk/broker.json` out of the `sdk` directory. Do not use this procedure for a host-qualified lock or while any host may still be running a broker.
+4. Start one GJC process using the agent directory and verify broker startup before restarting other clients or supervisors.
+
+This procedure is a one-time operator migration for old host-unqualified records, not a way to take over a lock from a running broker. If all brokers cannot be stopped or the record already contains a host identity, preserve the lock and investigate the owning host instead.
+
 ## Internal protocol
 
 The following frame shapes are SDK-core implementation details for maintainers.
@@ -193,6 +206,20 @@ broker-bound CLI, or Coordinator MCP instead.
 
 Reasons: `already_answered`, `unknown_action`, `invalid_answer`,
 `resolver_unavailable`, `idempotency_conflict`, `unauthorized`.
+
+Live tool content on both the broker-created bus host and SDK-only host uses
+`{type:"event", kind:"tool_execution_start"|"tool_execution_update"|"tool_execution_end", payload:{event_type,event}}`.
+Prompt owners receive their command/turn correlation. Explicit observers must
+negotiate **both** `turn_stream` and `session_host_observer_v1`; their copy has no
+other client's correlation, and an owner also observing receives no duplicate.
+On the internal wire, `hello` or `event_replay.capabilities` declares these opt-ins
+on the authenticated connection; replay negotiation merges with existing caps.
+Capabilities do not confer lifecycle or session identity authority.
+Tool updates carry cumulative `partialResult` snapshots, not append-only deltas;
+replace the prior snapshot. The end frame's `result` is authoritative, including
+when it differs from the last update. These content frames are best-effort and
+not retained in lifecycle replay. A replay acknowledgement without content is
+not evidence that a running tool produced no output.
 
 `bash_folded` — a foreground bash wait left the foreground and became a background job. Emitted once per fold into the replayable session event ring (so late-connecting clients receive it on `event_replay`), with `generic_safe` adapter disposition:
 
