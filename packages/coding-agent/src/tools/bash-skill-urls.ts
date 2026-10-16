@@ -1,3 +1,4 @@
+import type * as fsTypes from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@gajae-code/utils";
@@ -154,7 +155,7 @@ async function canonicalLocalPath(localRoot: string, lexicalPath: string): Promi
 	const missing: string[] = [];
 	let cursor = lexicalPath;
 	for (;;) {
-		let stat: Awaited<ReturnType<typeof fs.lstat>> | undefined;
+		let stat: fsTypes.Stats | undefined;
 		try {
 			stat = await fs.lstat(cursor);
 		} catch (error) {
@@ -194,7 +195,7 @@ async function canonicalPathOrAncestor(target: string, escapeMessage: string): P
 	const missing: string[] = [];
 	let cursor = target;
 	for (;;) {
-		let stat: Awaited<ReturnType<typeof fs.lstat>> | undefined;
+		let stat: fsTypes.Stats | undefined;
 		try {
 			stat = await fs.lstat(cursor);
 		} catch (error) {
