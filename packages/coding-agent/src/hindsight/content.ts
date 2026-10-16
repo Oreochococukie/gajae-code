@@ -114,7 +114,7 @@ function stripMemoryTagFamily(content: string, name: string): string {
 	return out;
 }
 
-/** Drop tag delimiters only, so a recalled fact cannot close the outer frame. */
+/** Escape recognized tag delimiters so recalled text cannot close the outer frame. */
 function stripMemoryTagTokens(text: string): string {
 	let out = text;
 	for (const name of MEMORY_TAG_NAMES) {
