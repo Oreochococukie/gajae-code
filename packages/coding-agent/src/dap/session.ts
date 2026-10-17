@@ -247,7 +247,7 @@ async function canonicalizeRunInTerminalCwd(absolute: string): Promise<string> {
 	}
 }
 
-function cwdEscapesWorkspace(root: string, candidate: string): boolean {
+export function cwdEscapesWorkspace(root: string, candidate: string): boolean {
 	const relative = path.relative(root, candidate);
 	return relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
 }
