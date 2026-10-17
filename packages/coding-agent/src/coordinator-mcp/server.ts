@@ -2170,6 +2170,11 @@ function webhookEventDiagnosticToken(eventId: string, maxLength: number): string
 	return token;
 }
 
+/** Test-only access for generated normalization and truncation properties. */
+export function webhookEventDiagnosticTokenForTest(eventId: string, maxLength: number): string {
+	return webhookEventDiagnosticToken(eventId, maxLength);
+}
+
 async function appendEventWebhookDiagnostic(namespaceDir: string, eventId: string, error: unknown): Promise<void> {
 	const code =
 		error instanceof Error && /^[a-z0-9_]+$/.test(error.message)
@@ -2189,6 +2194,15 @@ async function appendEventWebhookDiagnostic(namespaceDir: string, eventId: strin
 	} catch {
 		// Diagnostics are best-effort; sink problems must never propagate upward.
 	}
+}
+
+/** Test-only access for diagnostic record boundary coverage. */
+export async function appendEventWebhookDiagnosticForTest(
+	namespaceDir: string,
+	eventId: string,
+	error: unknown,
+): Promise<void> {
+	await appendEventWebhookDiagnostic(namespaceDir, eventId, error);
 }
 
 function enqueueEventWebhook(namespaceDir: string, event: CoordinatorEvent): void {

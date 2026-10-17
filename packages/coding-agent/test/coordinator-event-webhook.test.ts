@@ -16,8 +16,10 @@ import {
 import { buildCoordinatorMcpConfig, coordinatorNamespacePath } from "../src/coordinator-mcp/policy";
 import {
 	appendCoordinatorEventForTest,
+	appendEventWebhookDiagnosticForTest,
 	awaitEventWebhookDeliveriesForTest,
 	createCoordinatorMcpServer,
+	webhookEventDiagnosticTokenForTest,
 } from "../src/coordinator-mcp/server";
 
 const tempDirs: string[] = [];
@@ -33,6 +35,30 @@ async function tempRoot(): Promise<string> {
 	const canonical = await fs.realpath(dir);
 	tempDirs.push(canonical);
 	return canonical;
+}
+
+function generatedWebhookDiagnosticCases(): Array<{ identifier: string; budget: number }> {
+	let state = 0x6739_cafe;
+	const random = (): number => {
+		state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0;
+		return state / 0x1_0000_0000;
+	};
+	const randomInt = (max: number): number => Math.floor(random() * (max + 1));
+	const edgeCodeUnits = [
+		0x0000, 0x0009, 0x000a, 0x000d, 0x001f, 0x0020, 0x0041, 0x007e, 0x007f, 0xd800, 0xdbff, 0xdc00, 0xdfff, 0xffff,
+	];
+	const budgets = [0, 1, 2, 7, 239, 240, 241, 511, 512, 1024, 4096];
+
+	return Array.from({ length: 256 }, (_, sample) => {
+		const length = sample % 8 === 0 ? 4096 : randomInt(512);
+		const codeUnits = [...edgeCodeUnits];
+		for (let index = 0; index < length; index += 1) {
+			codeUnits.push(Math.floor(random() * 0x1_0000));
+		}
+		const identifier = codeUnits.map(codeUnit => String.fromCharCode(codeUnit)).join("");
+		const budget = budgets[sample] ?? randomInt(4096);
+		return { identifier, budget };
+	});
 }
 
 afterEach(async () => {
@@ -440,5 +466,42 @@ describe("deliverEventWebhook", () => {
 		expect(diagnostic.slice(0, -1)).not.toContain("\n");
 		expect(diagnostic).not.toContain("\r");
 		expect(Buffer.byteLength(diagnostic)).toBeLessThanOrEqual(512);
+	});
+});
+
+describe("webhook event diagnostic normalization properties", () => {
+	it("preserves printable ASCII order and is idempotent for seeded arbitrary UTF-16 inputs", () => {
+		for (const { identifier, budget } of generatedWebhookDiagnosticCases()) {
+			const token = webhookEventDiagnosticTokenForTest(identifier, budget);
+			const expected = identifier.replace(/[^\x20-\x7e]/g, "").slice(0, budget);
+
+			expect(token).toBe(expected);
+			expect(token).toMatch(/^[\x20-\x7e]*$/);
+			expect(token.length).toBeLessThanOrEqual(budget);
+			expect(webhookEventDiagnosticTokenForTest(token, budget)).toBe(token);
+		}
+	});
+
+	it("caps error codes at 240 characters and keeps long-ID records within one 512-byte line", async () => {
+		const eventId = `evt-${"a".repeat(4096)}`;
+		for (const errorLength of [239, 240, 241]) {
+			const namespaceDir = await tempRoot();
+			const errorCode = "e".repeat(errorLength);
+			await appendEventWebhookDiagnosticForTest(namespaceDir, eventId, new Error(errorCode));
+
+			const diagnostic = await fs.readFile(path.join(namespaceDir, "event-webhook-errors.log"), "utf8");
+			expect(diagnostic.endsWith("\n")).toBe(true);
+			expect(diagnostic.split("\n")).toHaveLength(2);
+			expect(diagnostic.slice(0, -1)).not.toContain("\n");
+			expect(diagnostic).not.toContain("\r");
+			expect(Buffer.byteLength(diagnostic, "utf8")).toBeLessThanOrEqual(512);
+			expect(diagnostic.endsWith(`error=${"e".repeat(Math.min(errorLength, 240))}\n`)).toBe(true);
+
+			const eventStart = diagnostic.indexOf(" event=") + " event=".length;
+			const errorStart = diagnostic.indexOf(" error=");
+			const writtenEventId = diagnostic.slice(eventStart, errorStart);
+			expect(writtenEventId.startsWith("evt-")).toBe(true);
+			expect(writtenEventId.length).toBeLessThan(eventId.length);
+		}
 	});
 });
