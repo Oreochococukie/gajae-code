@@ -1,3 +1,3 @@
 ### Fixed
 
-- Search and AST grep results are framed as untrusted content before they reach the model, and a closing untrusted-content tag inside a match is escaped.
+- Search and AST grep results stay inside an untrusted-content fence after tail-only truncation, and a closing tag inside a match stays escaped.
