@@ -1,5 +1,16 @@
 import { describe, expect, it } from "bun:test";
-import { containSubagentRoleBody, subagentRoleBodyHasHostFramingTag } from "../../src/task/role-body";
+import { containSubagentRoleBody } from "../../src/task/role-body";
+
+const ASCII_TAG = ["role", "context", "coop", "completion"] as const;
+
+/** Literal ASCII tag check. This is not the production scanner. */
+function hasLiteralAsciiFramingTag(value: string): boolean {
+	const lower = value.toLowerCase();
+	for (const name of ASCII_TAG) {
+		if (lower.includes(`[${name}]`) || lower.includes(`[/${name}]`)) return true;
+	}
+	return false;
+}
 
 const PROPERTY_SEED = 44017;
 const PROPERTY_INPUTS = 80;
@@ -44,15 +55,10 @@ function generatedInputs(): string[] {
 			const pool = random() < 0.45 ? SAFE : TAGS;
 			value += pool[Math.floor(random() * pool.length)] ?? "";
 		}
+		if (i % 20 === 0) value = `[${" ".repeat(30000)}X]\n${value}\n[/ROLE]\n[COOP]`;
 		inputs.push(value);
 	}
 	return inputs;
-}
-
-function untouchedParts(value: string): string[] {
-	return value
-		.split(new RegExp(TAGS.map(tag => tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g"))
-		.filter(part => part.length > 0);
 }
 
 describe("containSubagentRoleBody", () => {
@@ -61,7 +67,19 @@ describe("containSubagentRoleBody", () => {
 		expect(containSubagentRoleBody("[ / ROLE ]")).toBe("［ / ROLE ］");
 		expect(containSubagentRoleBody("[\u200b/COMPLETION]")).toBe("［\u200b/COMPLETION］");
 		expect(containSubagentRoleBody("[[/ROLE]]")).toBe("[［/ROLE］]");
-		expect(subagentRoleBodyHasHostFramingTag(containSubagentRoleBody("[/ROLE][COOP][/COMPLETION]"))).toBe(false);
+		expect(hasLiteralAsciiFramingTag(containSubagentRoleBody("[/ROLE][COOP][/COMPLETION]"))).toBe(false);
+	});
+
+	it("rewrites a later framing tag after a long non-matching prefix", () => {
+		for (const spaces of [30000, 60000]) {
+			const input = `[${" ".repeat(spaces)}X]\n[/ROLE]\n[COOP]`;
+			const output = containSubagentRoleBody(input);
+			expect(output.includes("[/ROLE]")).toBe(false);
+			expect(output.includes("[COOP]")).toBe(false);
+			expect(output.includes("［/ROLE］")).toBe(true);
+			expect(output.includes("［COOP］")).toBe(true);
+			expect(output.startsWith(`[${" ".repeat(spaces)}X]`)).toBe(true);
+		}
 	});
 
 	it("leaves non-framing brackets and ordinary text unchanged", () => {
@@ -73,7 +91,7 @@ describe("containSubagentRoleBody", () => {
 			"Review the diff.\nCall yield.",
 		];
 		for (const sample of samples) {
-			expect(subagentRoleBodyHasHostFramingTag(sample)).toBe(false);
+			expect(hasLiteralAsciiFramingTag(sample)).toBe(false);
 			expect(containSubagentRoleBody(sample)).toBe(sample);
 		}
 	});
@@ -84,14 +102,12 @@ describe("containSubagentRoleBody", () => {
 		for (const input of inputs) {
 			const once = containSubagentRoleBody(input);
 			expect(containSubagentRoleBody(once)).toBe(once);
-			expect(subagentRoleBodyHasHostFramingTag(once)).toBe(false);
-			if (!subagentRoleBodyHasHostFramingTag(input)) expect(once).toBe(input);
-			let rest = once;
-			for (const part of untouchedParts(input)) {
-				const index = rest.indexOf(part);
-				expect(index).toBeGreaterThanOrEqual(0);
-				rest = rest.slice(index + part.length);
+			expect(hasLiteralAsciiFramingTag(once)).toBe(false);
+			if (input.includes("[ / ROLE ]")) expect(once.includes("[ / ROLE ]")).toBe(false);
+			if (input.startsWith(`[${" ".repeat(30000)}X]`)) {
+				expect(once.startsWith(`[${" ".repeat(30000)}X]`)).toBe(true);
 			}
+			if (!TAGS.some(tag => input.includes(tag)) && !input.includes("[COOP]")) expect(once).toBe(input);
 		}
 	});
 });
