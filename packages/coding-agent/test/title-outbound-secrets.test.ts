@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { AgentMessage } from "@gajae-code/agent-core";
 import * as ai from "@gajae-code/ai";
 import { type Api, getBundledModel, type Model } from "@gajae-code/ai";
 import fc from "fast-check";
@@ -97,7 +98,7 @@ describe("session title secret outbound", () => {
 		expect(straddled).not.toContain(TOKEN.slice(0, 10));
 	});
 
-	it("keeps the user-message fence around tail-only and head-plus-tail slices", () => {
+	it("frames tail-only and head-plus-tail slices after truncation", () => {
 		const prepare = titleGenerator.prepareTitleOutboundText;
 		expect(typeof prepare).toBe("function");
 		const full = `${"H".repeat(400)}${"M".repeat(4000)}SECRET378TAIL${"T".repeat(400)}`;
@@ -114,6 +115,17 @@ describe("session title secret outbound", () => {
 		expect(framedFull.endsWith("\n</user-message>")).toBe(true);
 		const inner = framedFull.slice("<user-message>\n".length, -"\n</user-message>".length);
 		expect(inner.length).toBeLessThanOrEqual(CAP + 1);
+		// Tail-only slice longer than the cap: the function truncates, then fences.
+		const tailOnlyOverlong = full.slice(-2500);
+		const framedTail = prepare(tailOnlyOverlong);
+		expect(tailOnlyOverlong.length).toBeGreaterThan(CAP);
+		expect(framedTail.startsWith("<user-message>\n")).toBe(true);
+		expect(framedTail.endsWith("\n</user-message>")).toBe(true);
+		const headAndTailOverlong = `${full.slice(0, 1500)}${full.slice(-1500)}`;
+		const framedHeadTail = prepare(headAndTailOverlong);
+		expect(headAndTailOverlong.length).toBeGreaterThan(CAP);
+		expect(framedHeadTail.startsWith("<user-message>\n")).toBe(true);
+		expect(framedHeadTail.endsWith("\n</user-message>")).toBe(true);
 	});
 
 	it("property: title outbound keeps the fence and drops a configured secret", () => {
@@ -149,6 +161,40 @@ describe("session title secret outbound", () => {
 				},
 			),
 			{ seed: 378202610, numRuns: 80 },
+		);
+	});
+
+	it("property: rename digest obfuscates before the 400-character cut", () => {
+		const build = titleGenerator.buildConversationTitleInput;
+		const placeholder = "#GJC1_qqqqqqqqqqqqqqqqqqqqqq#";
+		const user = (content: string): AgentMessage => ({ role: "user", content, timestamp: 0 }) as AgentMessage;
+		fc.assert(
+			fc.property(
+				fc.integer({ min: 0, max: 450 }),
+				fc
+					.array(fc.constantFrom(..."abcdefghij".split("")), { minLength: 8, maxLength: 16 })
+					.map(chars => chars.join("")),
+				fc.integer({ min: 0, max: 2 }),
+				fc.integer({ min: 0, max: 2 }),
+				(pad, core, lead, trail) => {
+					const secret = `${" ".repeat(lead)}${core}${" ".repeat(trail)}`;
+					const message = `${"x".repeat(pad)}${secret}`;
+					const visible = message.trim();
+					const raw = build([user(message)]);
+					const historical = visible.length > 400 ? `${visible.slice(0, 400)}…` : visible;
+					expect(raw).toBe(historical);
+					const redacted = build([user(message)], text => text.split(secret).join(placeholder));
+					expect(redacted).toBeDefined();
+					expect(redacted!.startsWith("<user-message>")).toBe(false);
+					expect(redacted).not.toContain(core);
+					expect(redacted!.length).toBeLessThanOrEqual(401);
+					if (pad < 400 && pad + core.length > 400) {
+						const prefix = core.slice(0, 400 - pad);
+						expect(redacted).not.toContain(prefix);
+					}
+				},
+			),
+			{ seed: 378400201, numRuns: 64 },
 		);
 	});
 });
