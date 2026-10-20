@@ -5,6 +5,7 @@
  * the import creates).
  */
 import { afterEach, expect, spyOn, test } from "bun:test";
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -131,6 +132,66 @@ test.skipIf(process.platform === "win32")(
 			expect(leaked).toEqual([]);
 		} finally {
 			mkdir.mockRestore();
+		}
+	},
+);
+
+test("still allows overwriting a skill that already exists in a real directory", async () => {
+	const { projectDir, homeDir } = await layout();
+	const destination = path.join(projectDir, ".gjc", "skills", "claude-skill", "SKILL.md");
+	await fs.mkdir(path.dirname(destination), { recursive: true });
+	await fs.writeFile(destination, "previous skill\n");
+	const plan = await buildImportPreview({
+		product: "claude-code",
+		sourceScope: "project",
+		destinationScope: "project",
+		surfaces: ["skills"],
+		collisionPolicy: "overwrite",
+		cwd: projectDir,
+		homeDir,
+	});
+	const result = await applyImport(plan, { cwd: projectDir });
+	expect(result.ok).toBe(true);
+	expect(result.entries[0]?.outcome).toBe("overwritten");
+	expect(await fs.readFile(destination, "utf-8")).toContain("x-gjc-imported-from");
+});
+
+test.skipIf(process.platform === "win32")(
+	"does not report success when the destination directory is moved before verification",
+	async () => {
+		const { projectDir, homeDir } = await layout();
+		const parent = path.join(projectDir, ".gjc", "skills", "claude-skill");
+		const moved = `${parent}-moved`;
+		const plan = await buildImportPreview({
+			product: "claude-code",
+			sourceScope: "project",
+			destinationScope: "project",
+			surfaces: ["skills"],
+			collisionPolicy: "skip",
+			cwd: projectDir,
+			homeDir,
+		});
+		let movedParent = false;
+		const originalWrite = fsSync.writeFileSync;
+		const writeFile = spyOn(fsSync, "writeFileSync").mockImplementation(((...args: unknown[]) => {
+			const written = originalWrite.apply(fsSync, args as Parameters<typeof fsSync.writeFileSync>);
+			if (!movedParent && typeof args[0] === "number" && fsSync.existsSync(parent)) {
+				movedParent = true;
+				fsSync.renameSync(parent, moved);
+				fsSync.mkdirSync(parent);
+			}
+			return written;
+		}) as typeof fsSync.writeFileSync);
+		try {
+			const result = await applyImport(plan, { cwd: projectDir });
+			expect(movedParent).toBe(true);
+			expect(result.ok).toBe(false);
+			expect(result.entries.some(entry => entry.outcome === "imported")).toBe(false);
+			expect(result.entries.some(entry => entry.reason?.includes("verification"))).toBe(true);
+			await expect(fs.lstat(path.join(moved, "SKILL.md"))).rejects.toThrow();
+			await expect(fs.lstat(path.join(parent, "SKILL.md"))).rejects.toThrow();
+		} finally {
+			writeFile.mockRestore();
 		}
 	},
 );

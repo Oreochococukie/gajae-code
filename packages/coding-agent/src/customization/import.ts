@@ -865,6 +865,29 @@ function writeRegularAt(parentFd: number, name: string, content: string, index: 
 	}
 }
 
+/** The lexical parent must still be the directory the descriptor published into. */
+function assertPinnedParentStillAt(parentFd: number, lexicalParent: string, lexicalPath: string): void {
+	let named: fsSync.Stats;
+	try {
+		named = fsSync.lstatSync(lexicalParent);
+	} catch {
+		throw new Error(`post-import verification failed: ${lexicalPath} was not persisted`);
+	}
+	const opened = fsSync.fstatSync(parentFd);
+	if (named.isSymbolicLink() || !named.isDirectory() || named.dev !== opened.dev || named.ino !== opened.ino) {
+		throw new Error(`post-import verification failed: ${lexicalPath} was not persisted`);
+	}
+	try {
+		const leaf = fsSync.lstatSync(lexicalPath);
+		if (leaf.isSymbolicLink() || !leaf.isFile()) {
+			throw new Error(`post-import verification failed: ${lexicalPath} was not persisted`);
+		}
+	} catch (error) {
+		if (error instanceof Error && error.message.startsWith("post-import verification failed:")) throw error;
+		throw new Error(`post-import verification failed: ${lexicalPath} was not persisted`);
+	}
+}
+
 function restoreRegularAt(parentFd: number, name: string, previous: string | null, lexicalPath: string): void {
 	if (previous === null) {
 		if (directoryOps().unlinkat(parentFd, name, 0) < 0 && directoryOps().errno() !== ENOENT) {
@@ -1095,10 +1118,15 @@ export async function applyImport(plan: ImportPlan, options: { cwd: string }): P
 		// --- Phase 3: verification (inside the transaction) ------------------
 		for (const write of fileWrites) {
 			const pinned = snapshots.find(snapshot => snapshot.path === write.path && snapshot.parentFd !== undefined);
-			const persisted =
-				pinned?.parentFd !== undefined && pinned.name
-					? readRegularAt(pinned.parentFd, pinned.name, write.path)
-					: await readStructured(write.path).then(result => (result.kind === "value" ? result.content : null));
+			let persisted: string | null;
+			if (pinned?.parentFd !== undefined && pinned.name) {
+				assertPinnedParentStillAt(pinned.parentFd, path.dirname(write.path), write.path);
+				persisted = readRegularAt(pinned.parentFd, pinned.name, write.path);
+			} else {
+				persisted = await readStructured(write.path).then(result =>
+					result.kind === "value" ? result.content : null,
+				);
+			}
 			if (persisted !== write.content) {
 				throw new Error(`post-import verification failed: ${write.path} was not persisted`);
 			}
