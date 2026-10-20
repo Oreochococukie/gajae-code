@@ -105,6 +105,30 @@ function getTitleModel(
 }
 
 /**
+ * Obfuscate the full title input, then truncate, then wrap.
+ * A secret that crosses the character cap is replaced before the cut, and the
+ * `<user-message>` fence stays outside the truncated body.
+ */
+export function prepareTitleOutboundText(firstMessage: string, obfuscateText?: (text: string) => string): string {
+	const source = obfuscateText ? obfuscateText(firstMessage) : firstMessage;
+	const truncated = source.length > MAX_INPUT_CHARS ? `${source.slice(0, MAX_INPUT_CHARS)}…` : source;
+	return `<user-message>\n${truncated}\n</user-message>`;
+}
+
+async function titleInputObfuscator(settings: Settings): Promise<((text: string) => string) | undefined> {
+	const reader = settings as Partial<Pick<Settings, "get" | "getCwd" | "getAgentDir">>;
+	if (typeof reader.get !== "function" || reader.get("secrets.enabled") !== true) return undefined;
+	const { collectEnvSecrets, createSecretObfuscator, loadSecrets } = await import("../secrets");
+	const cwd = typeof reader.getCwd === "function" ? reader.getCwd() : process.cwd();
+	const agentDir = typeof reader.getAgentDir === "function" ? reader.getAgentDir() : cwd;
+	const entries = [...collectEnvSecrets(), ...(await loadSecrets(cwd, agentDir))];
+	if (entries.length === 0) return undefined;
+	const obfuscator = createSecretObfuscator(entries);
+	if (!obfuscator.hasSecrets()) return undefined;
+	return text => obfuscator.obfuscate(text);
+}
+
+/**
  * Generate a title for a session based on the provided user-message input.
  * Automatic titles pass the first user message; regeneration passes a bounded
  * conversation digest.
@@ -133,13 +157,6 @@ export async function generateSessionTitle(
 		return null;
 	}
 
-	// Truncate message if too long
-	const truncatedMessage =
-		firstMessage.length > MAX_INPUT_CHARS ? `${firstMessage.slice(0, MAX_INPUT_CHARS)}…` : firstMessage;
-	const userMessage = `<user-message>
-${truncatedMessage}
-</user-message>`;
-
 	const apiKey = await registry.getApiKey(model, sessionId);
 	if (!apiKey) {
 		logger.debug("title-generator: no API key for smol model", {
@@ -152,6 +169,7 @@ ${truncatedMessage}
 	// request is already recorded; metadataResolver can then return the correct
 	// account_uuid rather than the snapshot-at-call-site value.
 	const metadata = metadataResolver?.(model.provider);
+	const userMessage = prepareTitleOutboundText(firstMessage, await titleInputObfuscator(settings));
 
 	// Title generation is a 3-6 word task, but some reasoning backends ignore
 	// disableReasoning. Keep the normal cheap budget for non-reasoning models
