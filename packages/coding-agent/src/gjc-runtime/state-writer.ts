@@ -1172,7 +1172,40 @@ async function assertAppendRegularFile(filePath: string): Promise<void> {
  * when the path already exists, and `O_EXCL` when it does not. An existing mode 0666
  * file, and any other group or other permission bits, is tightened to 0600 before the write.
  */
-async function appendOwnerOnlyText(filePath: string, text: string | null): Promise<void> {
+async function tightenReadOnlyAppendMode(filePath: string): Promise<void> {
+	if (process.platform === "win32") return;
+	const noFollow = fsConstants.O_NOFOLLOW ?? 0;
+	const initialStat = await fs.lstat(filePath, { bigint: true });
+	if (initialStat.isSymbolicLink() || !initialStat.isFile())
+		throw new Error("state append path is not a regular file");
+	// A duplicate idempotent append must not require a writable file. Owner-only
+	// modes such as 0400 stay as they are; only group or other bits are tightened.
+	const handle = await fs.open(filePath, fsConstants.O_RDONLY | noFollow);
+	try {
+		const openedStat = await handle.stat({ bigint: true });
+		const pathStat = await fs.lstat(filePath, { bigint: true });
+		const sameObject = (left: nodeFs.BigIntStats, right: nodeFs.BigIntStats) =>
+			left.dev === right.dev && left.ino === right.ino && left.nlink === right.nlink;
+		if (
+			openedStat.isSymbolicLink() ||
+			!openedStat.isFile() ||
+			pathStat.isSymbolicLink() ||
+			!pathStat.isFile() ||
+			!sameObject(initialStat, openedStat) ||
+			!sameObject(openedStat, pathStat)
+		)
+			throw new Error("state append path identity changed before append");
+		if ((Number(openedStat.mode) & 0o077) === 0) return;
+		await handle.chmod(0o600);
+		const tightened = await handle.stat({ bigint: true });
+		if ((Number(tightened.mode) & 0o777) !== 0o600)
+			throw new Error("state append path could not be tightened to mode 0600");
+	} finally {
+		await handle.close();
+	}
+}
+
+async function appendOwnerOnlyText(filePath: string, text: string): Promise<void> {
 	await fs.mkdir(path.dirname(filePath), { recursive: true });
 	await assertAppendRegularFile(filePath);
 	const noFollow = process.platform === "win32" ? 0 : (fsConstants.O_NOFOLLOW ?? 0);
@@ -1223,7 +1256,7 @@ async function appendOwnerOnlyText(filePath: string, text: string | null): Promi
 			if ((Number(tightened.mode) & 0o777) !== 0o600)
 				throw new Error("state append path could not be tightened to mode 0600");
 		}
-		if (text !== null) await handle.writeFile(text, "utf-8");
+		await handle.writeFile(text, "utf-8");
 	} finally {
 		await handle?.close();
 	}
@@ -1333,7 +1366,7 @@ export async function appendJsonlIdempotent(
 			const existing = await readJsonlEntries(filePath);
 			const duplicate = findJsonlDuplicate(existing, entry, options);
 			if (duplicate !== undefined) {
-				await appendOwnerOnlyText(filePath, null);
+				await tightenReadOnlyAppendMode(filePath);
 				return { path: filePath, appended: false, duplicate };
 			}
 			await appendOwnerOnlyText(filePath, `${JSON.stringify(entry)}\n`);

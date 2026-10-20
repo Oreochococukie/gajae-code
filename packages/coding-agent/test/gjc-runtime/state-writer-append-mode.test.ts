@@ -6,6 +6,14 @@ import { appendJsonl, appendJsonlIdempotent, appendText } from "@gajae-code/codi
 
 // File mode and final-component symlinks are POSIX. Windows ACLs are out of scope.
 const skipPosix = process.platform === "win32";
+// Root ignores mode 0400, so the read-only duplicate check is meaningless there.
+const skipOwnerReadOnly = skipPosix || process.getuid?.() === 0;
+
+function jsonlKey(entry: unknown): string | undefined {
+	if (!entry || typeof entry !== "object") return undefined;
+	const id = (entry as { id?: unknown }).id;
+	return typeof id === "string" ? id : undefined;
+}
 const tempRoots: string[] = [];
 
 async function tempDir(): Promise<string> {
@@ -119,6 +127,58 @@ describe("state writer append mode", () => {
 		await appendJsonl(".gjc/logs/ledger.jsonl", { n: 1 }, { cwd: root });
 		await appendJsonl(".gjc/logs/ledger.jsonl", { n: 2 }, { cwd: root });
 		expect(await fs.readFile(path.join(root, ".gjc/logs/ledger.jsonl"), "utf-8")).toBe('{"n":1}\n{"n":2}\n');
+	});
+
+	it.skipIf(skipPosix)("tightens a mode 0666 file when the idempotent append is a duplicate", async () => {
+		const root = await tempDir();
+		const absolute = await seedFile(root, ".gjc/logs/ledger.jsonl", '{"id":"a"}\n', 0o666);
+		await fs.chmod(absolute, 0o666);
+
+		const result = await appendJsonlIdempotent(
+			".gjc/logs/ledger.jsonl",
+			{ id: "a", note: "again" },
+			{
+				cwd: root,
+				key: jsonlKey,
+			},
+		);
+
+		expect(result.appended).toBe(false);
+		expect(result.duplicate).toEqual({ id: "a" });
+		expect(await fs.readFile(absolute, "utf-8")).toBe('{"id":"a"}\n');
+		expect(await modeOf(absolute)).toBe(0o600);
+	});
+
+	it.skipIf(skipOwnerReadOnly)("still allows a duplicate idempotent append to a mode 0400 file", async () => {
+		const root = await tempDir();
+		const absolute = await seedFile(root, ".gjc/logs/ledger.jsonl", '{"id":"a"}\n', 0o600);
+		await fs.chmod(absolute, 0o400);
+
+		const result = await appendJsonlIdempotent(
+			".gjc/logs/ledger.jsonl",
+			{ id: "a", note: "again" },
+			{
+				cwd: root,
+				key: jsonlKey,
+			},
+		);
+
+		expect(result.appended).toBe(false);
+		expect(result.duplicate).toEqual({ id: "a" });
+		expect(await fs.readFile(absolute, "utf-8")).toBe('{"id":"a"}\n');
+		expect(await modeOf(absolute)).toBe(0o400);
+	});
+
+	it.skipIf(skipOwnerReadOnly)("refuses a new idempotent row on a mode 0400 file", async () => {
+		const root = await tempDir();
+		const absolute = await seedFile(root, ".gjc/logs/ledger.jsonl", '{"id":"a"}\n', 0o600);
+		await fs.chmod(absolute, 0o400);
+
+		await expect(
+			appendJsonlIdempotent(".gjc/logs/ledger.jsonl", { id: "b" }, { cwd: root, key: jsonlKey }),
+		).rejects.toThrow(/EACCES/);
+		expect(await fs.readFile(absolute, "utf-8")).toBe('{"id":"a"}\n');
+		expect(await modeOf(absolute)).toBe(0o400);
 	});
 
 	it.skipIf(skipPosix)("keeps owner mode 0600 when appending text", async () => {
