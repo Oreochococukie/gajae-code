@@ -4,7 +4,7 @@ import type { AgentToolResult, ThinkingLevel } from "@gajae-code/agent-core";
 import type { CompactionOutcome } from "@gajae-code/agent-core/compaction";
 import { type Model, modelsAreEqual } from "@gajae-code/ai/core";
 import { Container, type KeyId, Markdown, Spacer, Text } from "@gajae-code/tui";
-import { isEnoent, prompt } from "@gajae-code/utils";
+import { isEnoent, pathIsWithin, prompt } from "@gajae-code/utils";
 import { resolveLocalRoot, resolveLocalUrlToPath } from "../../internal-urls";
 import { humanizePlanTitle, type PlanApprovalDetails, resolvePlanTitle } from "../../plan-mode/approved-plan";
 import planModeApprovedPrompt from "../../prompts/system/plan-mode-approved.md" with { type: "text" };
@@ -32,6 +32,28 @@ import { INTERACTIVE_ABORT_CLEANUP_TIMEOUT_MS } from "./input-controller";
 import type { ModeGate } from "./mode-gate";
 
 const ABORT_TIMEOUT_MS = INTERACTIVE_ABORT_CLEANUP_TIMEOUT_MS;
+
+/** Whether `candidate` stays inside `root` after equivalent-path normalization. */
+export function planEditorTargetWithinRoot(root: string, candidate: string): boolean {
+	return pathIsWithin(root, candidate);
+}
+
+async function canonicalPlanEditorPath(resolved: string, trustBoundary: string): Promise<string> {
+	let real = path.resolve(resolved);
+	try {
+		real = await fs.realpath(resolved);
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+	}
+	if (!planEditorTargetWithinRoot(trustBoundary, real)) {
+		throw new Error(`plan path '${resolved}' resolves outside trust boundary '${trustBoundary}'`);
+	}
+	return real;
+}
+
+function isOutsidePlanRoot(error: unknown): boolean {
+	return error instanceof Error && error.message.includes("resolves outside trust boundary");
+}
 
 type PlanModeControllerContext = {
 	readonly session: AgentSession;
@@ -364,9 +386,13 @@ export class PlanModeController {
 
 	async #readFile(planFilePath: string): Promise<string | null> {
 		try {
-			return await Bun.file(this.#resolvePath(planFilePath)).text();
+			const resolved = this.#resolvePath(planFilePath);
+			const readable = planFilePath.startsWith("local:")
+				? resolved
+				: await canonicalPlanEditorPath(resolved, path.resolve(this.ctx.sessionManager.getCwd()));
+			return await Bun.file(readable).text();
 		} catch (error) {
-			if (isEnoent(error)) return null;
+			if (isEnoent(error) || isOutsidePlanRoot(error)) return null;
 			throw error;
 		}
 	}
@@ -433,9 +459,17 @@ export class PlanModeController {
 			return null;
 		}
 		const resolved = this.#resolvePath(planFilePath);
+		const localPlan = planFilePath.startsWith("local:");
+		const trustBoundary = localPlan
+			? path.resolve(resolveLocalRoot(this.#localProtocolOptions()))
+			: path.resolve(this.ctx.sessionManager.getCwd());
 		let text: string;
+		let publishPath = resolved;
 		try {
-			text = await Bun.file(resolved).text();
+			// Read the path the boundary check accepted. A non-local plan path is
+			// the session directory, including after symlink resolution.
+			publishPath = localPlan ? resolved : await canonicalPlanEditorPath(resolved, trustBoundary);
+			text = await Bun.file(publishPath).text();
 		} catch (error) {
 			if (isEnoent(error)) this.ctx.showError(`Plan file not found at ${planFilePath}`);
 			else this.ctx.showWarning(`Failed to open external editor: ${String(error)}`);
@@ -455,13 +489,9 @@ export class PlanModeController {
 				trimTrailingNewline: false,
 			});
 			if (result !== null) {
-				// Lexical local:// checks do not see a symlink. Bind this save to the
-				// same local root so a link inside it cannot publish outside.
-				if (planFilePath.startsWith("local:")) {
-					await writeFileAtomically(resolved, result, {
-						trustBoundary: path.resolve(resolveLocalRoot(this.#localProtocolOptions())),
-					});
-				} else await Bun.write(resolved, result);
+				// Lexical checks do not see a symlink. Bind the save to the same root
+				// the read used so a link inside it cannot publish outside.
+				await writeFileAtomically(publishPath, result, { trustBoundary });
 				this.ctx.showStatus("Plan updated in external editor.");
 			}
 			return result;

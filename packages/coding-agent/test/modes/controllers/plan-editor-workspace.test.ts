@@ -1,0 +1,230 @@
+import { afterEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import fc from "fast-check";
+import { PlanModeController } from "../../../src/modes/controllers/plan-mode-controller";
+import type { AgentSession } from "../../../src/session/agent-session";
+import type { SessionManager } from "../../../src/session/session-manager";
+
+const envKeys = ["EDITOR", "VISUAL", "PLAN_EDITOR_BODY", "PLAN_EDITOR_MARKER"] as const;
+const savedEnv = new Map<string, string | undefined>(envKeys.map(key => [key, Bun.env[key]]));
+
+afterEach(() => {
+	for (const key of envKeys) {
+		const value = savedEnv.get(key);
+		if (value === undefined) delete Bun.env[key];
+		else Bun.env[key] = value;
+	}
+});
+
+function controllerFor(root: string, warnings: string[]) {
+	const seen = { preview: null as string | null, edited: null as string | null };
+	const sessionManager = {
+		getArtifactsDir: () => path.join(root, "artifacts"),
+		isManagedDestination: () => false,
+		getSessionId: () => "plan-editor-workspace",
+		getCwd: () => root,
+	} as SessionManager;
+	const controller = new PlanModeController({
+		session: { abort: async () => {} } as AgentSession,
+		sessionManager,
+		modeGate: undefined as never,
+		chatContainer: undefined as never,
+		inputCallback: undefined,
+		externalEditorKey: "ctrl+g",
+		externalEditorKeys: ["ctrl+g"],
+		startPendingSubmission: () => {
+			throw new Error("unused");
+		},
+		addChatChild: () => {},
+		requestRender: () => {},
+		stopUi: () => {},
+		startUi: () => {},
+		showStatus: () => {},
+		showWarning: message => warnings.push(message),
+		showError: message => warnings.push(message),
+		showHookConfirm: async () => false,
+		showPlanPreview: async (content, options) => {
+			seen.preview = content;
+			seen.edited = (await options?.onExternalEditor?.()) ?? null;
+			return { comments: [], notes: "", snapshotHash: "unused" };
+		},
+		flushCompactionQueue: async () => {},
+		updatePlanModeStatus: () => {},
+		handleClearCommand: async () => false,
+		handleCompactCommand: async () => "cancelled",
+		updateEditorChrome: () => {},
+	});
+	controller.setEnabledForCompatibility(true);
+	return { controller, seen };
+}
+
+async function installEditor(dir: string, body: string, marker: string): Promise<void> {
+	const script = path.join(dir, "edit-plan.sh");
+	await fs.writeFile(
+		script,
+		'#!/bin/sh\nprintf \'%s\' "$PLAN_EDITOR_BODY" > "$1"\nprintf ran > "$PLAN_EDITOR_MARKER"\n',
+	);
+	await fs.chmod(script, 0o755);
+	Bun.env.EDITOR = script;
+	Bun.env.VISUAL = script;
+	Bun.env.PLAN_EDITOR_BODY = body;
+	Bun.env.PLAN_EDITOR_MARKER = marker;
+}
+
+async function approve(root: string, planFilePath: string, body: string) {
+	const marker = path.join(root, "editor-ran");
+	const warnings: string[] = [];
+	await installEditor(root, body, marker);
+	const { controller, seen } = controllerFor(root, warnings);
+	await controller.handleApproval({
+		planFilePath,
+		finalPlanFilePath: planFilePath,
+		title: "Plan",
+		planExists: true,
+	});
+	const editorRan = await fs
+		.access(marker)
+		.then(() => true)
+		.catch(() => false);
+	return { seen, warnings, editorRan };
+}
+
+describe("plan editor workspace root", () => {
+	it("still allows a relative plan file inside the session directory", async () => {
+		const parent = await fs.mkdtemp(path.join(os.tmpdir(), "plan-editor-ws-"));
+		const root = path.join(parent, "workspace");
+		const planPath = path.join(root, "PLAN.md");
+		try {
+			await fs.mkdir(root, { recursive: true });
+			await fs.writeFile(planPath, "original plan\n");
+			const { seen, editorRan } = await approve(root, "PLAN.md", "updated plan\n");
+			expect(editorRan).toBe(true);
+			expect(seen.preview).toBe("original plan\n");
+			expect(seen.edited).toBe("updated plan\n");
+			expect(await fs.readFile(planPath, "utf8")).toBe("updated plan\n");
+		} finally {
+			await fs.rm(parent, { recursive: true, force: true });
+		}
+	});
+
+	it("still allows an absolute plan path inside the session directory", async () => {
+		const parent = await fs.mkdtemp(path.join(os.tmpdir(), "plan-editor-ws-"));
+		const root = path.join(parent, "workspace");
+		const planPath = path.join(root, "PLAN.md");
+		try {
+			await fs.mkdir(root, { recursive: true });
+			await fs.writeFile(planPath, "original plan\n");
+			const { seen, editorRan } = await approve(root, planPath, "updated plan\n");
+			expect(editorRan).toBe(true);
+			expect(seen.preview).toBe("original plan\n");
+			expect(await fs.readFile(planPath, "utf8")).toBe("updated plan\n");
+		} finally {
+			await fs.rm(parent, { recursive: true, force: true });
+		}
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"still allows a symlink whose target stays inside the session directory",
+		async () => {
+			const parent = await fs.mkdtemp(path.join(os.tmpdir(), "plan-editor-ws-"));
+			const root = path.join(parent, "workspace");
+			const target = path.join(root, "target.md");
+			const link = path.join(root, "link.md");
+			try {
+				await fs.mkdir(root, { recursive: true });
+				await fs.writeFile(target, "original plan\n");
+				await fs.symlink(target, link);
+				const { seen, editorRan } = await approve(root, "link.md", "updated plan\n");
+				expect(editorRan).toBe(true);
+				expect(seen.preview).toBe("original plan\n");
+				expect(await fs.readFile(target, "utf8")).toBe("updated plan\n");
+				expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+			} finally {
+				await fs.rm(parent, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it("does not read or write a plan path that leaves the session directory with ..", async () => {
+		const parent = await fs.mkdtemp(path.join(os.tmpdir(), "plan-editor-ws-"));
+		const root = path.join(parent, "workspace");
+		const outside = path.join(parent, "outside.md");
+		try {
+			await fs.mkdir(root, { recursive: true });
+			await fs.writeFile(outside, "secret\n");
+			const { seen, warnings, editorRan } = await approve(root, "../outside.md", "pwned\n");
+			expect(editorRan).toBe(false);
+			expect(seen.preview).toBeNull();
+			expect(seen.edited).toBeNull();
+			expect(await fs.readFile(outside, "utf8")).toBe("secret\n");
+			expect(warnings.some(message => message.includes("outside trust boundary"))).toBe(true);
+		} finally {
+			await fs.rm(parent, { recursive: true, force: true });
+		}
+	});
+
+	it("does not read or write an absolute plan path outside the session directory", async () => {
+		const parent = await fs.mkdtemp(path.join(os.tmpdir(), "plan-editor-ws-"));
+		const root = path.join(parent, "workspace");
+		const outside = path.join(parent, "outside.md");
+		try {
+			await fs.mkdir(root, { recursive: true });
+			await fs.writeFile(outside, "secret\n");
+			const { seen, editorRan } = await approve(root, outside, "pwned\n");
+			expect(editorRan).toBe(false);
+			expect(seen.preview).toBeNull();
+			expect(seen.edited).toBeNull();
+			expect(await fs.readFile(outside, "utf8")).toBe("secret\n");
+		} finally {
+			await fs.rm(parent, { recursive: true, force: true });
+		}
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"does not read or write a symlink that points outside the session directory",
+		async () => {
+			const parent = await fs.mkdtemp(path.join(os.tmpdir(), "plan-editor-ws-"));
+			const root = path.join(parent, "workspace");
+			const outside = path.join(parent, "outside.md");
+			const link = path.join(root, "link.md");
+			try {
+				await fs.mkdir(root, { recursive: true });
+				await fs.writeFile(outside, "secret\n");
+				await fs.symlink(outside, link);
+				const { seen, warnings, editorRan } = await approve(root, "link.md", "pwned\n");
+				expect(editorRan).toBe(false);
+				expect(seen.preview).toBeNull();
+				expect(seen.edited).toBeNull();
+				expect(await fs.readFile(outside, "utf8")).toBe("secret\n");
+				expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+				expect(warnings.some(message => message.includes("outside trust boundary"))).toBe(true);
+			} finally {
+				await fs.rm(parent, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it("property: in-root plan names stay inside and parent escapes do not, seed 41420, 64 inputs", async () => {
+		const { planEditorTargetWithinRoot } = await import("../../../src/modes/controllers/plan-mode-controller");
+		fc.assert(
+			fc.property(
+				fc.array(fc.stringMatching(/^[a-z][a-z0-9]{0,6}$/), { minLength: 1, maxLength: 4 }),
+				fc.array(fc.stringMatching(/^[a-z][a-z0-9]{0,6}$/), { minLength: 0, maxLength: 3 }),
+				fc.integer({ min: 1, max: 4 }),
+				(rootSegs, inner, ups) => {
+					const root = path.join("/workspace", ...rootSegs);
+					const inside = path.join(root, ...inner, "PLAN.md");
+					const escaped = path.resolve(root, ...Array.from({ length: ups }, () => ".."), "OUT.md");
+					expect(planEditorTargetWithinRoot(root, inside)).toBe(true);
+					expect(planEditorTargetWithinRoot(root, path.resolve(inside))).toBe(true);
+					expect(planEditorTargetWithinRoot(root, path.join(inside, "..", "PLAN.md"))).toBe(true);
+					expect(planEditorTargetWithinRoot(root, escaped)).toBe(false);
+					expect(planEditorTargetWithinRoot(root, inside)).toBe(planEditorTargetWithinRoot(root, inside));
+				},
+			),
+			{ seed: 41420, numRuns: 64 },
+		);
+	});
+});
