@@ -10,6 +10,7 @@ import type { ModelRegistry } from "../config/model-registry";
 import { resolveRoleSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
+import { collectEnvSecrets, createSecretObfuscator, loadSecrets } from "../secrets";
 import { syncCmuxWorkspaceTitle } from "./cmux-workspace";
 import { syncHerdrPaneTitle } from "./herdr-pane";
 
@@ -132,7 +133,6 @@ export function prepareTitleOutboundText(firstMessage: string, obfuscateText?: (
 export async function titleInputObfuscator(settings: Settings): Promise<((text: string) => string) | undefined> {
 	const reader = settings as Partial<Pick<Settings, "get" | "getCwd" | "getAgentDir">>;
 	if (typeof reader.get !== "function" || reader.get("secrets.enabled") !== true) return undefined;
-	const { collectEnvSecrets, createSecretObfuscator, loadSecrets } = await import("../secrets");
 	const cwd = typeof reader.getCwd === "function" ? reader.getCwd() : process.cwd();
 	const agentDir = typeof reader.getAgentDir === "function" ? reader.getAgentDir() : cwd;
 	const entries = [...collectEnvSecrets(), ...(await loadSecrets(cwd, agentDir))];
