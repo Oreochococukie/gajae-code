@@ -711,8 +711,9 @@ const { ENOENT, EEXIST, ELOOP, ENOTDIR } = os.constants.errno;
 const CLOEXEC = (fsSync.constants as { O_CLOEXEC?: number }).O_CLOEXEC ?? 0;
 const NOFOLLOW = fsSync.constants.O_NOFOLLOW ?? 0;
 const DIR_FLAGS = fsSync.constants.O_RDONLY | (fsSync.constants.O_DIRECTORY ?? 0) | NOFOLLOW | CLOEXEC;
-const READ_FLAGS = fsSync.constants.O_RDONLY | NOFOLLOW | CLOEXEC;
+const READ_FLAGS = fsSync.constants.O_RDONLY | (fsSync.constants.O_NONBLOCK ?? 0) | NOFOLLOW | CLOEXEC;
 const WRITE_FLAGS = fsSync.constants.O_WRONLY | fsSync.constants.O_CREAT | fsSync.constants.O_EXCL | NOFOLLOW | CLOEXEC;
+const MAX_PINNED_IMPORT_PARENTS = 128;
 
 interface PinnedDestination {
 	fds: number[];
@@ -781,7 +782,7 @@ export function importDestinationShapeAllowed(root: string, target: string): boo
 	return [...segments, path.basename(target)].every(isSafeName);
 }
 
-/** Walk from `root` with openat/mkdirat so a later symlink swap cannot redirect the write. */
+/** Walk from `root` with openat/mkdirat and retain only the final parent descriptor. */
 function pinImportParent(root: string, target: string): PinnedDestination {
 	if (!importDestinationShapeAllowed(root, target)) throw new Error(`refusing unsafe import destination: ${target}`);
 	const relative = path.relative(root, path.dirname(target));
@@ -814,8 +815,19 @@ function pinImportParent(root: string, target: string): PinnedDestination {
 				if (err === ELOOP || err === ENOTDIR) throw symlinkRefusal(cursor);
 				throw new Error(`cannot open import directory ${cursor}: errno ${err}`);
 			}
+			let isDirectory: boolean;
+			try {
+				isDirectory = fsSync.fstatSync(fd).isDirectory();
+			} catch (error) {
+				fsSync.closeSync(fd);
+				throw error;
+			}
+			if (!isDirectory) {
+				fsSync.closeSync(fd);
+				throw symlinkRefusal(cursor);
+			}
+			closeRawFds(fds);
 			fds.push(fd);
-			if (!fsSync.fstatSync(fd).isDirectory()) throw symlinkRefusal(cursor);
 			parentFd = fd;
 		}
 		const named = fsSync.lstatSync(path.dirname(target));
@@ -1062,6 +1074,7 @@ export async function applyImport(plan: ImportPlan, options: { cwd: string }): P
 	// --- Phase 2: publication ------------------------------------------------
 	const snapshots: FileSnapshot[] = [];
 	const pins: PinnedDestination[] = [];
+	const pinsByParent = new Map<string, PinnedDestination>();
 	for (const dir of [destination.skillsDir, destination.hooksDir]) {
 		await sweepStagingTemps(dir).catch(() => {});
 	}
@@ -1070,11 +1083,27 @@ export async function applyImport(plan: ImportPlan, options: { cwd: string }): P
 		if (fileWrites.length > 0 && pinnedPublicationAvailable()) {
 			// Scope root only. Children are created with mkdirat on the pinned fd.
 			await fs.mkdir(destination.root, { recursive: true, mode: 0o700 });
+			for (const write of fileWrites) {
+				const parentPath = path.dirname(write.path);
+				if (pinsByParent.has(parentPath)) continue;
+				if (pinsByParent.size >= MAX_PINNED_IMPORT_PARENTS) {
+					throw new Error(
+						`import batch exceeds the limit of ${MAX_PINNED_IMPORT_PARENTS} distinct destination directories`,
+					);
+				}
+				const pin = pinImportParent(destination.root, write.path);
+				pins.push(pin);
+				pinsByParent.set(parentPath, pin);
+			}
+			// Fail before publishing anything if pinned directories leave no
+			// descriptor available for staging or rollback.
+			const descriptorProbe = fsSync.openSync(os.devNull, fsSync.constants.O_RDONLY | CLOEXEC);
+			fsSync.closeSync(descriptorProbe);
 		}
 		for (const [index, write] of fileWrites.entries()) {
 			if (pinnedPublicationAvailable()) {
-				const pin = pinImportParent(destination.root, write.path);
-				pins.push(pin);
+				const pin = pinsByParent.get(path.dirname(write.path));
+				if (!pin) throw new Error(`cannot pin import destination directory: ${path.dirname(write.path)}`);
 				const previous = readRegularAt(pin.parentFd, pin.name, write.path);
 				writeRegularAt(pin.parentFd, pin.name, write.content, index, write.path);
 				snapshots.push({ path: write.path, previous, parentFd: pin.parentFd, name: pin.name });
@@ -1122,6 +1151,7 @@ export async function applyImport(plan: ImportPlan, options: { cwd: string }): P
 			if (pinned?.parentFd !== undefined && pinned.name) {
 				assertPinnedParentStillAt(pinned.parentFd, path.dirname(write.path), write.path);
 				persisted = readRegularAt(pinned.parentFd, pinned.name, write.path);
+				assertPinnedParentStillAt(pinned.parentFd, path.dirname(write.path), write.path);
 			} else {
 				persisted = await readStructured(write.path).then(result =>
 					result.kind === "value" ? result.content : null,

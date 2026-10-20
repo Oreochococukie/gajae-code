@@ -4,6 +4,7 @@
  * before the write. The still-allowed case is a real directory (including one
  * the import creates).
  */
+import { dlopen, FFIType } from "bun:ffi";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
@@ -47,6 +48,17 @@ async function layout(): Promise<{ projectDir: string; homeDir: string }> {
 }
 
 const SAFE_SEGMENT = /^[A-Za-z0-9._-]{1,12}$/;
+
+function createFifo(filePath: string): void {
+	const library = dlopen(process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6", {
+		mkfifo: { args: [FFIType.cstring, FFIType.u32], returns: FFIType.i32 },
+	});
+	const result = (library.symbols as unknown as { mkfifo: (pathname: string, mode: number) => number }).mkfifo(
+		filePath,
+		0o600,
+	);
+	if (result !== 0) throw new Error(`mkfifo failed for ${filePath}`);
+}
 
 test("property: import destination shape stays under the root", async () => {
 	const { importDestinationShapeAllowed } = await import("@gajae-code/coding-agent/customization/import");
@@ -192,6 +204,123 @@ test.skipIf(process.platform === "win32")(
 			await expect(fs.lstat(path.join(parent, "SKILL.md"))).rejects.toThrow();
 		} finally {
 			writeFile.mockRestore();
+		}
+	},
+);
+
+test.skipIf(process.platform === "win32")(
+	"rechecks the lexical destination after reading through the pinned parent",
+	async () => {
+		const { projectDir, homeDir } = await layout();
+		const parent = path.join(projectDir, ".gjc", "skills", "claude-skill");
+		const moved = `${parent}-moved`;
+		const plan = await buildImportPreview({
+			product: "claude-code",
+			sourceScope: "project",
+			destinationScope: "project",
+			surfaces: ["skills"],
+			collisionPolicy: "skip",
+			cwd: projectDir,
+			homeDir,
+		});
+		let movedParent = false;
+		const originalRead = fsSync.readFileSync;
+		const readFile = spyOn(fsSync, "readFileSync").mockImplementation(((...args: unknown[]) => {
+			const content = originalRead.apply(fsSync, args as Parameters<typeof fsSync.readFileSync>);
+			if (!movedParent && typeof args[0] === "number") {
+				movedParent = true;
+				fsSync.renameSync(parent, moved);
+				fsSync.mkdirSync(parent);
+			}
+			return content;
+		}) as typeof fsSync.readFileSync);
+		try {
+			const result = await applyImport(plan, { cwd: projectDir });
+			expect(movedParent).toBe(true);
+			expect(result.ok).toBe(false);
+			expect(result.entries.some(entry => entry.outcome === "imported")).toBe(false);
+			expect(result.entries.some(entry => entry.reason?.includes("verification"))).toBe(true);
+			await expect(fs.lstat(path.join(moved, "SKILL.md"))).rejects.toThrow();
+			await expect(fs.lstat(path.join(parent, "SKILL.md"))).rejects.toThrow();
+		} finally {
+			readFile.mockRestore();
+		}
+	},
+);
+
+test.skipIf(process.platform === "win32")(
+	"rejects a FIFO swapped into the destination without blocking verification",
+	async () => {
+		const { projectDir, homeDir } = await layout();
+		const target = path.join(projectDir, ".gjc", "skills", "claude-skill", "SKILL.md");
+		const plan = await buildImportPreview({
+			product: "claude-code",
+			sourceScope: "project",
+			destinationScope: "project",
+			surfaces: ["skills"],
+			collisionPolicy: "skip",
+			cwd: projectDir,
+			homeDir,
+		});
+		let replaced = false;
+		const originalLstat = fsSync.lstatSync;
+		const lstat = spyOn(fsSync, "lstatSync").mockImplementation(((...args: unknown[]) => {
+			const stat = originalLstat.apply(fsSync, args as Parameters<typeof fsSync.lstatSync>);
+			if (!replaced && args[0] === target && stat?.isFile()) {
+				replaced = true;
+				fsSync.unlinkSync(target);
+				createFifo(target);
+			}
+			return stat;
+		}) as typeof fsSync.lstatSync);
+		try {
+			const result = await applyImport(plan, { cwd: projectDir });
+			expect(replaced).toBe(true);
+			expect(result.ok).toBe(false);
+			expect(result.entries.some(entry => entry.reason?.includes("not a regular file"))).toBe(true);
+			await expect(fs.lstat(target)).rejects.toThrow();
+		} finally {
+			lstat.mockRestore();
+		}
+	},
+);
+
+test.skipIf(process.platform === "win32")(
+	"rejects oversized overwrite batches before changing any destination files",
+	async () => {
+		const { projectDir, homeDir } = await layout();
+		const skillCount = 128;
+		const defaultDestination = path.join(projectDir, ".gjc", "skills", "claude-skill", "SKILL.md");
+		await fs.mkdir(path.dirname(defaultDestination), { recursive: true });
+		await fs.writeFile(defaultDestination, "previous claude-skill\n");
+		for (let index = 0; index < skillCount; index++) {
+			const name = `skill-${index}`;
+			const source = path.join(projectDir, ".claude", "skills", name, "SKILL.md");
+			const destination = path.join(projectDir, ".gjc", "skills", name, "SKILL.md");
+			await fs.mkdir(path.dirname(source), { recursive: true });
+			await fs.writeFile(source, SKILL_MD);
+			await fs.mkdir(path.dirname(destination), { recursive: true });
+			await fs.writeFile(destination, `previous ${name}\n`);
+		}
+		const plan = await buildImportPreview({
+			product: "claude-code",
+			sourceScope: "project",
+			destinationScope: "project",
+			surfaces: ["skills"],
+			collisionPolicy: "overwrite",
+			cwd: projectDir,
+			homeDir,
+		});
+		const result = await applyImport(plan, { cwd: projectDir });
+		expect(result.ok).toBe(false);
+		expect(result.entries).toHaveLength(skillCount + 1);
+		expect(result.entries.every(entry => entry.outcome === "failed")).toBe(true);
+		expect(result.entries.every(entry => entry.reason?.includes("distinct destination directories"))).toBe(true);
+		expect(await fs.readFile(defaultDestination, "utf-8")).toBe("previous claude-skill\n");
+		for (let index = 0; index < skillCount; index++) {
+			const name = `skill-${index}`;
+			const destination = path.join(projectDir, ".gjc", "skills", name, "SKILL.md");
+			expect(await fs.readFile(destination, "utf-8")).toBe(`previous ${name}\n`);
 		}
 	},
 );
