@@ -130,10 +130,13 @@ export function prepareTitleOutboundText(firstMessage: string, obfuscateText?: (
 	return `<user-message>\n${truncated}\n</user-message>`;
 }
 
-export async function titleInputObfuscator(settings: Settings): Promise<((text: string) => string) | undefined> {
+export async function titleInputObfuscator(
+	settings: Settings,
+	activeCwd?: string,
+): Promise<((text: string) => string) | undefined> {
 	const reader = settings as Partial<Pick<Settings, "get" | "getCwd" | "getAgentDir">>;
 	if (typeof reader.get !== "function" || reader.get("secrets.enabled") !== true) return undefined;
-	const cwd = typeof reader.getCwd === "function" ? reader.getCwd() : process.cwd();
+	const cwd = activeCwd ?? (typeof reader.getCwd === "function" ? reader.getCwd() : process.cwd());
 	const agentDir = typeof reader.getAgentDir === "function" ? reader.getAgentDir() : cwd;
 	const entries = [...collectEnvSecrets(), ...(await loadSecrets(cwd, agentDir))];
 	if (entries.length === 0) return undefined;
@@ -156,6 +159,7 @@ export async function titleInputObfuscator(settings: Settings): Promise<((text: 
  *   to produce request metadata (e.g. user_id for session attribution). Using a
  *   resolver instead of a pre-evaluated value ensures the metadata's account_uuid
  *   reflects the credential actually selected for this request.
+ * @param activeCwd Active session cwd for project-scoped secret lookup.
  */
 export async function generateSessionTitle(
 	firstMessage: string,
@@ -164,6 +168,7 @@ export async function generateSessionTitle(
 	sessionId?: string,
 	currentModel?: Model<Api>,
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined,
+	activeCwd?: string,
 ): Promise<string | null> {
 	const model = getTitleModel(registry, settings, currentModel, sessionId);
 	if (!model) {
@@ -183,7 +188,7 @@ export async function generateSessionTitle(
 	// request is already recorded; metadataResolver can then return the correct
 	// account_uuid rather than the snapshot-at-call-site value.
 	const metadata = metadataResolver?.(model.provider);
-	const userMessage = prepareTitleOutboundText(firstMessage, await titleInputObfuscator(settings));
+	const userMessage = prepareTitleOutboundText(firstMessage, await titleInputObfuscator(settings, activeCwd));
 
 	// Title generation is a 3-6 word task, but some reasoning backends ignore
 	// disableReasoning. Keep the normal cheap budget for non-reasoning models

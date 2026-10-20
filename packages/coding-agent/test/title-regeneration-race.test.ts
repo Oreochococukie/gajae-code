@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@gajae-code/agent-core";
@@ -31,6 +32,7 @@ const STRADDLE_TEXT = `${"x".repeat(393)}${STRADDLE_SECRET}`;
 const STRADDLE_PREFIX = "abcdefg";
 const SPACED_SECRET = "abcdefgh ";
 const SPACED_TEXT = `${"x".repeat(393)}${SPACED_SECRET}`;
+const tempDirs: string[] = [];
 
 function user(content: string): AgentMessage {
 	return { role: "user", content, timestamp: 0 } as AgentMessage;
@@ -80,11 +82,19 @@ function titleResponse(title: string): unknown {
 
 function createManager(): SessionManager & {
 	_sessionName: string | undefined;
+	_cwd: string;
+	moveTo: (cwd: string) => Promise<void>;
 	setSessionName: (name: string, source: string) => Promise<boolean>;
 } {
 	const manager = {
 		_sessionName: "Original",
-		getCwd: () => "/tmp/project",
+		_cwd: "/tmp/project",
+		getCwd() {
+			return this._cwd;
+		},
+		async moveTo(cwd: string) {
+			this._cwd = cwd;
+		},
 		getSessionName() {
 			return this._sessionName;
 		},
@@ -95,6 +105,8 @@ function createManager(): SessionManager & {
 	};
 	return manager as unknown as SessionManager & {
 		_sessionName: string | undefined;
+		_cwd: string;
+		moveTo: (cwd: string) => Promise<void>;
 		setSessionName: (name: string, source: string) => Promise<boolean>;
 	};
 }
@@ -112,9 +124,12 @@ function createTuiContext(session: AgentSession, sessionManager: SessionManager,
 	return ctx;
 }
 
-afterEach(() => {
+afterEach(async () => {
 	vi.restoreAllMocks();
 	delete process.env.TITLE_TOKEN;
+	for (const dir of tempDirs.splice(0, tempDirs.length)) {
+		await fs.rm(dir, { recursive: true, force: true });
+	}
 });
 
 function outboundTitle(call: { mock: { calls: unknown[][] } }): string {
@@ -131,6 +146,7 @@ async function renameOutbound(
 	secretsEnabled: boolean,
 	text: string,
 	token = STRADDLE_SECRET,
+	movedCwd?: string,
 ): Promise<string> {
 	const saved: Record<string, string | undefined> = {};
 	for (const key of Object.keys(process.env)) {
@@ -145,6 +161,7 @@ async function renameOutbound(
 			.mockResolvedValue(titleResponse("Generated Title") as never);
 		const session = createTitleSession([user(text)], secretsEnabled);
 		const manager = createManager();
+		if (movedCwd) await manager.moveTo(movedCwd);
 		if (entry === "tui") {
 			const controller = new CommandController(createTuiContext(session, manager, vi.fn()));
 			await controller.handleRenameCommand();
@@ -263,6 +280,29 @@ describe("rename digest secret boundary", () => {
 			expect(sent.endsWith("\n</user-message>")).toBe(true);
 			expect(sent).not.toContain(STRADDLE_SECRET);
 			expect(sent).not.toContain(STRADDLE_PREFIX);
+		});
+
+		it(`uses destination project secrets after moving cwd for ${entry} /rename`, async () => {
+			const root = await fs.mkdtemp(join(tmpdir(), "title-regen-moved-cwd-"));
+			tempDirs.push(root);
+			const destinationCwd = join(root, "project-b");
+			const destinationSecretsDir = join(destinationCwd, ".gjc");
+			const projectSecret = "destination-project-title-secret-7003";
+			await fs.mkdir(destinationSecretsDir, { recursive: true });
+			await Bun.write(
+				join(destinationSecretsDir, "secrets.yml"),
+				`- type: plain\n  content: ${JSON.stringify(projectSecret)}\n`,
+			);
+
+			const sent = await renameOutbound(
+				entry,
+				true,
+				`${"x".repeat(393)}${projectSecret}`,
+				STRADDLE_SECRET,
+				destinationCwd,
+			);
+			expect(sent).not.toContain(projectSecret);
+			expect(sent).not.toContain(projectSecret.slice(0, 7));
 		});
 	}
 

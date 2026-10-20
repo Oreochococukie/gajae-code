@@ -158,7 +158,8 @@ function toSlashCommandRuntime(runtime: TuiSlashCommandRuntime): SlashCommandRun
 async function regenerateSessionTitle(runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
 	try {
 		const generation = beginSessionTitleGeneration(runtime.sessionManager);
-		const obfuscateText = await titleInputObfuscator(runtime.settings);
+		const activeCwd = runtime.sessionManager.getCwd();
+		const obfuscateText = await titleInputObfuscator(runtime.settings, activeCwd);
 		const input = buildConversationTitleInput(runtime.session.messages, obfuscateText);
 		if (!input) {
 			return usage("Nothing to summarize yet — pass a title: /rename <title>", runtime);
@@ -171,6 +172,7 @@ async function regenerateSessionTitle(runtime: SlashCommandRuntime): Promise<Sla
 			runtime.session.credentialSessionId,
 			runtime.session.model,
 			provider => runtime.session.agent.metadataForProvider(provider),
+			activeCwd,
 		);
 		if (
 			!isSessionTitleGenerationCurrent(runtime.sessionManager, generation) ||

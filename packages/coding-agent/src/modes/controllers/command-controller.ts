@@ -1226,7 +1226,8 @@ export class CommandController {
 		try {
 			if (!title?.trim()) {
 				const generation = beginSessionTitleGeneration(this.ctx.sessionManager);
-				const obfuscateText = await titleInputObfuscator(this.ctx.settings);
+				const activeCwd = this.ctx.sessionManager.getCwd();
+				const obfuscateText = await titleInputObfuscator(this.ctx.settings, activeCwd);
 				const input = buildConversationTitleInput(this.ctx.session.messages, obfuscateText);
 				if (!input) {
 					this.ctx.showError("Nothing to summarize yet — pass a title: /rename <title>");
@@ -1240,6 +1241,7 @@ export class CommandController {
 					this.ctx.session.credentialSessionId,
 					this.ctx.session.model,
 					provider => this.ctx.session.agent.metadataForProvider(provider),
+					activeCwd,
 				);
 				if (
 					!isSessionTitleGenerationCurrent(this.ctx.sessionManager, generation) ||
