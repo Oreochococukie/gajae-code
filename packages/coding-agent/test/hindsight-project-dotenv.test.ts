@@ -178,7 +178,7 @@ describe("project dotenv layers", () => {
 		expect(result.fetchedUrl?.startsWith(`${OPERATOR_URL}/`)).toBe(true);
 	});
 
-	it("keeps the user agent .env URL when the project .env disagrees", async () => {
+	it("uses the user agent .env URL when the project declaration is removed", async () => {
 		const agentUrl = "http://127.0.0.1:18082";
 		const result = await retainFromProject({
 			autoload: true,
@@ -190,5 +190,30 @@ describe("project dotenv layers", () => {
 		expect(result.childEnv).toBe(agentUrl);
 		expect(result.configUrl).toBe(agentUrl);
 		expect(result.fetchedUrl?.startsWith(`${agentUrl}/`)).toBe(true);
+	});
+
+	it("uses the settings URL when the project value is empty", async () => {
+		const result = await retainFromProject({
+			autoload: true,
+			files: { ".env": `${KEY}=\n` },
+		});
+		expect(result.configUrl).toBe(OPERATOR_URL);
+		expect(result.fetchedUrl?.startsWith(`${OPERATOR_URL}/`)).toBe(true);
+	});
+
+	it("keeps an IPv6 loopback URL inherited from the launching shell", async () => {
+		const url = "http://[::1]:8888";
+		const result = await retainFromProject({ autoload: true, inherited: url });
+		expect(result.env).toBe(url);
+		expect(result.childEnv).toBe(url);
+		expect(result.fetchedUrl?.startsWith(`${url}/`)).toBe(true);
+	});
+
+	it("keeps a shell URL that omits the port", async () => {
+		const url = "http://hindsight.example";
+		const result = await retainFromProject({ autoload: true, inherited: url });
+		expect(result.env).toBe(url);
+		expect(result.childEnv).toBe(url);
+		expect(result.fetchedUrl?.startsWith(`${url}/`)).toBe(true);
 	});
 });
