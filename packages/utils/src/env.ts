@@ -301,6 +301,36 @@ function resolveLiveCredentialEnvValue(name: string): string | undefined {
 }
 
 /**
+ * `Bun.spawn` / `Bun.spawnSync` without `env` copy the startup dotenv map, which
+ * `delete Bun.env` does not update. Pass that map with `HINDSIGHT_API_URL` removed
+ * so an omitted `env` cannot observe the rejected project URL. An explicit `env`
+ * is left unchanged. Other names in the map stay as Bun captured them.
+ */
+function installHindsightDefaultSpawnEnv(baseline: Record<string, string>): void {
+	const env: Record<string, string> = {};
+	for (const key in baseline) {
+		if (canonicalEnvKey(key) === "HINDSIGHT_API_URL") continue;
+		env[key] = baseline[key];
+	}
+	const spawn = Bun.spawn;
+	const spawnSync = Bun.spawnSync;
+	const withEnv = (options: { env?: unknown } | undefined): { env?: unknown } =>
+		options !== undefined && options.env !== undefined ? options : { ...options, env };
+	const rewrite = (args: unknown[]): unknown[] => {
+		const first = args[0];
+		if (Array.isArray(first)) {
+			args[1] = withEnv(args[1] as { env?: unknown } | undefined);
+			return args;
+		}
+		if (first !== null && typeof first === "object") args[0] = withEnv(first as { env?: unknown });
+		return args;
+	};
+	Bun.spawn = ((...args: unknown[]) => spawn(...(rewrite(args) as Parameters<typeof spawn>))) as typeof Bun.spawn;
+	Bun.spawnSync = ((...args: unknown[]) =>
+		spawnSync(...(rewrite(args) as Parameters<typeof spawnSync>))) as typeof Bun.spawnSync;
+}
+
+/**
  * Names a repository `.env` must not install into the process environment.
  * `NODE_TLS_REJECT_UNAUTHORIZED=0` disables certificate verification for every
  * fetch in the process, so a project `.env` pairing it with a proxy would expose
@@ -327,9 +357,28 @@ const PROJECT_DENIED_ENV_NAMES = [
 // (same provenance rule as the credential snapshot) and never copy it below.
 // Removing `NODE_TLS_REJECT_UNAUTHORIZED` restores verification: Bun reads that
 // switch per TLS connection. The same drop covers the harness directory names
-// and `HINDSIGHT_API_URL`, so a later spawn that inherits this environment
-// cannot see the rejected project value.
+// and `HINDSIGHT_API_URL`. A later spawn that is given this environment cannot
+// see the rejected project value. `Bun.spawn` and `Bun.spawnSync` with no `env`
+// option still use Bun's startup dotenv map, so a dropped `HINDSIGHT_API_URL`
+// is also removed from the copy passed for those default spawns.
 // A quoted escape is dynamic even when the line parser did not store a value.
+const hindsightDeniedName = "HINDSIGHT_API_URL";
+const hindsightDeniedKey = canonicalEnvKey(hindsightDeniedName);
+const hindsightDeclared = projectEnv[hindsightDeniedKey];
+const hindsightDynamic = projectSnapshot.dynamic.has(hindsightDeniedKey);
+const hindsightRuntime = Bun.env[hindsightDeniedName];
+const scrubHindsightDefaultSpawn =
+	(hindsightDeclared !== undefined || hindsightDynamic) &&
+	hindsightRuntime !== undefined &&
+	(hindsightDynamic || hindsightRuntime === hindsightDeclared || hindsightRuntime.trim() === hindsightDeclared);
+let hindsightSpawnBaseline: Record<string, string> | undefined;
+if (scrubHindsightDefaultSpawn) {
+	hindsightSpawnBaseline = {};
+	for (const envKey in Bun.env) {
+		const value = Bun.env[envKey];
+		if (value !== undefined) hindsightSpawnBaseline[envKey] = value;
+	}
+}
 for (const name of PROJECT_DENIED_ENV_NAMES) {
 	const key = canonicalEnvKey(name);
 	const declared = projectEnv[key];
@@ -342,6 +391,7 @@ for (const name of PROJECT_DENIED_ENV_NAMES) {
 		delete Bun.env[name];
 	}
 }
+if (hindsightSpawnBaseline !== undefined) installHindsightDefaultSpawnEnv(hindsightSpawnBaseline);
 const projectDeniedKeys = new Set<string>(PROJECT_DENIED_ENV_NAMES.map(canonicalEnvKey));
 
 for (const file of [projectSnapshot.loadedValues, agentEnv, piEnv, homeEnv, homeShellEnv]) {

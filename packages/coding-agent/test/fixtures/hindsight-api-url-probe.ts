@@ -22,21 +22,47 @@ if (config.hindsightApiUrl) {
 const grandProbe = process.env.GRANDCHILD_PROBE;
 const grandCwd = process.env.GRANDCHILD_CWD;
 if (!grandProbe || !grandCwd) throw new Error("missing grandchild spawn inputs");
-const grand = Bun.spawn([process.execPath, "--no-env-file", grandProbe], {
+
+async function readChild(proc: {
+	stdout: ReadableStream<Uint8Array>;
+	stderr: ReadableStream<Uint8Array>;
+	exited: Promise<number>;
+}): Promise<string | null> {
+	const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+	const code = await proc.exited;
+	if (code !== 0) throw new Error(`grandchild failed (${code}): ${err}`);
+	const trimmed = out.trim();
+	return trimmed === "" ? null : trimmed;
+}
+
+const explicit = Bun.spawn([process.execPath, "--no-env-file", grandProbe], {
 	cwd: grandCwd,
 	env: process.env,
 	stdout: "pipe",
 	stderr: "pipe",
 });
-const [grandOut, grandErr] = await Promise.all([new Response(grand.stdout).text(), new Response(grand.stderr).text()]);
-const grandCode = await grand.exited;
-if (grandCode !== 0) throw new Error(`grandchild failed (${grandCode}): ${grandErr}`);
+const omitted = Bun.spawn([process.execPath, "--no-env-file", grandProbe], {
+	cwd: grandCwd,
+	stdout: "pipe",
+	stderr: "pipe",
+});
+const omittedSync = Bun.spawnSync([process.execPath, "--no-env-file", grandProbe], {
+	cwd: grandCwd,
+	stdout: "pipe",
+	stderr: "pipe",
+});
+if (omittedSync.exitCode !== 0) {
+	throw new Error(`grandchild sync failed (${omittedSync.exitCode}): ${omittedSync.stderr.toString()}`);
+}
+const syncText = omittedSync.stdout.toString().trim();
 
 console.log(
 	JSON.stringify({
 		env: process.env.HINDSIGHT_API_URL ?? null,
 		configUrl: config.hindsightApiUrl,
 		fetchedUrl,
-		childEnv: grandOut.trim() === "" ? null : grandOut.trim(),
+		childEnv: await readChild(explicit),
+		omittedEnv: await readChild(omitted),
+		omittedSyncEnv: syncText === "" ? null : syncText,
 	}),
 );

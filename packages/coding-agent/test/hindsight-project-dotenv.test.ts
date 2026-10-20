@@ -8,8 +8,8 @@ import * as path from "node:path";
  * cwd dotenv into the process environment before the client reads
  * `HINDSIGHT_API_URL`, and that URL is fetched with the operator token.
  * The env module drops the project value, including from the env handed to
- * a child. A launching-shell value and `hindsight.apiUrl` stay in use,
- * including a loopback host.
+ * a child and from Bun.spawn / Bun.spawnSync that omit env. A launching-shell
+ * value and `hindsight.apiUrl` stay in use, including a loopback host.
  */
 
 const PROBE = path.join(import.meta.dir, "fixtures", "hindsight-api-url-probe.ts");
@@ -37,6 +37,14 @@ interface ProbeResult {
 	configUrl: string | null;
 	fetchedUrl: string | null;
 	childEnv: string | null;
+	omittedEnv: string | null;
+	omittedSyncEnv: string | null;
+}
+
+function expectChildUrl(result: ProbeResult, url: string | null): void {
+	expect(result.childEnv).toBe(url);
+	expect(result.omittedEnv).toBe(url);
+	expect(result.omittedSyncEnv).toBe(url);
 }
 
 async function retainFromProject(options: {
@@ -80,7 +88,7 @@ async function retainFromProject(options: {
 
 function expectOperator(result: ProbeResult, url = OPERATOR_URL): void {
 	expect(result.env).toBeNull();
-	expect(result.childEnv).toBeNull();
+	expectChildUrl(result, null);
 	expect(result.configUrl).toBe(url);
 	expect(result.fetchedUrl?.startsWith(`${url}/`)).toBe(true);
 	expect(result.fetchedUrl).not.toContain("169.254.169.254");
@@ -144,7 +152,7 @@ describe.each([
 			files: { ".env": `${KEY}=${METADATA_URL}\n` },
 		});
 		expect(result.env).toBe(SHELL_URL);
-		expect(result.childEnv).toBe(SHELL_URL);
+		expectChildUrl(result, SHELL_URL);
 		expect(result.configUrl).toBe(SHELL_URL);
 		expect(result.fetchedUrl?.startsWith(`${SHELL_URL}/`)).toBe(true);
 	});
@@ -176,14 +184,14 @@ describe("project dotenv layers", () => {
 	it("keeps a shell loopback URL when the project declares nothing", async () => {
 		const result = await retainFromProject({ autoload: true, inherited: SHELL_URL, files: {} });
 		expect(result.env).toBe(SHELL_URL);
-		expect(result.childEnv).toBe(SHELL_URL);
+		expectChildUrl(result, SHELL_URL);
 		expect(result.fetchedUrl?.startsWith(`${SHELL_URL}/`)).toBe(true);
 	});
 
 	it("uses hindsight.apiUrl when the environment does not set one", async () => {
 		const result = await retainFromProject({ autoload: true });
 		expect(result.env).toBeNull();
-		expect(result.childEnv).toBeNull();
+		expectChildUrl(result, null);
 		expect(result.fetchedUrl?.startsWith(`${OPERATOR_URL}/`)).toBe(true);
 	});
 
@@ -196,7 +204,12 @@ describe("project dotenv layers", () => {
 			files: { ".env": `${KEY}=${METADATA_URL}\n` },
 		});
 		expect(result.env).toBe(agentUrl);
+		// The agent file is applied in JS after startup. An omitted env keeps the
+		// startup map, so the child must not see the project URL. The explicit
+		// env above is what carries the agent URL.
 		expect(result.childEnv).toBe(agentUrl);
+		expect(result.omittedEnv).toBeNull();
+		expect(result.omittedSyncEnv).toBeNull();
 		expect(result.configUrl).toBe(agentUrl);
 		expect(result.fetchedUrl?.startsWith(`${agentUrl}/`)).toBe(true);
 	});
@@ -214,7 +227,7 @@ describe("project dotenv layers", () => {
 		const url = "http://[::1]:8888";
 		const result = await retainFromProject({ autoload: true, inherited: url });
 		expect(result.env).toBe(url);
-		expect(result.childEnv).toBe(url);
+		expectChildUrl(result, url);
 		expect(result.fetchedUrl?.startsWith(`${url}/`)).toBe(true);
 	});
 
@@ -222,7 +235,7 @@ describe("project dotenv layers", () => {
 		const url = "http://hindsight.example";
 		const result = await retainFromProject({ autoload: true, inherited: url });
 		expect(result.env).toBe(url);
-		expect(result.childEnv).toBe(url);
+		expectChildUrl(result, url);
 		expect(result.fetchedUrl?.startsWith(`${url}/`)).toBe(true);
 	});
 });
