@@ -98,6 +98,31 @@ describe("session title secret outbound", () => {
 		expect(straddled).not.toContain(TOKEN.slice(0, 10));
 	});
 
+	it("obfuscates a rename secret before the 400-character digest cut", async () => {
+		process.env[TOKEN_NAME] = TOKEN;
+		const selected = model();
+		const completeSimple = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "toolCall", id: "call", name: "set_title", arguments: { title: "Redacted Title" } }],
+		} as never);
+		const message = `${"a".repeat(393)}${TOKEN}`;
+		const obfuscateText = await titleGenerator.titleInputObfuscator(settings(true));
+		if (!obfuscateText) throw new Error("expected secret obfuscator");
+		const digest = titleGenerator.buildConversationTitleInput(
+			[{ role: "user", content: message, timestamp: 0 } as AgentMessage],
+			obfuscateText,
+		);
+		if (!digest) throw new Error("expected rename digest");
+		expect(digest).not.toContain(TOKEN);
+		expect(digest).not.toContain(TOKEN.slice(0, 7));
+
+		const title = await generateSessionTitle(digest, registry(selected), settings(true), undefined, selected);
+		const sent = outbound(completeSimple);
+		expect(title).toBe("Redacted Title");
+		expect(sent).not.toContain(TOKEN);
+		expect(sent).not.toContain(TOKEN.slice(0, 7));
+	});
+
 	it("frames tail-only and head-plus-tail slices after truncation", () => {
 		const prepare = titleGenerator.prepareTitleOutboundText;
 		expect(typeof prepare).toBe("function");
