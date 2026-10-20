@@ -420,11 +420,30 @@ const KITTY_CHUNK_FLAG_CHARS = ",m=1".length;
 /**
  * RFC 4648 base64, the same guard `encodeITerm2Multipart` already applies.
  * The alphabet excludes ESC, ST, and BEL, so a payload cannot end an APC or OSC early.
+ * A linear scan, not a repeating-group regex: that regex rejects some multi-megabyte
+ * valid payloads in this runtime.
  */
-const ITERM2_BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
+function isBase64Alphabet(code: number): boolean {
+	return (
+		(code >= 65 && code <= 90) ||
+		(code >= 97 && code <= 122) ||
+		(code >= 48 && code <= 57) ||
+		code === 43 ||
+		code === 47
+	);
+}
 
 function isRfc4648Base64(value: string): boolean {
-	return value.length % 4 === 0 && ITERM2_BASE64.test(value);
+	const length = value.length;
+	if (length % 4 !== 0) return false;
+	let body = length;
+	if (length > 0 && value.charCodeAt(length - 1) === 61) {
+		body = value.charCodeAt(length - 2) === 61 ? length - 2 : length - 1;
+	}
+	for (let index = 0; index < body; index++) {
+		if (!isBase64Alphabet(value.charCodeAt(index))) return false;
+	}
+	return true;
 }
 
 function assertIterm2Base64(value: string): void {

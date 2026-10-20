@@ -109,10 +109,59 @@ describe("image protocol base64 guard", () => {
 		expect(iterm.slice(1).includes("\x1b")).toBe(false);
 	});
 
+	it("still allows a 12 MiB padded base64 payload", () => {
+		const payload = Buffer.alloc(12 * 1024 * 1024).toString("base64");
+		expect(payload.length % 4).toBe(0);
+		const iterm = encodeITerm2(payload, { width: 1, height: "auto" });
+		expect(iterm.endsWith(`${payload}\x07`)).toBe(true);
+		expect(kittyPayload(encodeKittyTransmit(payload, 1))).toBe(payload);
+		terminal.imageProtocol = ImageProtocol.Iterm2;
+		const itermRender = renderImage(payload, DIMS, { maxWidthCells: 2, maxHeightCells: 2 });
+		expect(itermRender?.sequence.endsWith(`${payload}\x07`)).toBe(true);
+		terminal.imageProtocol = ImageProtocol.Kitty;
+		resetKittyTransmissions();
+		written.length = 0;
+		const kittyRender = renderImage(payload, DIMS, { maxWidthCells: 2, maxHeightCells: 2 });
+		expect(kittyRender).not.toBeNull();
+		expect(written.join("")).toContain(payload.slice(0, 16));
+		expect(written.join("")).not.toContain("\x1b]52");
+	}, 30_000);
+
+	it("renderImage drops a BEL appended to a 12 MiB payload", () => {
+		const payload = `${Buffer.alloc(12 * 1024 * 1024)
+			.toString("base64")
+			.slice(0, -1)}\u0007`;
+		expect(() => encodeITerm2(payload)).toThrow("Invalid RFC 4648 base64");
+		expect(() => encodeKittyTransmit(payload, 1)).toThrow("Invalid RFC 4648 base64");
+		terminal.imageProtocol = ImageProtocol.Iterm2;
+		expect(renderImage(payload, DIMS, { maxWidthCells: 2, maxHeightCells: 2 })).toBeNull();
+		terminal.imageProtocol = ImageProtocol.Kitty;
+		written.length = 0;
+		expect(renderImage(payload, DIMS, { maxWidthCells: 2, maxHeightCells: 2 })).toBeNull();
+		expect(written).toEqual([]);
+	}, 30_000);
+
 	it("still allows AA== and AAA= padding forms", () => {
 		expect(kittyPayload(encodeKittyTransmit("AA==", 4))).toBe("AA==");
 		expect(kittyPayload(encodeKitty("AAA=", { columns: 1, rows: 1 }))).toBe("AAA=");
 		expect(encodeITerm2("AAA=", { width: "auto", height: "auto" })).toContain(":AAA=\x07");
+	});
+
+	it("property: short strings follow the RFC 4648 alphabet, seed 412, 64 inputs", () => {
+		const reference = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
+		fc.assert(
+			fc.property(fc.string({ maxLength: 32 }), value => {
+				const accepted = value.length % 4 === 0 && reference.test(value);
+				if (accepted) {
+					expect(encodeITerm2(value).endsWith(`${value}\x07`)).toBe(true);
+					expect(kittyPayload(encodeKittyTransmit(value, 1))).toBe(value);
+				} else {
+					expect(() => encodeITerm2(value)).toThrow("Invalid RFC 4648 base64");
+					expect(() => encodeKittyTransmit(value, 1)).toThrow("Invalid RFC 4648 base64");
+				}
+			}),
+			{ seed: PROPERTY_SEED, numRuns: PROPERTY_RUNS },
+		);
 	});
 
 	it("property: still allows RFC 4648 image bytes inside kitty and iterm2 escapes, seed 412, 64 inputs", () => {
