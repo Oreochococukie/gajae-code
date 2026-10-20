@@ -18,13 +18,13 @@ afterEach(() => {
 	}
 });
 
-function controllerFor(root: string, warnings: string[]) {
+function controllerFor(root: string, warnings: string[], cwd = root) {
 	const seen = { preview: null as string | null, edited: null as string | null };
 	const sessionManager = {
 		getArtifactsDir: () => path.join(root, "artifacts"),
 		isManagedDestination: () => false,
 		getSessionId: () => "plan-editor-workspace",
-		getCwd: () => root,
+		getCwd: () => cwd,
 	} as SessionManager;
 	const controller = new PlanModeController({
 		session: { abort: async () => {} } as AgentSession,
@@ -141,6 +141,56 @@ describe("plan editor workspace root", () => {
 				expect(seen.preview).toBe("original plan\n");
 				expect(await fs.readFile(target, "utf8")).toBe("updated plan\n");
 				expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+			} finally {
+				await fs.rm(parent, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it.skipIf(process.platform === "win32")("still allows a plan file when the session directory is /", async () => {
+		const parent = await fs.mkdtemp(path.join(os.tmpdir(), "plan-editor-ws-"));
+		const planPath = path.join(parent, "PLAN.md");
+		try {
+			await fs.writeFile(planPath, "original plan\n");
+			const marker = path.join(parent, "editor-ran");
+			const warnings: string[] = [];
+			await installEditor(parent, "updated plan\n", marker);
+			const { controller, seen } = controllerFor(parent, warnings, "/");
+			await controller.handleApproval({
+				planFilePath: planPath,
+				finalPlanFilePath: planPath,
+				title: "Plan",
+				planExists: true,
+			});
+			expect(seen.preview).toBe("original plan\n");
+			expect(seen.edited).toBe("updated plan\n");
+			expect(await fs.readFile(planPath, "utf8")).toBe("updated plan\n");
+		} finally {
+			await fs.rm(parent, { recursive: true, force: true });
+		}
+	});
+
+	it.skipIf(process.platform !== "win32")(
+		"still allows a plan file when the session directory is the drive root",
+		async () => {
+			const parent = await fs.mkdtemp(path.join(os.tmpdir(), "plan-editor-ws-"));
+			const planPath = path.join(parent, "PLAN.md");
+			const drive = path.parse(parent).root;
+			try {
+				await fs.writeFile(planPath, "original plan\n");
+				const marker = path.join(parent, "editor-ran");
+				const warnings: string[] = [];
+				await installEditor(parent, "updated plan\n", marker);
+				const { controller, seen } = controllerFor(parent, warnings, drive);
+				await controller.handleApproval({
+					planFilePath: planPath,
+					finalPlanFilePath: planPath,
+					title: "Plan",
+					planExists: true,
+				});
+				expect(seen.preview).toBe("original plan\n");
+				expect(seen.edited).toBe("updated plan\n");
+				expect(await fs.readFile(planPath, "utf8")).toBe("updated plan\n");
 			} finally {
 				await fs.rm(parent, { recursive: true, force: true });
 			}

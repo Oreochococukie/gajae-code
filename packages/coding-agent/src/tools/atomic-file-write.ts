@@ -169,7 +169,10 @@ async function resolvePublishPath(dest: string, depth = 0): Promise<ResolvedPubl
 }
 
 function pathIsWithin(target: string, root: string): boolean {
-	return target === root || target.startsWith(`${root}${path.sep}`);
+	// A prefix check treats the filesystem root as `//`, so a normal child is
+	// rejected. Compare the relative path instead. Callers pass real paths.
+	const relative = path.relative(root, target);
+	return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
 async function realpathOrSelf(p: string): Promise<string> {
