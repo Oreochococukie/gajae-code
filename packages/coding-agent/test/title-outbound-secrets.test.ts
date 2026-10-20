@@ -97,6 +97,25 @@ describe("session title secret outbound", () => {
 		expect(straddled).not.toContain(TOKEN.slice(0, 10));
 	});
 
+	it("keeps the user-message fence around tail-only and head-plus-tail slices", () => {
+		const prepare = titleGenerator.prepareTitleOutboundText;
+		expect(typeof prepare).toBe("function");
+		const full = `${"H".repeat(400)}${"M".repeat(4000)}SECRET378TAIL${"T".repeat(400)}`;
+		const tailOnly = full.slice(-1800);
+		const headAndTail = `${full.slice(0, 900)}${full.slice(-900)}`;
+		for (const slice of [tailOnly, headAndTail]) {
+			const framed = prepare(slice);
+			expect(framed.startsWith("<user-message>\n")).toBe(true);
+			expect(framed.endsWith("\n</user-message>")).toBe(true);
+			expect(framed).toContain(slice);
+		}
+		const framedFull = prepare(full);
+		expect(framedFull.startsWith("<user-message>\n")).toBe(true);
+		expect(framedFull.endsWith("\n</user-message>")).toBe(true);
+		const inner = framedFull.slice("<user-message>\n".length, -"\n</user-message>".length);
+		expect(inner.length).toBeLessThanOrEqual(CAP + 1);
+	});
+
 	it("property: title outbound keeps the fence and drops a configured secret", () => {
 		fc.assert(
 			fc.property(
