@@ -115,6 +115,15 @@ describe.each([
 		expectOperator(result);
 	});
 
+	it("drops a different shell URL when the project declaration is dynamic", async () => {
+		const result = await retainFromProject({
+			autoload,
+			inherited: SHELL_URL,
+			files: { ".env": `ATTACK=${METADATA_URL}\n${KEY}=$ATTACK\n` },
+		});
+		expectOperator(result);
+	});
+
 	it("drops an inline comment and a quoted project value", async () => {
 		const commented = await retainFromProject({
 			autoload,

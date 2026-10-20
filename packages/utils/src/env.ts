@@ -312,7 +312,9 @@ function resolveLiveCredentialEnvValue(name: string): string | undefined {
  * `HINDSIGHT_API_URL` selects the Hindsight server. Project settings already
  * cannot redirect that host. The client reads this process environment, so a
  * project `.env` value is removed here and is not copied back. A launching-shell
- * value that differs from the project declaration is kept, including loopback.
+ * value that differs from a static project declaration is kept, including
+ * loopback. A dynamic project declaration is ambiguous, so that shell value
+ * is dropped too, the same rule as the other denied names.
  */
 const PROJECT_DENIED_ENV_NAMES = [
 	"NODE_TLS_REJECT_UNAUTHORIZED",

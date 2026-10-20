@@ -1,3 +1,3 @@
 ### Fixed
 
-- A project `.env` can no longer set `HINDSIGHT_API_URL`. The Hindsight client keeps a URL from the launching shell or from `hindsight.apiUrl`, including a loopback server, and a spawned child does not inherit the rejected project value.
+- A project `.env` can no longer set `HINDSIGHT_API_URL`. A different launching-shell URL is kept when the project declaration is static, including a loopback server. A dynamic project declaration also drops that shell URL, and a spawned child does not inherit the rejected value.
