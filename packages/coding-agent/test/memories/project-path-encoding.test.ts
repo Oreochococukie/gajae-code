@@ -6,7 +6,7 @@ import { InternalUrlRouter } from "@gajae-code/coding-agent/internal-urls";
 import type { AgentSession } from "@gajae-code/coding-agent/session/agent-session";
 import fc from "fast-check";
 import { Settings } from "../../src/config/settings";
-import { buildMemoryToolDeveloperInstructions, getMemoryRoot } from "../../src/memories";
+import { buildMemoryToolDeveloperInstructions, clearMemoryData, getMemoryRoot } from "../../src/memories";
 import { AgentRegistry } from "../../src/registry/agent-registry";
 
 const PROPERTY_SEED = 30321;
@@ -198,6 +198,43 @@ describe("project memory path encoding", () => {
 			expect(slashResource.content).toBe("ALPHA_ONLY_TOKEN");
 		} finally {
 			await fs.rm(cleanupRoot, { recursive: true, force: true });
+		}
+	});
+
+	it("leaves an ambiguous legacy memory directory in place when the current root is cleared", async () => {
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "memory-clear-legacy-"));
+		try {
+			const current = getMemoryRoot(agentDir, DASH_PROJECT);
+			const legacy = path.join(path.dirname(current), historicalName(DASH_PROJECT));
+			expect(current).not.toBe(legacy);
+			expect(legacy).toBe(getMemoryRoot(agentDir, SLASH_PROJECT));
+			await fs.mkdir(current, { recursive: true });
+			await fs.mkdir(legacy, { recursive: true });
+			await Bun.write(path.join(current, "memory_summary.md"), "CURRENT_ONLY_TOKEN");
+			await Bun.write(path.join(legacy, "memory_summary.md"), "LEGACY_ONLY_TOKEN");
+
+			await clearMemoryData(agentDir, DASH_PROJECT);
+
+			await expect(fs.stat(current)).rejects.toThrow();
+			expect(await Bun.file(path.join(legacy, "memory_summary.md")).text()).toBe("LEGACY_ONLY_TOKEN");
+		} finally {
+			await fs.rm(agentDir, { recursive: true, force: true });
+		}
+	});
+
+	it("still removes the current memory directory for a slash-only project path", async () => {
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "memory-clear-slash-"));
+		try {
+			const current = getMemoryRoot(agentDir, SLASH_PROJECT);
+			expect(path.basename(current)).toBe(historicalName(SLASH_PROJECT));
+			await fs.mkdir(current, { recursive: true });
+			await Bun.write(path.join(current, "MEMORY.md"), "SLASH_ONLY_TOKEN");
+
+			await clearMemoryData(agentDir, SLASH_PROJECT);
+
+			await expect(fs.stat(current)).rejects.toThrow();
+		} finally {
+			await fs.rm(agentDir, { recursive: true, force: true });
 		}
 	});
 

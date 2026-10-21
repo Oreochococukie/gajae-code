@@ -27,8 +27,10 @@ Generated local-memory artifacts are private runtime state, not a public tool or
 | Subcommand            | Effect                                         |
 | --------------------- | ---------------------------------------------- |
 | `view`                | Show the current memory injection payload      |
-| `clear` / `reset`     | Delete all memory data and generated artifacts |
+| `clear` / `reset`     | Delete current memory rows and the current directory. Ambiguous legacy directories remain. |
 | `enqueue` / `rebuild` | Force consolidation to run at next startup     |
+
+`/memory clear` and `/memory reset` remove this project's memory database rows and the directory for the current project path. They do not remove an older directory name left by the previous path mapping. That mapping was not injective, so an old directory name has no safe automatic owner and is not deleted. Generated files there remain until you remove that directory yourself. Backend `clear` follows the same rule for the local store: current rows and the current directory only, not a complete wipe of every historical on-disk name.
 
 ## How it works
 

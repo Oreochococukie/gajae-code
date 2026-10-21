@@ -198,7 +198,12 @@ export async function buildMemoryToolDeveloperInstructions(
 }
 
 /**
- * Clear all persisted memory state and generated artifacts.
+ * Remove this project's memory database rows and its current memory directory.
+ *
+ * This is not a complete wipe. `/memory clear` leaves an older directory name
+ * from the previous path mapping in place. That mapping was not injective, so
+ * an old name has no safe automatic owner and must not be deleted here.
+ * Generated files under that legacy directory remain for a user-directed cleanup.
  */
 export async function clearMemoryData(agentDir: string, cwd: string): Promise<void> {
 	const db = openMemoryDb(getAgentDbPath(agentDir));
@@ -207,6 +212,7 @@ export async function clearMemoryData(agentDir: string, cwd: string): Promise<vo
 	} finally {
 		closeMemoryDb(db);
 	}
+	// Current root only. Do not remove an ambiguous legacy directory name.
 	await fs.rm(getMemoryRoot(agentDir, cwd), { recursive: true, force: true });
 }
 

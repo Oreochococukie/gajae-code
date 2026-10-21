@@ -46,7 +46,12 @@ export interface MemoryBackend {
 		session?: AgentSession,
 	): Promise<string | undefined>;
 
-	/** Wipe all persisted state for this backend (slash `/memory clear`). */
+	/**
+	 * Clear this backend's current project state (`/memory clear`).
+	 * Not a complete wipe. The local backend removes database rows and the
+	 * current directory only. Ambiguous legacy directory names remain for a
+	 * user-directed cleanup, because the previous path mapping was not injective.
+	 */
 	clear(agentDir: string, cwd: string, session?: AgentSession): Promise<void>;
 
 	/** Force consolidation/retain to happen now (slash `/memory enqueue`). */
