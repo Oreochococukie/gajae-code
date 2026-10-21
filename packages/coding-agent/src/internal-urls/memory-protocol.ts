@@ -13,7 +13,16 @@ function getMemoryRoot(agentDir: string, cwd: string): string {
 }
 
 function encodeProjectPath(cwd: string): string {
-	return `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+	// One leading separator stays stripped so slash-only paths keep their historical directory name.
+	// Percent-encode `%`, `\`, `:`, and `-` before `/` becomes `-`, so those characters cannot alias a slash.
+	const stripped = cwd.replace(/^[/\\]/, "");
+	const encoded = stripped
+		.replace(/%/g, "%25")
+		.replace(/\\/g, "%5C")
+		.replace(/:/g, "%3A")
+		.replace(/-/g, "%2D")
+		.replace(/\//g, "-");
+	return `--${encoded}--`;
 }
 /**
  * Snapshot of memory roots for every registered session, deduped.
