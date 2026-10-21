@@ -19,6 +19,7 @@ import {
 	getSkillFilesystemIdentity,
 	isCanonicalGjcWorkflowSkillFilesystemAlias,
 } from "../skill-state/canonical-skills";
+import { wrapUntrustedContent } from "../tools/fetch";
 import { expandTilde } from "../tools/path-utils";
 import type { LoadedSubskillActivation } from "./gjc-plugins";
 import { buildSubskillInjection } from "./gjc-plugins/injection";
@@ -547,7 +548,9 @@ export async function buildSkillPromptMessage(
 	if (trimmedArgs) {
 		metaLines.push(`User: ${trimmedArgs}`);
 	}
-	let message = `${body}\n\n---\n\n${metaLines.join("\n")}`;
+	// Fence after frontmatter removal. Host metadata stays after the fence so the
+	// loader-owned Skill/User trailer is unchanged, and nothing slices the fence later.
+	let message = `${wrapUntrustedContent(body)}\n\n---\n\n${metaLines.join("\n")}`;
 	const details: SkillPromptDetails = {
 		name: skill.name,
 		path: skill.filePath,
