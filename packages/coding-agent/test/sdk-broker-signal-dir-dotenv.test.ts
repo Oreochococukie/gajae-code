@@ -75,6 +75,91 @@ async function signalFile(directory: string): Promise<string | undefined> {
 	}
 }
 
+/**
+ * Fresh process: Bun loads the origin dotenv, then cwd moves the way
+ * `launch --worktree` does, then the broker child is started with `--no-env-file`.
+ */
+async function probeWorktreeLaunch(
+	mode: "project" | "operator" | "incomplete",
+): Promise<{ seen: string; spawned: string; child: string; marker: string | undefined; directory: string }> {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-broker-signal-wt-"));
+	const origin = path.join(root, "origin");
+	const worktree = path.join(root, "worktree");
+	const directory = path.join(root, mode === "project" ? "attacker-chosen" : "operator-signal");
+	const originEnv =
+		mode === "project"
+			? `${SIGNAL_DIR}=${directory}\n`
+			: mode === "incomplete"
+				? "A".repeat(128 * 1024)
+				: "UNRELATED_PROJECT_FLAG=1\n";
+	await fs.mkdir(origin);
+	await fs.mkdir(worktree);
+	await fs.writeFile(path.join(origin, ".env"), originEnv);
+	await fs.writeFile(path.join(worktree, ".env"), "UNRELATED_WORKTREE=1\n");
+	const ensurePath = path.join(import.meta.dir, "../src/sdk/broker/ensure.ts");
+	const script = `
+		import { brokerSpawnEnvironmentForTest, emitBrokerStartupTestSignal } from ${JSON.stringify(ensurePath)};
+		const worktree = process.env.PROBE_WORKTREE;
+		const key = ${JSON.stringify(SIGNAL_DIR)};
+		const signal = ${JSON.stringify(SIGNAL)};
+		if (!worktree) throw new Error("missing worktree");
+		const seen = process.env[key] ?? "";
+		process.chdir(worktree);
+		await emitBrokerStartupTestSignal(signal);
+		const home = process.env.USERPROFILE ?? process.env.HOME ?? "";
+		const extra = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home, USERPROFILE: home };
+		if (seen) extra[key] = seen;
+		const spawned = brokerSpawnEnvironmentForTest(
+			{ kind: "compiled", file: "gjc", args: ["sdk", "broker-internal"], env: {} },
+			extra,
+		);
+		const child = Bun.spawn(
+			[process.execPath, "--no-env-file", "-e", "console.log(process.env[" + JSON.stringify(key) + "] ?? '')"],
+			{ cwd: worktree, env: spawned, stdin: "ignore", stdout: "pipe", stderr: "pipe" },
+		);
+		const [stdout, stderr, code] = await Promise.all([
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+			child.exited,
+		]);
+		if (code !== 0) throw new Error("broker child exited " + code + ": " + stderr);
+		console.log("WORKTREE_PROBE " + JSON.stringify({ seen, spawned: spawned[key] ?? "", child: stdout.trim() }));
+	`;
+	const home = homeDir();
+	const env: Record<string, string> = {
+		PATH: process.env.PATH ?? "/usr/bin:/bin",
+		HOME: home,
+		USERPROFILE: home,
+		PROBE_WORKTREE: worktree,
+	};
+	if (mode !== "project") env[SIGNAL_DIR] = directory;
+	try {
+		const proc = Bun.spawn([process.execPath, "-e", script], {
+			cwd: origin,
+			env,
+			stdin: "ignore",
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, code] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+		if (code !== 0) throw new Error(`worktree probe exited ${code}: ${stderr || stdout}`);
+		const line = stdout.split("\n").find(item => item.startsWith("WORKTREE_PROBE "));
+		if (!line) throw new Error(`missing worktree probe line: ${stderr || stdout}`);
+		const parsed = JSON.parse(line.slice("WORKTREE_PROBE ".length)) as {
+			seen: string;
+			spawned: string;
+			child: string;
+		};
+		return { ...parsed, directory, marker: await signalFile(directory) };
+	} finally {
+		await fs.rm(root, { recursive: true, force: true });
+	}
+}
+
 describe("broker startup signal directory provenance", () => {
 	it("refuses a project dotenv signal directory before writing a broker signal file", async () => {
 		await withRepo("", async ({ attack }) => {
@@ -213,6 +298,30 @@ describe("broker startup signal directory provenance", () => {
 		});
 	});
 
+	it("drops a startup dotenv signal directory after a worktree chdir before the broker child starts", async () => {
+		const result = await probeWorktreeLaunch("project");
+		expect(result.seen).toBe(result.directory);
+		expect(result.spawned).toBe("");
+		expect(result.child).toBe("");
+		expect(result.marker).toBeUndefined();
+	});
+
+	it("keeps an operator signal directory after a worktree chdir when the project does not declare it", async () => {
+		const result = await probeWorktreeLaunch("operator");
+		expect(result.seen).toBe(result.directory);
+		expect(result.spawned).toBe(result.directory);
+		expect(result.child).toBe(result.directory);
+		expect(result.marker).toMatch(/^\d+\n$/);
+	});
+
+	it("rejects the signal directory after a worktree chdir when the startup dotenv snapshot is incomplete", async () => {
+		const result = await probeWorktreeLaunch("incomplete");
+		expect(result.seen).toBe(result.directory);
+		expect(result.spawned).toBe("");
+		expect(result.child).toBe("");
+		expect(result.marker).toBeUndefined();
+	});
+
 	it("property: broker signal directory matches operator provenance, seed 309733, 64 inputs", async () => {
 		const mod = await import("../src/sdk/broker/ensure");
 		const decide = mod.trustedBrokerSignalDirectoryForTest;
@@ -226,18 +335,27 @@ describe("broker startup signal directory provenance", () => {
 					values: { [SIGNAL_DIR]: raw },
 					dynamic: dynamic ? new Set([SIGNAL_DIR]) : new Set<string>(),
 				};
+				const empty: ProjectEnvSnapshot = { values: {}, dynamic: new Set() };
+				const incomplete: ProjectEnvSnapshot = { values: {}, dynamic: new Set(), incomplete: true };
 				expect(decide({ [SIGNAL_DIR]: raw }, declared)).toBeUndefined();
 				expect(decide({}, declared)).toBeUndefined();
+				expect(decide({ [SIGNAL_DIR]: raw }, [declared, empty])).toBeUndefined();
+				expect(decide({ [SIGNAL_DIR]: raw }, [empty, declared])).toBeUndefined();
+				expect(decide({ [SIGNAL_DIR]: raw }, [incomplete, empty])).toBeUndefined();
+				expect(decide({ [SIGNAL_DIR]: raw }, [empty, incomplete])).toBeUndefined();
 				if (dynamic) {
 					expect(decide({ [SIGNAL_DIR]: `${raw}-operator` }, declared)).toBeUndefined();
+					expect(decide({ [SIGNAL_DIR]: `${raw}-operator` }, [declared, empty])).toBeUndefined();
 				} else {
 					const operator = `${raw}-operator`;
 					expect(decide({ [SIGNAL_DIR]: operator }, declared)).toBe(operator.trim());
+					expect(decide({ [SIGNAL_DIR]: operator }, [declared, empty])).toBe(operator.trim());
+					expect(decide({ [SIGNAL_DIR]: operator }, [empty, declared])).toBe(operator.trim());
 				}
-				const empty: ProjectEnvSnapshot = { values: {}, dynamic: new Set() };
 				const accepted = decide({ [SIGNAL_DIR]: raw }, empty);
 				expect(accepted).toBe(raw.trim());
 				expect(decide({ [SIGNAL_DIR]: raw }, empty)).toBe(accepted);
+				expect(decide({ [SIGNAL_DIR]: raw }, [empty, empty])).toBe(accepted);
 			}),
 			{ seed: PROPERTY_SEED, numRuns: 64 },
 		);

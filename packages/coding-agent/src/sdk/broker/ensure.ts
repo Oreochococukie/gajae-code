@@ -733,16 +733,41 @@ const BROKER_TEST_SIGNAL_DIR_ENV = "GJC_SDK_TEST_BROKER_SIGNAL_DIR";
 const BROKER_SIGNAL_DOTENV_MAX_BYTES = 64 * 1024;
 
 /**
+ * Dotenv from the cwd that first loaded this module. `launch --worktree` changes
+ * cwd after Bun has already copied that file into `process.env`.
+ */
+const startupBrokerSignalSnapshot = projectEnvSnapshot(process.cwd(), {
+	maxFileBytes: BROKER_SIGNAL_DOTENV_MAX_BYTES,
+});
+
+function brokerSignalSnapshots(override?: readonly ProjectEnvSnapshot[]): readonly ProjectEnvSnapshot[] {
+	if (override) return override;
+	return [
+		projectEnvSnapshot(process.cwd(), { maxFileBytes: BROKER_SIGNAL_DOTENV_MAX_BYTES }),
+		startupBrokerSignalSnapshot,
+	];
+}
+
+/**
  * Operator environment only. A directory declared by the project dotenv is
  * ignored so startup cannot create a path the repository chose.
- * No signal value means no dotenv read, so an unused seam cannot stall startup.
+ * No signal value means no later dotenv read, so an unused seam cannot stall startup.
+ * An incomplete startup or cwd snapshot rejects the value.
  */
-function trustedBrokerTestSignalDirectory(env: NodeJS.ProcessEnv, snapshot?: ProjectEnvSnapshot): string | undefined {
+function trustedBrokerTestSignalDirectory(
+	env: NodeJS.ProcessEnv,
+	snapshots?: readonly ProjectEnvSnapshot[],
+): string | undefined {
 	const raw = env[BROKER_TEST_SIGNAL_DIR_ENV];
 	if (!raw) return undefined;
-	const resolved = snapshot ?? projectEnvSnapshot(process.cwd(), { maxFileBytes: BROKER_SIGNAL_DOTENV_MAX_BYTES });
-	if (resolved.incomplete) return undefined;
-	return trustedCoordinatorEnv(BROKER_TEST_SIGNAL_DIR_ENV, env, resolved);
+	let accepted: string | undefined;
+	for (const snapshot of brokerSignalSnapshots(snapshots)) {
+		if (snapshot.incomplete) return undefined;
+		const trusted = trustedCoordinatorEnv(BROKER_TEST_SIGNAL_DIR_ENV, env, snapshot);
+		if (trusted === undefined) return undefined;
+		accepted = trusted;
+	}
+	return accepted;
 }
 
 /** Drop a project-dotenv signal directory. Keep a trusted directory as the value that was accepted. */
@@ -1992,9 +2017,10 @@ export function signalDetachedBrokerProcessForTest(
 /** Test hook: the signal directory accepted from this environment and snapshot. */
 export function trustedBrokerSignalDirectoryForTest(
 	env: NodeJS.ProcessEnv,
-	snapshot: ProjectEnvSnapshot,
+	snapshot: ProjectEnvSnapshot | readonly ProjectEnvSnapshot[],
 ): string | undefined {
-	return trustedBrokerTestSignalDirectory(env, snapshot);
+	const snapshots = Array.isArray(snapshot) ? snapshot : [snapshot];
+	return trustedBrokerTestSignalDirectory(env, snapshots);
 }
 /** Test hook: resolves the complete broker environment without spawning. */
 export function brokerSpawnEnvironmentForTest(
