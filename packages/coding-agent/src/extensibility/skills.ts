@@ -532,6 +532,48 @@ export function resolveSkillSlashCommands(
 	return commands;
 }
 
+/** Same character cap as session persistence, so a fenced skill prompt is not cut later. */
+const SKILL_PROMPT_PERSIST_CAP = 500_000;
+
+function sliceSkillHead(value: string, maxLength: number): string {
+	if (value.length <= maxLength) return value;
+	let truncated = value.slice(0, Math.max(0, maxLength));
+	if (truncated.length > 0) {
+		const last = truncated.charCodeAt(truncated.length - 1);
+		if (last >= 0xd800 && last <= 0xdbff) truncated = truncated.slice(0, -1);
+	}
+	return truncated;
+}
+
+/**
+ * Head-truncate the repository body to the persistence cap, then fence it.
+ * The host trailer is `suffix` and is not part of the truncated body.
+ */
+function frameSkillBodyWithinCap(body: string, suffix: string): { framed: string; retained: string } {
+	const full = wrapUntrustedContent(body);
+	if (full.length + suffix.length <= SKILL_PROMPT_PERSIST_CAP) return { framed: full, retained: body };
+	const room = SKILL_PROMPT_PERSIST_CAP - suffix.length;
+	let low = 0;
+	let high = Math.min(body.length, Math.max(0, room));
+	let best = wrapUntrustedContent("");
+	let retained = "";
+	while (low <= high) {
+		const mid = (low + high) >> 1;
+		const slice = sliceSkillHead(body, mid);
+		const candidate = wrapUntrustedContent(slice);
+		if (candidate.length <= room) {
+			best = candidate;
+			retained = slice;
+			low = mid + 1;
+		} else if (mid === 0) {
+			break;
+		} else {
+			high = mid - 1;
+		}
+	}
+	return { framed: best, retained };
+}
+
 export async function buildSkillPromptMessage(
 	skill: Pick<Skill, "name" | "filePath" | "content" | "loadContent">,
 	args: string,
@@ -548,14 +590,12 @@ export async function buildSkillPromptMessage(
 	if (trimmedArgs) {
 		metaLines.push(`User: ${trimmedArgs}`);
 	}
-	// Fence after frontmatter removal. Host metadata stays after the fence so the
-	// loader-owned Skill/User trailer is unchanged, and nothing slices the fence later.
-	let message = `${wrapUntrustedContent(body)}\n\n---\n\n${metaLines.join("\n")}`;
+	let suffix = `\n\n---\n\n${metaLines.join("\n")}`;
 	const details: SkillPromptDetails = {
 		name: skill.name,
 		path: skill.filePath,
 		args: trimmedArgs || undefined,
-		lineCount: body ? body.split("\n").length : 0,
+		lineCount: 0,
 	};
 	if (context?.subskillActivationSet) {
 		details.subskillActivationSet = context.subskillActivationSet;
@@ -571,7 +611,7 @@ export async function buildSkillPromptMessage(
 				})
 			: null;
 		if (injection) {
-			message += injection.block;
+			suffix += injection.block;
 			details.subskillActivation = injection.details ?? context.subskillActivation;
 		} else if (context.subskillActivation) {
 			details.subskillActivation = context.subskillActivation;
@@ -585,14 +625,17 @@ export async function buildSkillPromptMessage(
 					skillName: skill.name,
 					phase: context.currentPhase,
 				});
-				if (advert) message += `\n\n${advert}`;
+				if (advert) suffix += `\n\n${advert}`;
 			} catch {
 				// Advertisement is best-effort; never block skill prompt construction.
 			}
 		}
 	}
+	// Truncate the body first, then fence, so persistence cannot drop the closing fence or the trailer.
+	const framed = frameSkillBodyWithinCap(body, suffix);
+	details.lineCount = framed.retained ? framed.retained.split("\n").length : 0;
 	return {
-		message,
+		message: `${framed.framed}${suffix}`,
 		details,
 	};
 }
