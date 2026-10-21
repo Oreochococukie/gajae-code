@@ -1,4 +1,66 @@
+import { redactCrashSecrets, replaceAbsolutePaths } from "@gajae-code/utils";
 import { buildRedactedAction, type RedactableAction } from "./config";
+
+/**
+ * Outbound crash scrub (`redactCrashSecrets`, then `replaceAbsolutePaths`).
+ * One scanner holds each http(s) URL from scheme:// up to whitespace or a
+ * closing quote or backtick. Balanced `()` and `[]` stay inside that span,
+ * and nothing inside the span is path-masked. Asks stay answerable.
+ * Runs before adapter truncation.
+ */
+function redactEgressText(value: string): string {
+	const scrubbed = redactCrashSecrets(value);
+	const urls: string[] = [];
+	let shielded = "";
+	let cursor = 0;
+	for (const match of scrubbed.matchAll(/https?:\/\//gi)) {
+		const start = match.index ?? 0;
+		if (start < cursor) continue;
+		const prev = start > 0 ? scrubbed.charAt(start - 1) : "";
+		if (prev !== "" && /[A-Za-z0-9+.-]/.test(prev)) continue;
+		const end = httpUrlEnd(scrubbed, start);
+		shielded += scrubbed.slice(cursor, start);
+		shielded += `\uE000${urls.length}\uE001`;
+		urls.push(scrubbed.slice(start, end));
+		cursor = end;
+	}
+	shielded += scrubbed.slice(cursor);
+	return replaceAbsolutePaths(shielded).replace(/\uE000(\d+)\uE001/g, (_match, index) => urls[Number(index)] ?? "");
+}
+
+/** End of one URL span. An unmatched `)` or `]` ends the span before that character. */
+function httpUrlEnd(value: string, start: number): number {
+	const stack: string[] = [];
+	let index = start;
+	while (index < value.length) {
+		const ch = value.charAt(index);
+		if (/\s/u.test(ch) || ch === '"' || ch === "'" || ch === "`") break;
+		if (ch === "(" || ch === "[") {
+			stack.push(ch);
+			index += 1;
+			continue;
+		}
+		if (ch === ")" || ch === "]") {
+			const open = ch === ")" ? "(" : "[";
+			if (stack.length > 0 && stack[stack.length - 1] === open) {
+				stack.pop();
+				index += 1;
+				continue;
+			}
+			break;
+		}
+		index += 1;
+	}
+	return index;
+}
+
+function redactFrameFields(frame: Record<string, unknown>): Record<string, unknown> {
+	const out: Record<string, unknown> = {};
+	for (const [key, field] of Object.entries(frame)) {
+		out[key] = typeof field === "string" ? redactEgressText(field) : field;
+	}
+	return out;
+}
 
 export type NotificationEvent =
 	| ({ type: "action_needed" } & RedactableAction)
@@ -87,10 +149,18 @@ export class NotificationPresentationEngine {
 	}
 
 	private redactEvent(event: NotificationEvent): NotificationEvent {
+		if (!this.opts.redact) return event;
+		if (event.type === "frame") {
+			return { ...event, frame: redactFrameFields(event.frame) };
+		}
 		if (event.type !== "action_needed") return event;
+		const redacted = buildRedactedAction(event, { redact: true });
+		if (event.kind !== "ask") return { ...redacted, type: "action_needed" };
 		return {
-			...buildRedactedAction(event, { redact: this.opts.redact }),
+			...redacted,
 			type: "action_needed",
+			...(event.question === undefined ? {} : { question: redactEgressText(event.question) }),
+			...(event.options === undefined ? {} : { options: event.options.map(option => redactEgressText(option)) }),
 		};
 	}
 }
