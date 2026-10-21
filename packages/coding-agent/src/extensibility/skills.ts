@@ -534,44 +534,114 @@ export function resolveSkillSlashCommands(
 
 /** Same character cap as session persistence, so a fenced skill prompt is not cut later. */
 const SKILL_PROMPT_PERSIST_CAP = 500_000;
+const SKILL_FENCE_OPEN = "<untrusted-content>\n";
+const SKILL_FENCE_CLOSE = "\n</untrusted-content>";
+const SKILL_FENCE_OVERHEAD = SKILL_FENCE_OPEN.length + SKILL_FENCE_CLOSE.length;
+/** Replacement produced by `escapeUntrustedContent` for both closer forms. */
+const ESCAPED_CLOSER = "&lt;/untrusted-content>";
+const CLOSER_PREFIX = "</untrusted-content";
 
 function sliceSkillHead(value: string, maxLength: number): string {
+	if (maxLength <= 0) return "";
 	if (value.length <= maxLength) return value;
-	let truncated = value.slice(0, Math.max(0, maxLength));
-	if (truncated.length > 0) {
-		const last = truncated.charCodeAt(truncated.length - 1);
-		if (last >= 0xd800 && last <= 0xdbff) truncated = truncated.slice(0, -1);
-	}
+	let truncated = value.slice(0, maxLength);
+	const last = truncated.charCodeAt(truncated.length - 1);
+	if (last >= 0xd800 && last <= 0xdbff) truncated = truncated.slice(0, -1);
 	return truncated;
 }
 
-/**
- * Head-truncate the repository body to the persistence cap, then fence it.
- * The host trailer is `suffix` and is not part of the truncated body.
- */
-function frameSkillBodyWithinCap(body: string, suffix: string): { framed: string; retained: string } {
-	const full = wrapUntrustedContent(body);
-	if (full.length + suffix.length <= SKILL_PROMPT_PERSIST_CAP) return { framed: full, retained: body };
-	const room = SKILL_PROMPT_PERSIST_CAP - suffix.length;
-	let low = 0;
-	let high = Math.min(body.length, Math.max(0, room));
-	let best = wrapUntrustedContent("");
-	let retained = "";
-	while (low <= high) {
-		const mid = (low + high) >> 1;
-		const slice = sliceSkillHead(body, mid);
-		const candidate = wrapUntrustedContent(slice);
-		if (candidate.length <= room) {
-			best = candidate;
-			retained = slice;
-			low = mid + 1;
-		} else if (mid === 0) {
-			break;
-		} else {
-			high = mid - 1;
-		}
+function isCloserWhitespace(code: number): boolean {
+	return code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0d || code === 0x0c;
+}
+
+function sameCloserChar(actual: number, expected: number): boolean {
+	if (actual === expected) return true;
+	return actual >= 0x41 && actual <= 0x5a && actual + 0x20 === expected;
+}
+
+/** Raw length of a closer at `index`, or 0. Reads the source; does not copy it. */
+function measureCloser(value: string, index: number): number {
+	const prefix = CLOSER_PREFIX.length;
+	if (index + prefix >= value.length) return 0;
+	for (let i = 0; i < prefix; i++) {
+		if (!sameCloserChar(value.charCodeAt(index + i), CLOSER_PREFIX.charCodeAt(i))) return 0;
 	}
-	return { framed: best, retained };
+	let cursor = index + prefix;
+	const first = value.charCodeAt(cursor);
+	if (first === 0x3e) return prefix + 1;
+	if (!isCloserWhitespace(first)) return 0;
+	cursor += 1;
+	while (cursor < value.length && isCloserWhitespace(value.charCodeAt(cursor))) cursor += 1;
+	if (cursor < value.length && value.charCodeAt(cursor) === 0x3e) return cursor + 1 - index;
+	return 0;
+}
+
+/**
+ * One forward scan. Stops once the escaped form would pass `budget`.
+ * Closers are charged at their escaped size so the later wrap cannot grow the text.
+ */
+function boundSkillBody(body: string, budget: number): { text: string; consumedAll: boolean } {
+	if (budget <= 0 || body.length === 0) return { text: "", consumedAll: body.length === 0 };
+	const parts: string[] = [];
+	let used = 0;
+	let index = 0;
+	while (index < body.length && used < budget) {
+		const closer = body.charCodeAt(index) === 0x3c ? measureCloser(body, index) : 0;
+		if (closer > 0) {
+			if (used + ESCAPED_CLOSER.length > budget) break;
+			parts.push(ESCAPED_CLOSER);
+			used += ESCAPED_CLOSER.length;
+			index += closer;
+			continue;
+		}
+		const start = index;
+		let end = index;
+		while (end < body.length) {
+			const room = budget - used - (end - start);
+			if (room <= 0) break;
+			if (body.charCodeAt(end) === 0x3c && measureCloser(body, end) > 0) break;
+			const code = body.charCodeAt(end);
+			if (code >= 0xd800 && code <= 0xdbff) {
+				const low = end + 1 < body.length ? body.charCodeAt(end + 1) : 0;
+				if (low >= 0xdc00 && low <= 0xdfff) {
+					if (room < 2) break;
+					end += 2;
+					continue;
+				}
+			}
+			end += 1;
+		}
+		if (end === start) break;
+		parts.push(body.slice(start, end));
+		used += end - start;
+		index = end;
+	}
+	return { text: parts.join(""), consumedAll: index >= body.length };
+}
+
+/**
+ * Reserve the fence inside `cap`, then keep the body and host suffix.
+ * The attacker-sized body is bounded before `wrapUntrustedContent` runs once.
+ */
+export function frameSkillPromptWithinCap(
+	body: string,
+	suffix: string,
+	cap = SKILL_PROMPT_PERSIST_CAP,
+): { message: string; retained: string } {
+	const payload = Math.max(0, cap - SKILL_FENCE_OVERHEAD);
+	const whole = boundSkillBody(body, payload);
+	let bounded = whole.text;
+	let suffixKept = suffix;
+	if (whole.consumedAll) {
+		suffixKept = sliceSkillHead(suffix, payload - bounded.length);
+	} else if (suffix.length <= payload) {
+		bounded = boundSkillBody(body, payload - suffix.length).text;
+		suffixKept = suffix;
+	} else {
+		suffixKept = sliceSkillHead(suffix, Math.floor(payload / 2));
+		bounded = boundSkillBody(body, payload - suffixKept.length).text;
+	}
+	return { message: `${wrapUntrustedContent(bounded)}${suffixKept}`, retained: bounded };
 }
 
 export async function buildSkillPromptMessage(
@@ -631,11 +701,11 @@ export async function buildSkillPromptMessage(
 			}
 		}
 	}
-	// Truncate the body first, then fence, so persistence cannot drop the closing fence or the trailer.
-	const framed = frameSkillBodyWithinCap(body, suffix);
+	// Bound the body and suffix inside the persistence cap, then fence once.
+	const framed = frameSkillPromptWithinCap(body, suffix);
 	details.lineCount = framed.retained ? framed.retained.split("\n").length : 0;
 	return {
-		message: `${framed.framed}${suffix}`,
+		message: framed.message,
 		details,
 	};
 }
