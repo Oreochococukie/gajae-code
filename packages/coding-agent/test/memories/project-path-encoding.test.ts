@@ -27,6 +27,16 @@ function historicalName(cwd: string): string {
 	return `--${stripped(cwd).replace(/[/\\:]/g, "-")}--`;
 }
 
+function reversibleName(cwd: string): string {
+	const encoded = stripped(cwd)
+		.replace(/%/g, "%25")
+		.replace(/\\/g, "%5C")
+		.replace(/:/g, "%3A")
+		.replace(/-/g, "%2D")
+		.replace(/\//g, "-");
+	return `--${encoded}--`;
+}
+
 function decodeDirectoryName(name: string): string {
 	const body = name.slice(2, -2).replace(/-/g, "/");
 	return body.replace(/%2D/g, "-").replace(/%3A/g, ":").replace(/%5C/g, "\\").replace(/%25/g, "%");
@@ -52,6 +62,67 @@ describe("project memory path encoding", () => {
 	it("keeps slash-only project paths on their historical memory directory", () => {
 		for (const cwd of [SLASH_PROJECT, "/home/u/proj", "/srv/app/v2", "/a/b/c"]) {
 			expect(directoryName(cwd)).toBe(historicalName(cwd));
+		}
+		const exactLimit = `/${"a".repeat(251)}`;
+		expect(Buffer.byteLength(directoryName(exactLimit))).toBe(255);
+		expect(directoryName(exactLimit)).toBe(historicalName(exactLimit));
+	});
+
+	it("keeps a long dashed project path able to store and read its own memory", async () => {
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "memory-path-long-"));
+		const leftCwd = `/var/${"a-".repeat(70)}`;
+		const rightCwd = `/var/${"a-".repeat(69)}b-`;
+		try {
+			const settings = Settings.isolated({ "memories.enabled": true });
+			const leftRoot = getMemoryRoot(agentDir, leftCwd);
+			const rightRoot = getMemoryRoot(agentDir, rightCwd);
+			expect(leftRoot).not.toBe(rightRoot);
+			expect(Buffer.byteLength(path.basename(leftRoot))).toBeLessThanOrEqual(255);
+			expect(Buffer.byteLength(path.basename(rightRoot))).toBeLessThanOrEqual(255);
+			await fs.mkdir(leftRoot, { recursive: true });
+			await fs.mkdir(rightRoot, { recursive: true });
+			await Bun.write(path.join(leftRoot, "memory_summary.md"), "LONG_ALPHA_TOKEN");
+			await Bun.write(path.join(rightRoot, "memory_summary.md"), "LONG_BETA_TOKEN");
+
+			const leftInstructions = await buildMemoryToolDeveloperInstructions(
+				agentDir,
+				settings,
+				sessionFor(leftCwd, agentDir),
+			);
+			const rightInstructions = await buildMemoryToolDeveloperInstructions(
+				agentDir,
+				settings,
+				sessionFor(rightCwd, agentDir),
+			);
+			expect(leftInstructions).toContain("LONG_ALPHA_TOKEN");
+			expect(leftInstructions).not.toContain("LONG_BETA_TOKEN");
+			expect(rightInstructions).toContain("LONG_BETA_TOKEN");
+			expect(rightInstructions).not.toContain("LONG_ALPHA_TOKEN");
+
+			AgentRegistry.resetGlobalForTests();
+			InternalUrlRouter.resetForTests();
+			AgentRegistry.global().register({
+				id: "long-left",
+				displayName: "long-left",
+				kind: "main",
+				session: sessionFor(leftCwd, agentDir),
+				sessionFile: null,
+			});
+			const leftResource = await InternalUrlRouter.instance().resolve("memory://root");
+			expect(leftResource.content).toBe("LONG_ALPHA_TOKEN");
+			AgentRegistry.resetGlobalForTests();
+			InternalUrlRouter.resetForTests();
+			AgentRegistry.global().register({
+				id: "long-right",
+				displayName: "long-right",
+				kind: "main",
+				session: sessionFor(rightCwd, agentDir),
+				sessionFile: null,
+			});
+			const rightResource = await InternalUrlRouter.instance().resolve("memory://root");
+			expect(rightResource.content).toBe("LONG_BETA_TOKEN");
+		} finally {
+			await fs.rm(agentDir, { recursive: true, force: true });
 		}
 	});
 
@@ -131,23 +202,50 @@ describe("project memory path encoding", () => {
 	});
 
 	it("property: project memory directory names stay injective, seed 30321, 64 inputs", () => {
-		const cwd = fc.string({
+		const short = fc.string({
 			maxLength: 24,
-			unit: fc.constantFrom(..."abcXYZ09/\\:-%._"),
+			unit: fc.constantFrom(..."abcXYZ09/\\:-%._", "가", "你"),
 		});
+		const growing = fc
+			.record({
+				lead: fc.constantFrom("", "/"),
+				piece: fc.constantFrom("a-", "가-", "b:", "%"),
+				count: fc.integer({ min: 1, max: 90 }),
+			})
+			.map(({ lead, piece, count }) => `${lead}${piece.repeat(count)}`);
+		const boundary = fc.constantFrom(
+			`/var/${"a-".repeat(70)}`,
+			`/var/${"a-".repeat(69)}b-`,
+			`/${"가-".repeat(50)}`,
+			`/${"a".repeat(251)}`,
+			`/${"a".repeat(252)}`,
+		);
+		const cwd = fc.oneof(short, growing, boundary);
 		fc.assert(
 			fc.property(cwd, cwd, (left, right) => {
 				const leftName = directoryName(left);
 				const rightName = directoryName(right);
+				const leftExpanded = reversibleName(left);
+				const rightExpanded = reversibleName(right);
 				expect(leftName.startsWith("--")).toBe(true);
 				expect(leftName.endsWith("--")).toBe(true);
 				expect(leftName.includes("/") || leftName.includes("\\") || leftName.includes(":")).toBe(false);
+				expect(Buffer.byteLength(leftName)).toBeLessThanOrEqual(255);
 				expect(path.basename(path.join(AGENT_DIR, leftName))).toBe(leftName);
-				expect(decodeDirectoryName(leftName)).toBe(stripped(left));
 				expect(directoryName(left)).toBe(leftName);
-				if (stripped(left) === stripped(right)) expect(leftName).toBe(rightName);
-				else expect(leftName).not.toBe(rightName);
-				if (!/[%\\:-]/.test(stripped(left))) expect(leftName).toBe(historicalName(left));
+				if (Buffer.byteLength(leftExpanded) <= 255) {
+					expect(leftName).toBe(leftExpanded);
+					expect(decodeDirectoryName(leftName)).toBe(stripped(left));
+					if (!/[%\\:-]/.test(stripped(left))) expect(leftName).toBe(historicalName(left));
+				} else {
+					expect(leftName.startsWith("--%00")).toBe(true);
+					expect(leftName).not.toContain("/");
+				}
+				if (left === right) expect(leftName).toBe(rightName);
+				else if (Buffer.byteLength(leftExpanded) <= 255 && Buffer.byteLength(rightExpanded) <= 255) {
+					if (stripped(left) === stripped(right)) expect(leftName).toBe(rightName);
+					else expect(leftName).not.toBe(rightName);
+				} else expect(leftName).not.toBe(rightName);
 			}),
 			{ seed: PROPERTY_SEED, numRuns: PROPERTY_RUNS },
 		);
