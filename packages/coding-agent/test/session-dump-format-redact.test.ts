@@ -3,6 +3,7 @@ import type { AgentMessage } from "@gajae-code/agent-core";
 import type { AssistantMessage, Usage } from "@gajae-code/ai";
 import { formatSessionDumpText } from "@gajae-code/coding-agent/session/session-dump-format";
 import fc from "fast-check";
+import { XMLValidator } from "fast-xml-parser";
 
 const openaiKey = ["sk", "FAKE12345678"].join("-");
 const githubToken = ["ghp", "FAKE1234567890AB"].join("_");
@@ -134,6 +135,36 @@ describe("formatSessionDumpText credential scrub", () => {
 		expect(dumped).toContain("«redacted»");
 		expect(dumped).not.toContain(apiKey);
 		expect(dumped).not.toContain(clientSecret);
+	});
+
+	it("removes a private-key block split across sibling tool arguments and keeps XML well formed", () => {
+		const firstSecretPart = "MIIEowIB";
+		const secondSecretPart = "AAKCAQEAxGZ0000";
+		const dumped = dump([
+			assistant(
+				[
+					{
+						type: "toolCall",
+						id: "call-split-private-key",
+						name: "request",
+						arguments: {
+							first: `before -----BEGIN RSA PRIVATE KEY-----\n${firstSecretPart}`,
+							second: `${secondSecretPart}\n-----END RSA PRIVATE KEY----- after`,
+						},
+					},
+				],
+				1,
+			),
+		] as AgentMessage[]);
+
+		expect(dumped).toContain("before");
+		expect(dumped).toContain("after");
+		expect(dumped).toContain("«redacted-private-key»");
+		expect(dumped).not.toContain(firstSecretPart);
+		expect(dumped).not.toContain(secondSecretPart);
+		expect(dumped).not.toContain("-----BEGIN RSA PRIVATE KEY-----");
+		expect(dumped).not.toContain("-----END RSA PRIVATE KEY-----");
+		expect(XMLValidator.validate(`<dump>${dumped}</dump>`)).toBe(true);
 	});
 
 	it("keeps an ordinary sentence in the session dump", () => {

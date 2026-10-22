@@ -117,12 +117,13 @@ function formatArgsAsXml(args: Record<string, unknown>, indent = "\t", redactCre
 			parts.push(`${indent}<parameter name="${escapedKey}">${text}</parameter>`);
 		}
 	}
-	return parts.join("\n");
+	return redactCrashSecrets(parts.join("\n"));
 }
 
 /**
  * Format messages and session metadata as markdown/plain text (same shape as /dump clipboard export).
- * Each source field is scrubbed before serialization so private-key banners cannot pair across messages.
+ * Text runs and tool-argument sections are scrubbed within their message/tool boundaries so
+ * private-key banners cannot pair across unrelated messages or tool calls.
  */
 export function formatSessionDumpText(options: FormatSessionDumpTextOptions): string {
 	const lines: string[] = [];
