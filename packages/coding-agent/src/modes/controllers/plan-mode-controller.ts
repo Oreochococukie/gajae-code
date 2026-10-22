@@ -13,7 +13,7 @@ import planModeCompactInstructionsPrompt from "../../prompts/system/plan-mode-co
 };
 import type { AgentSession, TemporaryProviderSessionScope } from "../../session/agent-session";
 import type { SessionContext, SessionManager } from "../../session/session-manager";
-import { writeFileAtomically } from "../../tools/atomic-file-write";
+import { canonicalWindowsPathWithin, writeFileAtomically } from "../../tools/atomic-file-write";
 import { normalizeLocalScheme } from "../../tools/path-utils";
 import { type ResolveToolDetails, runResolveInvocation } from "../../tools/resolve";
 import { ToolError } from "../../tools/tool-errors";
@@ -35,7 +35,9 @@ const ABORT_TIMEOUT_MS = INTERACTIVE_ABORT_CLEANUP_TIMEOUT_MS;
 
 /** Whether `candidate` stays inside `root` after equivalent-path normalization. */
 export function planEditorTargetWithinRoot(root: string, candidate: string): boolean {
-	return pathIsWithin(root, candidate);
+	if (!pathIsWithin(root, candidate)) return false;
+	if (process.platform !== "win32") return true;
+	return canonicalWindowsPathWithin(root, candidate);
 }
 
 async function canonicalPlanEditorPath(resolved: string, trustBoundary: string): Promise<string> {
@@ -45,7 +47,15 @@ async function canonicalPlanEditorPath(resolved: string, trustBoundary: string):
 	} catch (error) {
 		if (!isEnoent(error)) throw error;
 	}
-	if (!planEditorTargetWithinRoot(trustBoundary, real)) {
+	let boundary = trustBoundary;
+	if (process.platform === "win32") {
+		try {
+			boundary = await fs.realpath(trustBoundary);
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+		}
+	}
+	if (!planEditorTargetWithinRoot(boundary, real)) {
 		throw new Error(`plan path '${resolved}' resolves outside trust boundary '${trustBoundary}'`);
 	}
 	return real;

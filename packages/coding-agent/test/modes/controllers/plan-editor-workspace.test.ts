@@ -270,6 +270,66 @@ describe("plan editor workspace root", () => {
 		},
 	);
 
+	it("refuses a case-only Windows sibling under a canonical root", async () => {
+		const { canonicalWindowsPathWithin } = await import("../../../src/tools/atomic-file-write");
+		expect(canonicalWindowsPathWithin("C:\\session\\local", "C:\\session\\Local\\PLAN.md")).toBe(false);
+		expect(canonicalWindowsPathWithin("C:\\session\\local", "C:\\session\\local\\PLAN.md")).toBe(true);
+		expect(canonicalWindowsPathWithin("C:\\", "C:\\workspace\\PLAN.md")).toBe(true);
+		expect(canonicalWindowsPathWithin("C:\\session\\local", "C:\\Session\\local\\PLAN.md")).toBe(false);
+	});
+
+	it.skipIf(process.platform !== "win32")(
+		"refuses a local symlink whose real path is a case-only sibling",
+		async () => {
+			const { canonicalWindowsPathWithin, pathIsWithin, writeFileAtomically } = await import(
+				"../../../src/tools/atomic-file-write"
+			);
+			const { planEditorTargetWithinRoot } = await import("../../../src/modes/controllers/plan-mode-controller");
+			expect(pathIsWithin("C:\\session\\Local\\PLAN.md", "C:\\session\\local")).toBe(false);
+			expect(pathIsWithin("C:\\session\\local\\PLAN.md", "C:\\session\\local")).toBe(true);
+			expect(pathIsWithin("C:\\workspace\\PLAN.md", "C:\\")).toBe(true);
+			expect(planEditorTargetWithinRoot("C:\\session\\local", "C:\\session\\Local\\PLAN.md")).toBe(false);
+			expect(planEditorTargetWithinRoot("C:\\session\\local", "C:\\session\\local\\PLAN.md")).toBe(true);
+			const parent = await fs.mkdtemp(path.join(os.tmpdir(), "plan-editor-case-"));
+			const root = path.join(parent, "local");
+			const sibling = path.join(parent, "Local");
+			try {
+				await fs.mkdir(root);
+				let distinct = false;
+				try {
+					await fs.mkdir(sibling);
+					distinct = (await fs.realpath(root)) !== (await fs.realpath(sibling));
+				} catch (error) {
+					const code = (error as NodeJS.ErrnoException).code;
+					if (code !== "EEXIST") throw error;
+				}
+				if (!distinct) {
+					expect(canonicalWindowsPathWithin(root, path.join(sibling, "PLAN.md"))).toBe(false);
+					return;
+				}
+				const secret = path.join(sibling, "secret.txt");
+				await fs.writeFile(secret, "secret\n");
+				const link = path.join(root, "PLAN.md");
+				try {
+					await fs.symlink(secret, link);
+				} catch (error) {
+					const code = (error as NodeJS.ErrnoException).code;
+					if (code === "EPERM") return;
+					throw error;
+				}
+				await expect(writeFileAtomically(link, "pwned\n", { trustBoundary: root })).rejects.toThrow(
+					/outside trust boundary/,
+				);
+				expect(await fs.readFile(secret, "utf8")).toBe("secret\n");
+				const kept = path.join(root, "kept.txt");
+				await writeFileAtomically(kept, "kept\n", { trustBoundary: root });
+				expect(await fs.readFile(kept, "utf8")).toBe("kept\n");
+			} finally {
+				await fs.rm(parent, { recursive: true, force: true });
+			}
+		},
+	);
+
 	it("property: in-root plan names stay inside and parent escapes do not, seed 41420, 64 inputs", async () => {
 		const { pathIsWithin } = await import("../../../src/tools/atomic-file-write");
 		fc.assert(
