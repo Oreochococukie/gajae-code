@@ -4,6 +4,7 @@
 import type { AgentMessage, ThinkingLevel } from "@gajae-code/agent-core";
 import { INTENT_FIELD } from "@gajae-code/agent-core";
 import type { AssistantMessage, Model } from "@gajae-code/ai/core";
+import { redactCrashSecrets } from "@gajae-code/utils";
 import { buildCacheEconomicsWarning, type CacheWarningBuildState } from "./cache-economics";
 import {
 	type BashExecutionMessage,
@@ -102,6 +103,7 @@ function formatArgsAsXml(args: Record<string, unknown>, indent = "\t"): string {
 
 /**
  * Format messages and session metadata as markdown/plain text (same as AgentSession.formatSessionAsText / /dump).
+ * Credential-shaped tokens are scrubbed before the text is returned.
  */
 export function formatSessionDumpText(options: FormatSessionDumpTextOptions): string {
 	const lines: string[] = [];
@@ -252,5 +254,5 @@ export function formatSessionDumpText(options: FormatSessionDumpTextOptions): st
 		}
 	}
 
-	return lines.join("\n").trim();
+	return redactCrashSecrets(lines.join("\n")).trim();
 }
