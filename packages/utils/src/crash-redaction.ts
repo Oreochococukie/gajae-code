@@ -284,6 +284,75 @@ export function isCredentialKey(key: string): boolean {
 }
 
 /**
+ * Redact credential values in JSON-like data before serialization.
+ * `key` lets callers preserve credential-field context when formatting one value.
+ */
+export function redactStructuredSecrets(value: unknown, key?: string): unknown {
+	if (key !== undefined && isCredentialKey(key)) return "«redacted»";
+	if (typeof value === "string") return redactCrashSecrets(value);
+	if (Array.isArray(value)) {
+		const isFlatKeyValueArray =
+			value.length > 0 &&
+			value.length % 2 === 0 &&
+			value.every((item, index) => index % 2 === 1 || typeof item === "string");
+		if (isFlatKeyValueArray) {
+			return value.map((item, index) => {
+				if (index % 2 === 1) {
+					const field = value[index - 1];
+					if (typeof field === "string" && isCredentialKey(field)) return "«redacted»";
+				}
+				return redactStructuredSecrets(item);
+			});
+		}
+		return value.map(item => redactStructuredSecrets(item));
+	}
+	if (value === null || typeof value !== "object") return value;
+
+	const source = value as Record<string, unknown>;
+	const sourceKeys = Object.keys(source);
+	let hasCredentialHeaderName = false;
+	let hasHeaderValue = false;
+	for (const field of sourceKeys) {
+		const normalized = field.toLowerCase();
+		if (normalized === "value" || normalized === "values") hasHeaderValue = true;
+		if (normalized !== "name" && normalized !== "key") continue;
+		const headerName = source[field];
+		if (typeof headerName === "string" && isCredentialKey(headerName)) hasCredentialHeaderName = true;
+	}
+	const redactHeaderValue = hasCredentialHeaderName && hasHeaderValue;
+	const redacted = Object.create(null) as Record<string, unknown>;
+	const nextSuffixByKey = new Map<string, number>();
+	for (const field of sourceKeys) {
+		const redactedKey = uniqueStructuredKey(redacted, redactCrashSecrets(field), nextSuffixByKey);
+		const normalized = field.toLowerCase();
+		if (redactHeaderValue && (normalized === "value" || normalized === "values")) {
+			const headerValue = source[field];
+			redacted[redactedKey] =
+				normalized === "values" && Array.isArray(headerValue) ? headerValue.map(() => "«redacted»") : "«redacted»";
+		} else {
+			redacted[redactedKey] = redactStructuredSecrets(source[field], field);
+		}
+	}
+	return redacted;
+}
+
+function uniqueStructuredKey(
+	target: Record<string, unknown>,
+	key: string,
+	nextSuffixByKey: Map<string, number>,
+): string {
+	if (!Object.hasOwn(target, key)) return key;
+	let suffix = nextSuffixByKey.get(key) ?? 2;
+	let candidate = `${key}#${suffix}`;
+	while (Object.hasOwn(target, candidate)) {
+		suffix += 1;
+		candidate = `${key}#${suffix}`;
+	}
+	nextSuffixByKey.set(key, suffix + 1);
+	return candidate;
+}
+
+/**
  * Scrub credential material from crash text before it is persisted.
  * Covers bearer/basic-style headers, key=value or JSON key forms of common
  * credential names, and well-known vendor token shapes. Normal messages and

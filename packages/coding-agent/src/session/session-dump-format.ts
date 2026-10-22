@@ -4,7 +4,7 @@
 import type { AgentMessage, ThinkingLevel } from "@gajae-code/agent-core";
 import { INTENT_FIELD } from "@gajae-code/agent-core";
 import type { AssistantMessage, Model } from "@gajae-code/ai/core";
-import { redactCrashSecrets } from "@gajae-code/utils";
+import { redactCrashSecrets, redactStructuredSecrets } from "@gajae-code/utils";
 import { buildCacheEconomicsWarning, type CacheWarningBuildState } from "./cache-economics";
 import {
 	type BashExecutionMessage,
@@ -49,6 +49,17 @@ function stripTypeBoxFields(obj: unknown): unknown {
 	return obj;
 }
 
+function redactStringValues(value: unknown): unknown {
+	if (typeof value === "string") return redactCrashSecrets(value);
+	if (Array.isArray(value)) return value.map(redactStringValues);
+	if (value === null || typeof value !== "object") return value;
+	const redacted = Object.create(null) as Record<string, unknown>;
+	for (const [key, nested] of Object.entries(value)) {
+		redacted[key] = redactStringValues(nested);
+	}
+	return redacted;
+}
+
 function escapeXmlAttribute(input: string): string {
 	return input.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
@@ -82,12 +93,13 @@ function formatParameterValue(value: unknown): string {
 }
 
 /** Serialize an object as XML parameter elements, one per key. */
-function formatArgsAsXml(args: Record<string, unknown>, indent = "\t"): string {
+function formatArgsAsXml(args: Record<string, unknown>, indent = "\t", redactCredentialKeys = true): string {
 	const parts: string[] = [];
 	for (const [key, value] of Object.entries(args)) {
 		if (key === INTENT_FIELD) continue;
-		const escapedKey = escapeXmlAttribute(key);
-		const text = formatParameterValue(value);
+		const escapedKey = escapeXmlAttribute(redactCrashSecrets(key));
+		const safeValue = redactCredentialKeys ? redactStructuredSecrets(value, key) : redactStringValues(value);
+		const text = redactCrashSecrets(formatParameterValue(safeValue));
 		if (text.includes("\n")) {
 			const indentedText = text
 				.split("\n")
@@ -102,8 +114,8 @@ function formatArgsAsXml(args: Record<string, unknown>, indent = "\t"): string {
 }
 
 /**
- * Format messages and session metadata as markdown/plain text (same as AgentSession.formatSessionAsText / /dump).
- * Credential-shaped tokens are scrubbed before the text is returned.
+ * Format messages and session metadata as markdown/plain text (same shape as /dump clipboard export).
+ * Each source field is scrubbed before serialization so private-key banners cannot pair across messages.
  */
 export function formatSessionDumpText(options: FormatSessionDumpTextOptions): string {
 	const lines: string[] = [];
@@ -115,7 +127,7 @@ export function formatSessionDumpText(options: FormatSessionDumpTextOptions): st
 			if (systemPrompt.length > 1) {
 				lines.push(`### System Prompt ${index + 1}\n`);
 			}
-			lines.push(systemPrompt[index]);
+			lines.push(redactCrashSecrets(systemPrompt[index]));
 			lines.push("\n");
 		}
 	}
@@ -123,18 +135,20 @@ export function formatSessionDumpText(options: FormatSessionDumpTextOptions): st
 	const model = options.model;
 	const thinkingLevel = options.thinkingLevel;
 	lines.push("## Configuration\n");
-	lines.push(`Model: ${model ? `${model.provider}/${model.id}` : "(not selected)"}`);
-	lines.push(`Thinking Level: ${thinkingLevel ?? ""}`);
+	lines.push(
+		`Model: ${model ? `${redactCrashSecrets(model.provider)}/${redactCrashSecrets(model.id)}` : "(not selected)"}`,
+	);
+	lines.push(`Thinking Level: ${redactCrashSecrets(String(thinkingLevel ?? ""))}`);
 	lines.push("\n");
 
 	const tools = options.tools ?? [];
 	if (tools.length > 0) {
 		lines.push("## Available Tools\n");
 		for (const tool of tools) {
-			lines.push(`<tool name="${tool.name}">`);
-			lines.push(tool.description);
+			lines.push(`<tool name="${redactCrashSecrets(tool.name)}">`);
+			lines.push(redactCrashSecrets(tool.description));
 			const parametersClean = stripTypeBoxFields(tool.parameters);
-			lines.push(`\nParameters:\n${formatArgsAsXml(parametersClean as Record<string, unknown>)}`);
+			lines.push(`\nParameters:\n${formatArgsAsXml(parametersClean as Record<string, unknown>, "\t", false)}`);
 			lines.push("<" + "/tool>\n");
 		}
 		lines.push("\n");
@@ -145,11 +159,11 @@ export function formatSessionDumpText(options: FormatSessionDumpTextOptions): st
 		if (msg.role === "user" || msg.role === "developer") {
 			lines.push(msg.role === "developer" ? "## Developer\n" : "## User\n");
 			if (typeof msg.content === "string") {
-				lines.push(msg.content);
+				lines.push(redactCrashSecrets(msg.content));
 			} else {
 				for (const c of msg.content) {
 					if (c.type === "text") {
-						lines.push(c.text);
+						lines.push(redactCrashSecrets(c.text));
 					} else if (c.type === "image") {
 						lines.push("[Image]");
 					}
@@ -162,14 +176,14 @@ export function formatSessionDumpText(options: FormatSessionDumpTextOptions): st
 
 			for (const c of assistantMsg.content) {
 				if (c.type === "text") {
-					lines.push(c.text);
+					lines.push(redactCrashSecrets(c.text));
 				} else if (c.type === "thinking") {
 					if (c.thinking.trim().length === 0) continue;
 					lines.push("<thinking>");
-					lines.push(c.thinking);
+					lines.push(redactCrashSecrets(c.thinking));
 					lines.push("</thinking>\n");
 				} else if (c.type === "toolCall") {
-					lines.push(`<invoke name="${c.name}">`);
+					lines.push(`<invoke name="${redactCrashSecrets(c.name)}">`);
 					if (c.arguments && typeof c.arguments === "object") {
 						lines.push(formatArgsAsXml(c.arguments as Record<string, unknown>));
 					}
@@ -178,18 +192,18 @@ export function formatSessionDumpText(options: FormatSessionDumpTextOptions): st
 			}
 			const cacheWarning = buildCacheEconomicsWarning(assistantMsg.usage, model, cacheWarningState);
 			if (cacheWarning) {
-				lines.push(cacheWarning);
+				lines.push(redactCrashSecrets(cacheWarning));
 			}
 			lines.push("");
 		} else if (msg.role === "toolResult") {
-			lines.push(`### Tool Result: ${msg.toolName}`);
+			lines.push(`### Tool Result: ${redactCrashSecrets(msg.toolName)}`);
 			if (msg.isError) {
 				lines.push("(error)");
 			}
 			for (const c of msg.content) {
 				if (c.type === "text") {
 					lines.push("```");
-					lines.push(c.text);
+					lines.push(redactCrashSecrets(c.text));
 					lines.push("```");
 				} else if (c.type === "image") {
 					lines.push("[Image output]");
@@ -200,25 +214,25 @@ export function formatSessionDumpText(options: FormatSessionDumpTextOptions): st
 			const bashMsg = msg as BashExecutionMessage;
 			if (!bashMsg.excludeFromContext) {
 				lines.push("## Bash Execution\n");
-				lines.push(bashExecutionToText(bashMsg));
+				lines.push(bashExecutionToText(redactStructuredSecrets(bashMsg) as BashExecutionMessage));
 				lines.push("\n");
 			}
 		} else if (msg.role === "pythonExecution") {
 			const pythonMsg = msg as PythonExecutionMessage;
 			if (!pythonMsg.excludeFromContext) {
 				lines.push("## Python Execution\n");
-				lines.push(pythonExecutionToText(pythonMsg));
+				lines.push(pythonExecutionToText(redactStructuredSecrets(pythonMsg) as PythonExecutionMessage));
 				lines.push("\n");
 			}
 		} else if (msg.role === "custom" || msg.role === "hookMessage") {
 			const customMsg = msg as CustomMessage | HookMessage;
-			lines.push(`## ${customMsg.customType}\n`);
+			lines.push(`## ${redactCrashSecrets(customMsg.customType)}\n`);
 			if (typeof customMsg.content === "string") {
-				lines.push(customMsg.content);
+				lines.push(redactCrashSecrets(customMsg.content));
 			} else {
 				for (const c of customMsg.content) {
 					if (c.type === "text") {
-						lines.push(c.text);
+						lines.push(redactCrashSecrets(c.text));
 					} else if (c.type === "image") {
 						lines.push("[Image]");
 					}
@@ -228,22 +242,22 @@ export function formatSessionDumpText(options: FormatSessionDumpTextOptions): st
 		} else if (msg.role === "branchSummary") {
 			const branchMsg = msg as BranchSummaryMessage;
 			lines.push("## Branch Summary\n");
-			lines.push(`(from branch: ${branchMsg.fromId})\n`);
-			lines.push(branchMsg.summary);
+			lines.push(`(from branch: ${redactCrashSecrets(branchMsg.fromId)})\n`);
+			lines.push(redactCrashSecrets(branchMsg.summary));
 			lines.push("\n");
 		} else if (msg.role === "compactionSummary") {
 			const compactMsg = msg as CompactionSummaryMessage;
 			lines.push("## Compaction Summary\n");
 			lines.push(`(${compactMsg.tokensBefore} tokens before compaction)\n`);
-			lines.push(compactMsg.summary);
+			lines.push(redactCrashSecrets(compactMsg.summary));
 			lines.push("\n");
 		} else if (msg.role === "fileMention") {
 			const fileMsg = msg as FileMentionMessage;
 			lines.push("## File Mention\n");
 			for (const file of fileMsg.files) {
-				lines.push(`<file path="${file.path}">`);
+				lines.push(`<file path="${redactCrashSecrets(file.path)}">`);
 				if (file.content) {
-					lines.push(file.content);
+					lines.push(redactCrashSecrets(file.content));
 				}
 				if (file.image) {
 					lines.push("[Image attached]");
@@ -254,5 +268,5 @@ export function formatSessionDumpText(options: FormatSessionDumpTextOptions): st
 		}
 	}
 
-	return redactCrashSecrets(lines.join("\n")).trim();
+	return lines.join("\n").trim();
 }

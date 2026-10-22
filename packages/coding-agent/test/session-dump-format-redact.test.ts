@@ -109,6 +109,33 @@ describe("formatSessionDumpText credential scrub", () => {
 		expect(dumped).toContain("system with");
 	});
 
+	it("redacts opaque values under credential-labeled tool argument keys", () => {
+		const apiKey = "opaque-api-key-value";
+		const clientSecret = "opaque-client-secret-value";
+		const dumped = dump([
+			assistant(
+				[
+					{
+						type: "toolCall",
+						id: "call-credentials",
+						name: "request",
+						arguments: {
+							api_key: apiKey,
+							settings: { clientSecret },
+						},
+					},
+				],
+				1,
+			),
+		] as AgentMessage[]);
+
+		expect(dumped).toContain('name="api_key"');
+		expect(dumped).toContain("clientSecret");
+		expect(dumped).toContain("«redacted»");
+		expect(dumped).not.toContain(apiKey);
+		expect(dumped).not.toContain(clientSecret);
+	});
+
 	it("keeps an ordinary sentence in the session dump", () => {
 		const sentence = "The ordinary sentence remains.";
 		const dumped = dump(
@@ -169,6 +196,22 @@ describe("formatSessionDumpText credential scrub", () => {
 		expect(dumped).not.toContain(secret);
 		expect(dumped).not.toContain("-----BEGIN RSA PRIVATE KEY-----");
 		expect(dumped).not.toContain("-----END RSA PRIVATE KEY-----");
+	});
+
+	it("does not pair private-key banners across separate session messages", () => {
+		const opening = "first message -----BEGIN PRIVATE KEY-----";
+		const middle = "unrelated message content remains";
+		const closing = "-----END PRIVATE KEY----- last message";
+		const dumped = dump([
+			{ role: "user", content: opening, timestamp: 1 },
+			{ role: "user", content: middle, timestamp: 2 },
+			{ role: "user", content: closing, timestamp: 3 },
+		]);
+
+		expect(dumped).toContain(opening);
+		expect(dumped).toContain(middle);
+		expect(dumped).toContain(closing);
+		expect(dumped).not.toContain("«redacted-private-key»");
 	});
 
 	it("keeps a certificate banner in the session dump", () => {
