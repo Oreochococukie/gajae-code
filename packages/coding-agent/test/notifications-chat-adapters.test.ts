@@ -161,6 +161,75 @@ describe("Discord and Slack notification adapters", () => {
 		}
 	});
 
+	test("still allows an angle link and a slack label with no absolute path", () => {
+		const angle = "<https://example.com/docs>";
+		const slack = "<https://example.com/docs|release notes>";
+		const piped = "https://example.com/docs?q=a|b";
+		const paren = "https://example.com/a(b)/c";
+		const ipv6 = "https://[::1]:8080/a/b";
+		const engine = new NotificationPresentationEngine([createDiscordAdapter(), createSlackAdapter()], {
+			redact: true,
+		});
+		const ask = engine.fanout({
+			type: "action_needed",
+			id: "ask-markup-ok",
+			kind: "ask",
+			sessionId: "session-abcdef",
+			question: `See ${angle} and ${slack} and ${piped}`,
+			options: [angle, slack, paren, ipv6],
+		});
+		for (const text of renderedBodies(ask)) {
+			expect(text).toContain(angle);
+			expect(text).toContain(slack);
+			expect(text).toContain(piped);
+			expect(text).toContain(paren);
+			expect(text).toContain(ipv6);
+			expect(text).not.toContain("<path>");
+		}
+		const frame = engine.fanout({
+			type: "frame",
+			sessionId: "session-abcdef",
+			frame: { type: "context_update", text: `${angle} ${slack}` },
+		});
+		for (const text of renderedBodies(frame)) {
+			expect(text).toContain(angle);
+			expect(text).toContain(slack);
+			expect(text).not.toContain("<path>");
+		}
+	});
+
+	test("masks an absolute path after an angle link and a slack label", () => {
+		const url = "https://example.com/docs";
+		const file = "/home/alice/private.txt";
+		const angle = `<${url}>${file}`;
+		const slack = `<${url}|${file}>`;
+		const engine = new NotificationPresentationEngine([createDiscordAdapter(), createSlackAdapter()], {
+			redact: true,
+		});
+		const ask = engine.fanout({
+			type: "action_needed",
+			id: "ask-markup-path",
+			kind: "ask",
+			sessionId: "session-abcdef",
+			question: angle,
+			options: [slack, angle],
+		});
+		for (const text of renderedBodies(ask)) {
+			expect(text).toContain(url);
+			expect(text).not.toContain(file);
+			expect(text).toContain("<path>");
+		}
+		const frame = engine.fanout({
+			type: "frame",
+			sessionId: "session-abcdef",
+			frame: { type: "context_update", text: `${angle} ${slack}` },
+		});
+		for (const text of renderedBodies(frame)) {
+			expect(text).toContain(url);
+			expect(text).not.toContain(file);
+		}
+	});
+
 	test("masks credentials and absolute paths in Slack and Discord adapter bodies", () => {
 		const homeFile = path.join(os.homedir(), ".gjc", "agent", "settings.json");
 		const transcript = path.join(os.tmpdir(), "transcript-canary.json");
@@ -239,29 +308,34 @@ describe("Discord and Slack notification adapters", () => {
 				fc.constantFrom("example.com", "[::1]", "[::1]:8080"),
 				fc.constantFrom("/a", "/a/b", "/a(b)/c", "/docs"),
 				fc.stringMatching(/^[a-z][a-z0-9]{0,7}$/),
-				(host, urlPath, leaf) => {
+				fc.constantFrom("space", "angle", "slack"),
+				(host, urlPath, leaf, kind) => {
 					const url = `https://${host}${urlPath}`;
 					const file = `/var/notify-canary/${leaf}.json`;
+					const marked =
+						kind === "angle" ? `<${url}>${file}` : kind === "slack" ? `<${url}|${file}>` : `${url} ${file}`;
 					const ask = engine.fanout({
 						type: "action_needed",
 						id: "ask-prop",
 						kind: "ask",
 						sessionId: "session-abcdef",
-						question: `Open ${url} then ${file}`,
-						options: [url, file],
+						question: `Open ${marked}`,
+						options: [marked],
 					});
 					const again = engine.fanout({
 						type: "action_needed",
 						id: "ask-prop",
 						kind: "ask",
 						sessionId: "session-abcdef",
-						question: `Open ${url} then ${file}`,
-						options: [url, file],
+						question: `Open ${marked}`,
+						options: [marked],
 					});
 					expect(renderedBodies(ask)).toEqual(renderedBodies(again));
 					for (const text of renderedBodies(ask)) {
 						expect(text).toContain(url);
 						expect(text).not.toContain(file);
+						expect(text).not.toContain(`>${file}`);
+						expect(text).not.toContain(`|${file}`);
 						expect(text).not.toContain(`<path>${urlPath}`);
 					}
 				},

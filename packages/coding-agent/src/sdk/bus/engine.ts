@@ -3,9 +3,11 @@ import { buildRedactedAction, type RedactableAction } from "./config";
 
 /**
  * Outbound crash scrub (`redactCrashSecrets`, then `replaceAbsolutePaths`).
- * One scanner holds each http(s) URL from scheme:// up to whitespace or a
- * closing quote or backtick. Balanced `()` and `[]` stay inside that span,
- * and nothing inside the span is path-masked. Asks stay answerable.
+ * One scanner holds each http(s) URL from scheme:// up to whitespace, a
+ * closing quote or backtick, or chat markup (`>` or a Slack `|`).
+ * Balanced `()` and `[]` stay inside that span, and nothing inside the span
+ * is path-masked. Text after that markup is still path-masked.
+ * Asks stay answerable.
  * Runs before adapter truncation.
  */
 function redactEgressText(value: string): string {
@@ -28,13 +30,13 @@ function redactEgressText(value: string): string {
 	return replaceAbsolutePaths(shielded).replace(/\uE000(\d+)\uE001/g, (_match, index) => urls[Number(index)] ?? "");
 }
 
-/** End of one URL span. An unmatched `)` or `]` ends the span before that character. */
+/** End of one URL span. An unmatched `)` or `]` ends the span before that character. Chat markup `>` and Slack `|` end it too. */
 function httpUrlEnd(value: string, start: number): number {
 	const stack: string[] = [];
 	let index = start;
 	while (index < value.length) {
 		const ch = value.charAt(index);
-		if (/\s/u.test(ch) || ch === '"' || ch === "'" || ch === "`") break;
+		if (/\s/u.test(ch) || ch === '"' || ch === "'" || ch === "`" || ch === ">" || ch === "|") break;
 		if (ch === "(" || ch === "[") {
 			stack.push(ch);
 			index += 1;
