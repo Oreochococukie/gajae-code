@@ -225,7 +225,8 @@ describe("formatSessionDumpText credential scrub", () => {
 					dumped.includes(after) &&
 					dumped.includes("«redacted-private-key»") &&
 					!dumped.includes(body) &&
-					!dumped.includes(`-----BEGIN ${label}PRIVATE KEY-----`)
+					!dumped.includes(`-----BEGIN ${label}PRIVATE KEY-----`) &&
+					!dumped.includes(`-----END ${label}PRIVATE KEY-----`)
 				);
 			}),
 			{ seed: 81517, numRuns: 64 },
