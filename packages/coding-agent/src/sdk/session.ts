@@ -86,6 +86,7 @@ import { disposeKernelSessionsByOwner } from "../eval/py/executor";
 import type { MasterModeContext } from "../master-mode/context";
 import { describeFoldReceipt } from "../session/fold-coordinator";
 import type { BashRestrictionProfile } from "../tools/bash-allowed-prefixes";
+import { wrapUntrustedContent } from "../tools/fetch";
 import { SearchTool } from "../tools/search";
 import "../discovery";
 import { resolveConfigValue } from "../config/resolve-config-value";
@@ -1240,7 +1241,10 @@ function buildMCPPromptCommands(manager: MCPManager): LoadedCustomCommand[] {
 								}
 							}
 						}
-						return parts.join("\n\n");
+						const body = parts.join("\n\n");
+						// A blank body must stay blank so the prompt entry still rejects it.
+						if (body.trim().length === 0) return body;
+						return wrapUntrustedContent(body);
 					},
 				},
 			});
@@ -2290,6 +2294,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					: existingSession.models.default
 						? [existingSession.models.default]
 						: [];
+		if (
+			startupRegistryMutationAuthorized &&
+			!hasExplicitModel &&
+			hasExistingSession &&
+			defaultModelEntries.length > 0
+		) {
+			// Resume skips startup discovery, so refresh a missing saved provider
+			// before resolution when this session owns authority to mutate the registry.
+			await refreshMissingQualifiedModelProviders(defaultModelEntries, modelRegistry, credentialSessionId);
+		}
 		const persistedProfileName =
 			persistedDefaultChain?.origin === "profile-activation" ? persistedDefaultChain.identity : undefined;
 		const resolvedPersistedProfileName = persistedProfileName
