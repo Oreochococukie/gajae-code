@@ -154,11 +154,7 @@ describe("formatSessionDumpText credential scrub", () => {
 
 	it("removes a complete private-key block from session dump text", () => {
 		const secret = "MIIEowIBAAKCAQEAxGZ0000";
-		const privateKeyBlock = [
-			"-----BEGIN RSA PRIVATE KEY-----",
-			secret,
-			"-----END RSA PRIVATE KEY-----",
-		].join("\n");
+		const privateKeyBlock = ["-----BEGIN RSA PRIVATE KEY-----", secret, "-----END RSA PRIVATE KEY-----"].join("\n");
 		const dumped = dump([
 			{
 				role: "user",
