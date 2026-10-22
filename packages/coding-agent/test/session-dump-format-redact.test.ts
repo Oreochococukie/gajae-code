@@ -154,10 +154,15 @@ describe("formatSessionDumpText credential scrub", () => {
 
 	it("removes a complete private-key block from session dump text", () => {
 		const secret = "MIIEowIBAAKCAQEAxGZ0000";
+		const privateKeyBlock = [
+			"-----BEGIN RSA PRIVATE KEY-----",
+			secret,
+			"-----END RSA PRIVATE KEY-----",
+		].join("\n");
 		const dumped = dump([
 			{
 				role: "user",
-				content: `before -----BEGIN RSA PRIVATE KEY-----\n${secret}\n-----END RSA PRIVATE KEY----- after`,
+				content: `before ${privateKeyBlock} after`,
 				timestamp: 1,
 			},
 		] as AgentMessage[]);
@@ -167,6 +172,7 @@ describe("formatSessionDumpText credential scrub", () => {
 		expect(dumped).toContain("«redacted-private-key»");
 		expect(dumped).not.toContain(secret);
 		expect(dumped).not.toContain("-----BEGIN RSA PRIVATE KEY-----");
+		expect(dumped).not.toContain("-----END RSA PRIVATE KEY-----");
 	});
 
 	it("keeps a certificate banner in the session dump", () => {
