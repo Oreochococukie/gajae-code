@@ -348,15 +348,20 @@ describe("post-merge codex review regressions", () => {
 	});
 
 	it("bounds a slash-only task that names no file", async () => {
+		// One attempt is engine-capped near half a second, so a single call fits the
+		// watchdog on both sides. Repeating the public entry turns that cap into a hang.
 		const watchdogMs = 8_000;
+		const repeats = 60;
 		const moduleHref = new URL("../../src/quick-lane/classify.ts", import.meta.url).href;
 		const childSource = [
 			`const mod = await import(${JSON.stringify(moduleHref)});`,
-			`const dotted = "a.a/".repeat(80000);`,
-			`const slashes = "a/".repeat(100000);`,
-			`for (const text of [dotted, slashes]) {`,
-			`  const decision = mod.classifyQuickLane(text);`,
-			`  if (decision.lane !== "deep" || decision.reasons.length !== 0) process.exit(2);`,
+			`const dotted = "a.a/".repeat(4000);`,
+			`const slashes = "a/".repeat(8000);`,
+			`for (let step = 0; step < ${repeats}; step += 1) {`,
+			`  for (const text of [dotted, slashes]) {`,
+			`    const decision = mod.classifyQuickLane(text);`,
+			`    if (decision.lane !== "deep" || decision.reasons.length !== 0) process.exit(2);`,
+			`  }`,
 			`}`,
 			`process.stdout.write("ok\\n");`,
 		].join("\n");
