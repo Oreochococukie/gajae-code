@@ -158,6 +158,86 @@ describe("AgentSession switchSession plan and goal mode", () => {
 		expect(text).not.toContain("predecessor-plan.md");
 	});
 
+	it("clears plan and goal when transition cleanup fails after the successor is active", async () => {
+		const { session, tempDir } = await createSession();
+		session.setPlanModeState({ enabled: true, planFilePath: "predecessor-plan.md" });
+		session.setGoalModeState({ enabled: true, mode: "active", goal: goal("pred", "PREDECESSOR-GOAL-OBJECTIVE") });
+		const other = await persistOtherSession(tempDir, { mode: "none" });
+		const unregister = session.registerToolSessionTransitionCleanup(() => {
+			throw new Error("switch cleanup boom");
+		});
+		try {
+			await expect(session.switchSession(other)).rejects.toThrow("Tool session transition cleanup failed");
+			expect(path.resolve(session.sessionFile ?? "")).toBe(path.resolve(other));
+			expect(session.getPlanModeState()).toBeUndefined();
+			expect(session.getGoalModeState()).toBeUndefined();
+			expect(session.getSdkConfigItems().mode).toBe("default");
+		} finally {
+			unregister();
+		}
+	});
+
+	it("installs the successor plan when transition cleanup fails", async () => {
+		const { session, tempDir } = await createSession();
+		session.setPlanModeState({ enabled: true, planFilePath: "predecessor-plan.md" });
+		session.setGoalModeState({ enabled: true, mode: "active", goal: goal("pred", "PREDECESSOR-GOAL-OBJECTIVE") });
+		const successorPlan = "successor-plan.md";
+		const other = await persistOtherSession(tempDir, { mode: "plan", planFilePath: successorPlan });
+		const unregister = session.registerToolSessionTransitionCleanup(() => {
+			throw new Error("switch cleanup boom");
+		});
+		try {
+			await expect(session.switchSession(other)).rejects.toThrow("Tool session transition cleanup failed");
+			expect(path.resolve(session.sessionFile ?? "")).toBe(path.resolve(other));
+			expect(session.getPlanModeState()?.planFilePath).toBe(successorPlan);
+			expect(session.getPlanModeState()?.enabled).toBe(true);
+			expect(session.getGoalModeState()).toBeUndefined();
+			expect(session.getSdkConfigItems().mode).toBe("plan");
+		} finally {
+			unregister();
+		}
+	});
+
+	it("installs the successor goal when transition cleanup fails", async () => {
+		const { session, tempDir } = await createSession();
+		session.setPlanModeState({ enabled: true, planFilePath: "predecessor-plan.md" });
+		session.setGoalModeState({ enabled: true, mode: "active", goal: goal("pred", "PREDECESSOR-GOAL-OBJECTIVE") });
+		const successorGoal = "SUCCESSOR-GOAL-OBJECTIVE";
+		const other = await persistOtherSession(tempDir, { mode: "goal", goal: goal("succ", successorGoal) });
+		const unregister = session.registerToolSessionTransitionCleanup(() => {
+			throw new Error("switch cleanup boom");
+		});
+		try {
+			await expect(session.switchSession(other)).rejects.toThrow("Tool session transition cleanup failed");
+			expect(path.resolve(session.sessionFile ?? "")).toBe(path.resolve(other));
+			expect(session.getGoalModeState()?.goal.objective).toBe(successorGoal);
+			expect(session.getGoalModeState()?.enabled).toBe(true);
+			expect(session.getPlanModeState()).toBeUndefined();
+			expect(session.getSdkConfigItems().mode).toBe("default");
+		} finally {
+			unregister();
+		}
+	});
+
+	it("keeps plan and goal when switchSession fails before commit", async () => {
+		const { session, tempDir } = await createSession();
+		const predecessorFile = session.sessionFile;
+		session.setPlanModeState({ enabled: true, planFilePath: "predecessor-plan.md" });
+		session.setGoalModeState({ enabled: true, mode: "active", goal: goal("pred", "PREDECESSOR-GOAL-OBJECTIVE") });
+		const other = await persistOtherSession(tempDir, { mode: "none" });
+		await expect(
+			session.switchSession(other, {
+				onTransitionMutationStarted() {
+					throw new Error("before commit");
+				},
+			}),
+		).rejects.toThrow("before commit");
+		expect(session.sessionFile).toBe(predecessorFile);
+		expect(session.getPlanModeState()?.planFilePath).toBe("predecessor-plan.md");
+		expect(session.getGoalModeState()?.goal.objective).toBe("PREDECESSOR-GOAL-OBJECTIVE");
+		expect(session.getSdkConfigItems().mode).toBe("plan");
+	});
+
 	it("keeps plan and goal context on the current session", async () => {
 		const { session } = await createSession();
 		const planFilePath = "current-plan.md";

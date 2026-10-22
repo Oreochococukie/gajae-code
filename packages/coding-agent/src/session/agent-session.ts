@@ -29269,6 +29269,9 @@ export class AgentSession {
 					await exactRetirement?.commit();
 					transitionCleanupCommitted = true;
 					sessionIdentityCommitted = true;
+					// Bind plan and goal before post-commit cleanup. A cleanup failure
+					// leaves this successor active and must not keep the predecessor slots.
+					this.#rebindSwitchedSessionMode(sessionContext);
 					// A checkpoint count and entry id belong to the predecessor file.
 					// Leaving them armed lets a later rewind slice the successor and
 					// branch it from a missing entry, which falls back to the root.
@@ -29327,7 +29330,6 @@ export class AgentSession {
 						await this.#runToolSessionTransitionCleanups();
 					}
 				}
-				if (switchingToDifferentSession) this.#rebindSwitchedSessionMode(sessionContext);
 				this.#reconnectToAgent();
 				// Fence predecessor continuations before session_switch starts SDK runtime
 				// teardown. The previous runtime waits for those continuations to settle;
