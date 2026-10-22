@@ -7,6 +7,65 @@
  * text goes through `sanitizeExternalCrashV1` instead.
  */
 
+const PEM_BEGIN = "-----BEGIN ";
+const PEM_END = "-----END ";
+const PEM_LABEL = "PRIVATE KEY-----";
+const PEM_MARKER = "«redacted-private-key»";
+
+/** Header or footer end, or -1. The type prefix is only A-Z, digits, and spaces, then the label. */
+function privateKeyMarkerEnd(text: string, at: number, token: string): number {
+	let j = at + token.length;
+	const n = text.length;
+	while (j < n) {
+		if (text.startsWith(PEM_LABEL, j)) return j + PEM_LABEL.length;
+		const c = text.charCodeAt(j);
+		if ((c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c === 32) {
+			j++;
+			continue;
+		}
+		return -1;
+	}
+	return -1;
+}
+
+/**
+ * Replace each complete private-key block in one forward pass.
+ * An opening banner with no footer later in the text is left as-is, and the scan stops.
+ */
+function redactPemPrivateKeys(text: string): string {
+	const parts: string[] = [];
+	let cursor = 0;
+	let i = 0;
+	while (i < text.length) {
+		const start = text.indexOf(PEM_BEGIN, i);
+		if (start < 0) break;
+		const headerEnd = privateKeyMarkerEnd(text, start, PEM_BEGIN);
+		if (headerEnd < 0) {
+			i = start + PEM_BEGIN.length;
+			continue;
+		}
+		let footerEnd = -1;
+		let j = headerEnd;
+		while (j < text.length) {
+			const endAt = text.indexOf(PEM_END, j);
+			if (endAt < 0) break;
+			const candidate = privateKeyMarkerEnd(text, endAt, PEM_END);
+			if (candidate >= 0) {
+				footerEnd = candidate;
+				break;
+			}
+			j = endAt + PEM_END.length;
+		}
+		if (footerEnd < 0) break;
+		parts.push(text.slice(cursor, start), PEM_MARKER);
+		cursor = footerEnd;
+		i = footerEnd;
+	}
+	if (cursor === 0) return text;
+	parts.push(text.slice(cursor));
+	return parts.join("");
+}
+
 /**
  * Scrub credential material from crash text before it is persisted.
  * Covers bearer/basic-style headers, key=value or JSON key forms of common
@@ -35,13 +94,9 @@ export function redactCrashSecrets(text: string): string {
 	// Stripe separates with `_`, so the `sk-` rule above never matched one.
 	redacted = redacted.replace(/\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}\b/g, "«redacted-api-key»");
 	redacted = redacted.replace(/\bhf_[A-Za-z0-9]{20,}\b/g, "«redacted-api-key»");
-	// A PEM block carries the key material itself, so it is redacted whole rather
-	// than line by line. It runs before the narrower rules because they would
-	// otherwise chew on the base64 body and leave a truncated key behind.
-	redacted = redacted.replace(
-		/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
-		"«redacted-private-key»",
-	);
+	// A PEM block carries the key material itself, so it is replaced whole, in one
+	// forward pass, before the narrower rules chew on the base64 body.
+	redacted = redactPemPrivateKeys(redacted);
 	// Google API keys are a fixed 39-character shape that carries no label of its
 	// own, so the labeled-value rule below never sees one.
 	redacted = redacted.replace(

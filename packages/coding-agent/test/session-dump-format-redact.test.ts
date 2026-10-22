@@ -152,6 +152,84 @@ describe("formatSessionDumpText credential scrub", () => {
 		expect(dumped).toContain("earlier");
 	});
 
+	it("removes a complete private-key block from session dump text", () => {
+		const secret = "MIIEowIBAAKCAQEAxGZ0000";
+		const dumped = dump([
+			{
+				role: "user",
+				content: `before -----BEGIN RSA PRIVATE KEY-----\n${secret}\n-----END RSA PRIVATE KEY----- after`,
+				timestamp: 1,
+			},
+		] as AgentMessage[]);
+
+		expect(dumped).toContain("before");
+		expect(dumped).toContain("after");
+		expect(dumped).toContain("«redacted-private-key»");
+		expect(dumped).not.toContain(secret);
+		expect(dumped).not.toContain("-----BEGIN RSA PRIVATE KEY-----");
+	});
+
+	it("keeps a certificate banner in the session dump", () => {
+		const banner = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----";
+		const dumped = dump([{ role: "user", content: banner, timestamp: 1 }] as AgentMessage[]);
+
+		expect(dumped).toContain(banner);
+		expect(dumped).not.toContain("«redacted-private-key»");
+	});
+
+	it("keeps an unclosed private-key banner in the session dump", () => {
+		const banner = "-----BEGIN PRIVATE KEY-----\n";
+		const dumped = dump([{ role: "user", content: `note ${banner.repeat(3)}tail`, timestamp: 1 }] as AgentMessage[]);
+
+		expect(dumped).toContain("note");
+		expect(dumped).toContain(banner);
+		expect(dumped).toContain("tail");
+		expect(dumped).not.toContain("«redacted-private-key»");
+	});
+
+	it("bounds an unclosed private-key banner in the session dump", () => {
+		const banner = "-----BEGIN PRIVATE KEY-----\n";
+		const started = performance.now();
+		const small = dump([{ role: "user", content: banner.repeat(8_000), timestamp: 1 }] as AgentMessage[]);
+		const mid = performance.now();
+		const large = dump([{ role: "user", content: banner.repeat(16_000), timestamp: 1 }] as AgentMessage[]);
+		const elapsed = performance.now() - mid;
+		expect(small).toContain("-----BEGIN PRIVATE KEY-----");
+		expect(large).toContain("-----BEGIN PRIVATE KEY-----");
+		expect(mid - started).toBeLessThan(2_000);
+		expect(elapsed).toBeLessThan(2_000);
+	});
+
+	it("property: a complete private-key block leaves the session dump, seed 81517, 64 inputs", () => {
+		const kind = fc.constantFrom("", "RSA ", "EC ", "OPENSSH ");
+		const letters = (min: number, max: number) =>
+			fc
+				.array(fc.constantFrom(..."abcdefghijklmnopqrstuvwxyz".split("")), { minLength: min, maxLength: max })
+				.map(chars => chars.join(""));
+		const secret = fc
+			.array(fc.constantFrom(..."ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".split("")), { minLength: 8, maxLength: 24 })
+			.map(chars => chars.join(""));
+		fc.assert(
+			fc.property(kind, secret, letters(3, 12), letters(3, 12), (label, body, before, after) => {
+				const dumped = dump([
+					{
+						role: "user",
+						content: `${before} -----BEGIN ${label}PRIVATE KEY-----\n${body}\n-----END ${label}PRIVATE KEY----- ${after}`,
+						timestamp: 1,
+					},
+				] as AgentMessage[]);
+				return (
+					dumped.includes(before) &&
+					dumped.includes(after) &&
+					dumped.includes("«redacted-private-key»") &&
+					!dumped.includes(body) &&
+					!dumped.includes(`-----BEGIN ${label}PRIVATE KEY-----`)
+				);
+			}),
+			{ seed: 81517, numRuns: 64 },
+		);
+	});
+
 	it("property: keeps ordinary prose in the session dump, seed 70413, 64 inputs", () => {
 		const prose = fc
 			.array(fc.constantFrom(..."abcdefghijklmnopqrstuvwxyz".split("")), { minLength: 1, maxLength: 24 })
