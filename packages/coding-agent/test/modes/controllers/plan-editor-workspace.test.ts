@@ -6,6 +6,7 @@ import fc from "fast-check";
 import { PlanModeController } from "../../../src/modes/controllers/plan-mode-controller";
 import type { AgentSession } from "../../../src/session/agent-session";
 import type { SessionManager } from "../../../src/session/session-manager";
+import { pathIsWithin } from "../../../src/tools/atomic-file-write";
 
 const envKeys = ["EDITOR", "VISUAL", "PLAN_EDITOR_BODY", "PLAN_EDITOR_MARKER"] as const;
 const savedEnv = new Map<string, string | undefined>(envKeys.map(key => [key, Bun.env[key]]));
@@ -60,15 +61,27 @@ function controllerFor(root: string, warnings: string[], cwd = root) {
 	return { controller, seen };
 }
 
+const runtimeEditor = `
+import { writeFileSync } from "node:fs";
+const target = process.argv.at(-1);
+const marker = process.env.PLAN_EDITOR_MARKER;
+if (!target || !marker) process.exit(2);
+writeFileSync(target, process.env.PLAN_EDITOR_BODY ?? "");
+writeFileSync(marker, "ran");
+`;
+
 async function installEditor(dir: string, body: string, marker: string): Promise<void> {
-	const script = path.join(dir, "edit-plan.sh");
-	await fs.writeFile(
-		script,
-		'#!/bin/sh\nprintf \'%s\' "$PLAN_EDITOR_BODY" > "$1"\nprintf ran > "$PLAN_EDITOR_MARKER"\n',
-	);
-	await fs.chmod(script, 0o755);
-	Bun.env.EDITOR = script;
-	Bun.env.VISUAL = script;
+	const script = path.join(dir, "edit-plan.mjs");
+	await fs.writeFile(script, runtimeEditor);
+	// A runtime script runs on Windows. A POSIX shell fixture does not.
+	let command = `${process.execPath} ${script}`;
+	if (process.platform === "win32" && (process.execPath.includes(" ") || script.includes(" "))) {
+		const launcher = path.join(dir, "edit-plan.cmd");
+		await fs.writeFile(launcher, `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`);
+		command = launcher;
+	}
+	Bun.env.EDITOR = command;
+	Bun.env.VISUAL = command;
 	Bun.env.PLAN_EDITOR_BODY = body;
 	Bun.env.PLAN_EDITOR_MARKER = marker;
 }
@@ -256,22 +269,22 @@ describe("plan editor workspace root", () => {
 		},
 	);
 
-	it("property: in-root plan names stay inside and parent escapes do not, seed 41420, 64 inputs", async () => {
-		const { planEditorTargetWithinRoot } = await import("../../../src/modes/controllers/plan-mode-controller");
+	it("property: in-root plan names stay inside and parent escapes do not, seed 41420, 64 inputs", () => {
 		fc.assert(
 			fc.property(
 				fc.array(fc.stringMatching(/^[a-z][a-z0-9]{0,6}$/), { minLength: 1, maxLength: 4 }),
 				fc.array(fc.stringMatching(/^[a-z][a-z0-9]{0,6}$/), { minLength: 0, maxLength: 3 }),
 				fc.integer({ min: 1, max: 4 }),
 				(rootSegs, inner, ups) => {
-					const root = path.join("/workspace", ...rootSegs);
+					const root = path.join(path.parse(process.cwd()).root, "workspace", ...rootSegs);
 					const inside = path.join(root, ...inner, "PLAN.md");
 					const escaped = path.resolve(root, ...Array.from({ length: ups }, () => ".."), "OUT.md");
-					expect(planEditorTargetWithinRoot(root, inside)).toBe(true);
-					expect(planEditorTargetWithinRoot(root, path.resolve(inside))).toBe(true);
-					expect(planEditorTargetWithinRoot(root, path.join(inside, "..", "PLAN.md"))).toBe(true);
-					expect(planEditorTargetWithinRoot(root, escaped)).toBe(false);
-					expect(planEditorTargetWithinRoot(root, inside)).toBe(planEditorTargetWithinRoot(root, inside));
+					expect(pathIsWithin(inside, root)).toBe(true);
+					expect(pathIsWithin(path.resolve(inside), root)).toBe(true);
+					expect(pathIsWithin(path.join(inside, "..", "PLAN.md"), root)).toBe(true);
+					expect(pathIsWithin(escaped, root)).toBe(false);
+					expect(pathIsWithin(inside, path.parse(root).root)).toBe(true);
+					expect(pathIsWithin(inside, root)).toBe(pathIsWithin(path.resolve(inside), root));
 				},
 			),
 			{ seed: 41420, numRuns: 64 },

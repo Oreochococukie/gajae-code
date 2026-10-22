@@ -168,7 +168,7 @@ async function resolvePublishPath(dest: string, depth = 0): Promise<ResolvedPubl
 	}
 }
 
-function pathIsWithin(target: string, root: string): boolean {
+export function pathIsWithin(target: string, root: string): boolean {
 	// A prefix check treats the filesystem root as `//`, so a normal child is
 	// rejected. Compare the relative path instead. Callers pass real paths.
 	const relative = path.relative(root, target);
