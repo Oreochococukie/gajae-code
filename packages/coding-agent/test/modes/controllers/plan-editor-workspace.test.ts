@@ -6,7 +6,6 @@ import fc from "fast-check";
 import { PlanModeController } from "../../../src/modes/controllers/plan-mode-controller";
 import type { AgentSession } from "../../../src/session/agent-session";
 import type { SessionManager } from "../../../src/session/session-manager";
-import { pathIsWithin } from "../../../src/tools/atomic-file-write";
 
 const envKeys = ["EDITOR", "VISUAL", "PLAN_EDITOR_BODY", "PLAN_EDITOR_MARKER"] as const;
 const savedEnv = new Map<string, string | undefined>(envKeys.map(key => [key, Bun.env[key]]));
@@ -269,7 +268,8 @@ describe("plan editor workspace root", () => {
 		},
 	);
 
-	it("property: in-root plan names stay inside and parent escapes do not, seed 41420, 64 inputs", () => {
+	it("property: in-root plan names stay inside and parent escapes do not, seed 41420, 64 inputs", async () => {
+		const { pathIsWithin } = await import("../../../src/tools/atomic-file-write");
 		fc.assert(
 			fc.property(
 				fc.array(fc.stringMatching(/^[a-z][a-z0-9]{0,6}$/), { minLength: 1, maxLength: 4 }),
