@@ -198,6 +198,28 @@ describe("formatSessionDumpText credential scrub", () => {
 		expect(dumped).not.toContain("-----END RSA PRIVATE KEY-----");
 	});
 
+	it("removes a private-key block split across adjacent assistant text blocks", () => {
+		const firstSecretPart = "MIIEowIB";
+		const secondSecretPart = "AAKCAQEAxGZ0000";
+		const dumped = dump([
+			assistant(
+				[
+					{ type: "text", text: `before -----BEGIN RSA PRIVATE KEY-----\n${firstSecretPart}` },
+					{ type: "text", text: `${secondSecretPart}\n-----END RSA PRIVATE KEY----- after` },
+				],
+				1,
+			),
+		]);
+
+		expect(dumped).toContain("before");
+		expect(dumped).toContain("after");
+		expect(dumped).toContain("«redacted-private-key»");
+		expect(dumped).not.toContain(firstSecretPart);
+		expect(dumped).not.toContain(secondSecretPart);
+		expect(dumped).not.toContain("-----BEGIN RSA PRIVATE KEY-----");
+		expect(dumped).not.toContain("-----END RSA PRIVATE KEY-----");
+	});
+
 	it("does not pair private-key banners across separate session messages", () => {
 		const opening = "first message -----BEGIN PRIVATE KEY-----";
 		const middle = "unrelated message content remains";

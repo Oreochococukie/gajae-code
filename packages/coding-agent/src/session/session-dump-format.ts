@@ -60,6 +60,13 @@ function redactStringValues(value: unknown): unknown {
 	return redacted;
 }
 
+function takeRedactedTextRun(parts: string[]): string | undefined {
+	if (parts.length === 0) return undefined;
+	const redacted = redactCrashSecrets(parts.join("\n"));
+	parts.length = 0;
+	return redacted;
+}
+
 function escapeXmlAttribute(input: string): string {
 	return input.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
@@ -161,28 +168,38 @@ export function formatSessionDumpText(options: FormatSessionDumpTextOptions): st
 			if (typeof msg.content === "string") {
 				lines.push(redactCrashSecrets(msg.content));
 			} else {
+				const textRun: string[] = [];
 				for (const c of msg.content) {
 					if (c.type === "text") {
-						lines.push(redactCrashSecrets(c.text));
+						textRun.push(c.text);
 					} else if (c.type === "image") {
+						const redactedText = takeRedactedTextRun(textRun);
+						if (redactedText !== undefined) lines.push(redactedText);
 						lines.push("[Image]");
 					}
 				}
+				const redactedText = takeRedactedTextRun(textRun);
+				if (redactedText !== undefined) lines.push(redactedText);
 			}
 			lines.push("\n");
 		} else if (msg.role === "assistant") {
 			const assistantMsg = msg as AssistantMessage;
 			lines.push("## Assistant\n");
 
+			const textRun: string[] = [];
 			for (const c of assistantMsg.content) {
 				if (c.type === "text") {
-					lines.push(redactCrashSecrets(c.text));
+					textRun.push(c.text);
 				} else if (c.type === "thinking") {
 					if (c.thinking.trim().length === 0) continue;
+					const redactedText = takeRedactedTextRun(textRun);
+					if (redactedText !== undefined) lines.push(redactedText);
 					lines.push("<thinking>");
 					lines.push(redactCrashSecrets(c.thinking));
 					lines.push("</thinking>\n");
 				} else if (c.type === "toolCall") {
+					const redactedText = takeRedactedTextRun(textRun);
+					if (redactedText !== undefined) lines.push(redactedText);
 					lines.push(`<invoke name="${redactCrashSecrets(c.name)}">`);
 					if (c.arguments && typeof c.arguments === "object") {
 						lines.push(formatArgsAsXml(c.arguments as Record<string, unknown>));
@@ -190,6 +207,8 @@ export function formatSessionDumpText(options: FormatSessionDumpTextOptions): st
 					lines.push("<" + "/invoke>\n");
 				}
 			}
+			const redactedText = takeRedactedTextRun(textRun);
+			if (redactedText !== undefined) lines.push(redactedText);
 			const cacheWarning = buildCacheEconomicsWarning(assistantMsg.usage, model, cacheWarningState);
 			if (cacheWarning) {
 				lines.push(redactCrashSecrets(cacheWarning));
@@ -200,15 +219,18 @@ export function formatSessionDumpText(options: FormatSessionDumpTextOptions): st
 			if (msg.isError) {
 				lines.push("(error)");
 			}
+			const textRun: string[] = [];
 			for (const c of msg.content) {
 				if (c.type === "text") {
-					lines.push("```");
-					lines.push(redactCrashSecrets(c.text));
-					lines.push("```");
+					textRun.push(c.text);
 				} else if (c.type === "image") {
+					const redactedText = takeRedactedTextRun(textRun);
+					if (redactedText !== undefined) lines.push("```", redactedText, "```");
 					lines.push("[Image output]");
 				}
 			}
+			const redactedText = takeRedactedTextRun(textRun);
+			if (redactedText !== undefined) lines.push("```", redactedText, "```");
 			lines.push("");
 		} else if (msg.role === "bashExecution") {
 			const bashMsg = msg as BashExecutionMessage;
@@ -230,13 +252,18 @@ export function formatSessionDumpText(options: FormatSessionDumpTextOptions): st
 			if (typeof customMsg.content === "string") {
 				lines.push(redactCrashSecrets(customMsg.content));
 			} else {
+				const textRun: string[] = [];
 				for (const c of customMsg.content) {
 					if (c.type === "text") {
-						lines.push(redactCrashSecrets(c.text));
+						textRun.push(c.text);
 					} else if (c.type === "image") {
+						const redactedText = takeRedactedTextRun(textRun);
+						if (redactedText !== undefined) lines.push(redactedText);
 						lines.push("[Image]");
 					}
 				}
+				const redactedText = takeRedactedTextRun(textRun);
+				if (redactedText !== undefined) lines.push(redactedText);
 			}
 			lines.push("\n");
 		} else if (msg.role === "branchSummary") {
