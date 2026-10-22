@@ -9,7 +9,7 @@ import { buildRedactedAction, type RedactableAction } from "./config";
  * is path-masked. Text after that markup is still path-masked.
  * Each span is copied once. The surrounding text is path-masked on its own,
  * so a path glued to a link cannot consume the link.
- * Asks stay answerable.
+ * Ask question and options stay unchanged so distinct choices remain readable.
  * Runs before adapter truncation.
  */
 function redactEgressText(value: string): string {
@@ -156,13 +156,10 @@ export class NotificationPresentationEngine {
 			return { ...event, frame: redactFrameFields(event.frame) };
 		}
 		if (event.type !== "action_needed") return event;
-		const redacted = buildRedactedAction(event, { redact: true });
-		if (event.kind !== "ask") return { ...redacted, type: "action_needed" };
+		// Asks stay fully readable. buildRedactedAction already returns them unchanged.
 		return {
-			...redacted,
+			...buildRedactedAction(event, { redact: true }),
 			type: "action_needed",
-			...(event.question === undefined ? {} : { question: redactEgressText(event.question) }),
-			...(event.options === undefined ? {} : { options: event.options.map(option => redactEgressText(option)) }),
 		};
 	}
 }

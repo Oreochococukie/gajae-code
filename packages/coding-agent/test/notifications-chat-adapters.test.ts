@@ -53,6 +53,32 @@ describe("Discord and Slack notification adapters", () => {
 		]);
 	});
 
+	test("keeps distinct slack ask path choices readable and routable", () => {
+		const prod = "Use /srv/prod";
+		const staging = "Use /srv/staging";
+		const engine = new NotificationPresentationEngine([createDiscordAdapter(), createSlackAdapter()], {
+			redact: true,
+		});
+		const replies: NotificationReplyRoute[] = [];
+		engine.connectSession("session-abcdef", { sendReply: route => replies.push(route) });
+		const payloads = engine.fanout({
+			type: "action_needed",
+			id: "ask-paths",
+			kind: "ask",
+			sessionId: "session-abcdef",
+			question: "Which root?",
+			options: [prod, staging],
+		});
+		const slackBody = payloads.find(payload => payload.adapter === "slack")!.body as { text: string };
+		expect(slackBody.text).toContain(`1. ${prod}`);
+		expect(slackBody.text).toContain(`2. ${staging}`);
+		expect(slackBody.text).not.toContain("<path>");
+		expect(engine.routeInbound("slack", { sessionId: "session-abcdef", actionId: "ask-paths", text: prod })).toBe(
+			true,
+		);
+		expect(replies).toEqual([{ sessionId: "session-abcdef", actionId: "ask-paths", answer: prod }]);
+	});
+
 	test("redacts public payload boundaries for non-ask events", () => {
 		const engine = new NotificationPresentationEngine([createDiscordAdapter(), createSlackAdapter()], {
 			redact: true,
@@ -244,7 +270,7 @@ describe("Discord and Slack notification adapters", () => {
 		}
 	});
 
-	test("masks a path glued directly before an https url", () => {
+	test("masks a glued path in frame text and leaves the ask readable", () => {
 		const url = "https://example.com/docs";
 		const file = "/home/alice/log";
 		const glued = `Read ${file}(${url})`;
@@ -261,7 +287,7 @@ describe("Discord and Slack notification adapters", () => {
 		});
 		for (const text of renderedBodies(ask)) {
 			expect(text).toContain(url);
-			expect(text).not.toContain(file);
+			expect(text).toContain(file);
 		}
 		const frame = engine.fanout({
 			type: "frame",
@@ -274,7 +300,7 @@ describe("Discord and Slack notification adapters", () => {
 		}
 	});
 
-	test("masks an absolute path after an angle link and a slack label", () => {
+	test("masks a path after chat markup in frame text and leaves the ask readable", () => {
 		const url = "https://example.com/docs";
 		const file = "/home/alice/private.txt";
 		const angle = `<${url}>${file}`;
@@ -291,9 +317,9 @@ describe("Discord and Slack notification adapters", () => {
 			options: [slack, angle],
 		});
 		for (const text of renderedBodies(ask)) {
-			expect(text).toContain(url);
-			expect(text).not.toContain(file);
-			expect(text).toContain("<path>");
+			expect(text).toContain(angle);
+			expect(text).toContain(slack);
+			expect(text).toContain(file);
 		}
 		const frame = engine.fanout({
 			type: "frame",
@@ -306,7 +332,7 @@ describe("Discord and Slack notification adapters", () => {
 		}
 	});
 
-	test("masks credentials and absolute paths in Slack and Discord adapter bodies", () => {
+	test("masks credentials in frame text and leaves ask text readable", () => {
 		const homeFile = path.join(os.homedir(), ".gjc", "agent", "settings.json");
 		const transcript = path.join(os.tmpdir(), "transcript-canary.json");
 		const windowsHome = "C:\\Users\\alice\\.gjc\\settings.json";
@@ -345,16 +371,7 @@ describe("Discord and Slack notification adapters", () => {
 			expect(text).toContain("Ship it");
 			expect(text).toContain(plain);
 			expect(text).toContain(paren);
-			expect(text).toContain(ipv6);
-			expect(text).toContain("example.com/docs");
-			expect(text).not.toContain("user:pass");
-			expect(text).not.toContain(homeFile);
-			expect(text).not.toContain(transcript);
-			expect(text).not.toContain(windowsHome);
-			expect(text).not.toContain(filePath);
-			expect(text).not.toContain("[::1]<path>");
-			expect(text).not.toContain("https://[::1]:8080<path>");
-			for (const secret of secrets) expect(text).not.toContain(secret);
+			for (const secret of secrets) expect(text).toContain(secret.slice(0, 40));
 		}
 		const frame = engine.fanout({
 			type: "frame",
@@ -362,13 +379,15 @@ describe("Discord and Slack notification adapters", () => {
 			frame: {
 				type: "context_update",
 				title: "status",
-				text: `alert ${secrets[5]} at ${filePath} ${ipv6}`,
+				text: `alert ${secrets[5]} at ${filePath} https://user:pass@example.com/docs ${ipv6}`,
 				lastMessage: transcript,
 			},
 		});
 		for (const text of renderedBodies(frame)) {
 			expect(text).toContain("status");
 			expect(text).toContain(ipv6);
+			expect(text).toContain("example.com/docs");
+			expect(text).not.toContain("user:pass");
 			expect(text).not.toContain(secrets[5]);
 			expect(text).not.toContain(filePath);
 			expect(text).not.toContain(transcript);
@@ -398,32 +417,26 @@ describe("Discord and Slack notification adapters", () => {
 								: kind === "glued"
 									? `${file}(${url})`
 									: `${url} ${file}`;
-					const question = `${marker}Open ${marked}`;
-					const ask = engine.fanout({
-						type: "action_needed",
-						id: "ask-prop",
-						kind: "ask",
+					const body = `${marker}Open ${marked}`;
+					const frame = engine.fanout({
+						type: "frame",
 						sessionId: "session-abcdef",
-						question,
-						options: [marked],
+						frame: { type: "context_update", text: body },
 					});
 					const again = engine.fanout({
-						type: "action_needed",
-						id: "ask-prop",
-						kind: "ask",
+						type: "frame",
 						sessionId: "session-abcdef",
-						question,
-						options: [marked],
+						frame: { type: "context_update", text: body },
 					});
-					expect(renderedBodies(ask)).toEqual(renderedBodies(again));
-					for (const text of renderedBodies(ask)) {
+					expect(renderedBodies(frame)).toEqual(renderedBodies(again));
+					for (const text of renderedBodies(frame)) {
 						expect(text).toContain(url);
 						if (marker) expect(text).toContain(marker);
 						expect(text).not.toContain(file);
 						expect(text).not.toContain(`>${file}`);
 						expect(text).not.toContain(`|${file}`);
 						expect(text).not.toContain(`<path>${urlPath}`);
-						expect(text.length).toBeLessThan(question.length * 8);
+						expect(text.length).toBeLessThan(body.length * 8);
 					}
 				},
 			),
