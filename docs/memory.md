@@ -27,10 +27,10 @@ Generated local-memory artifacts are private runtime state, not a public tool or
 | Subcommand            | Effect                                         |
 | --------------------- | ---------------------------------------------- |
 | `view`                | Show the current memory injection payload      |
-| `clear` / `reset`     | Delete every shared-database memory row and memory job, and only the current project's directory. Ambiguous legacy directories remain. |
+| `clear` / `reset`     | Delete every memory row and memory job in the shared database, and only the current project's directory |
 | `enqueue` / `rebuild` | Force consolidation to run at next startup     |
 
-`/memory clear` and `/memory reset` delete every memory row and memory job in the shared local database. Filesystem cleanup removes only the directory for the current project path. They do not remove an older directory name left by the previous path mapping, and they do not limit the database delete to that project. That mapping was not injective, so an old directory name has no safe automatic owner and is not deleted. Generated files there remain until you remove that directory yourself. Backend `clear` follows the same rule for the local store: database rows and memory jobs are cleared globally, and filesystem cleanup is the current project directory only.
+`/memory clear` and `/memory reset` delete every memory row and memory job in the shared local database; the delete is not limited to the current project. Filesystem cleanup removes only the memory directory for the current project path. That directory name replaces `/`, `\`, and `:` with `-`, so project paths that differ only in those characters (for example `/var/proj/alpha` and `/var/proj-alpha`) share one directory, and clearing either removes it. Backend `clear` follows the same rule for the local store.
 
 ## How it works
 

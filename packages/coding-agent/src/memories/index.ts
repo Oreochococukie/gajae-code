@@ -1,5 +1,4 @@
 import type { Database } from "bun:sqlite";
-import { createHash } from "node:crypto";
 import type * as fsNode from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -202,10 +201,9 @@ export async function buildMemoryToolDeveloperInstructions(
  * only the current project's memory directory.
  *
  * Database deletion is not scoped to `cwd`. Filesystem cleanup removes the
- * directory for this project path and leaves an older directory name from the
- * previous path mapping in place. That mapping was not injective, so an old
- * name has no safe automatic owner and must not be deleted here. Generated
- * files under that legacy directory remain for a user-directed cleanup.
+ * directory that `getMemoryRoot(agentDir, cwd)` returns. Project paths that
+ * differ only in `/`, `\`, or `:` versus `-` map to the same directory, so that
+ * shared directory is removed too.
  */
 export async function clearMemoryData(agentDir: string, cwd: string): Promise<void> {
 	const db = openMemoryDb(getAgentDbPath(agentDir));
@@ -215,7 +213,6 @@ export async function clearMemoryData(agentDir: string, cwd: string): Promise<vo
 		closeMemoryDb(db);
 	}
 	// Filesystem cleanup is the current project directory only.
-	// Do not remove an ambiguous legacy directory name.
 	await fs.rm(getMemoryRoot(agentDir, cwd), { recursive: true, force: true });
 }
 
@@ -1278,22 +1275,8 @@ export function getMemoryRoot(agentDir: string, cwd: string): string {
 	return path.join(getMemoriesDir(agentDir), encodeProjectPath(cwd));
 }
 
-const MEMORY_DIR_NAME_MAX_BYTES = 255;
-
 function encodeProjectPath(cwd: string): string {
-	// One leading separator stays stripped so slash-only paths keep their historical directory name.
-	// Percent-encode `%`, `\`, `:`, and `-` before `/` becomes `-`, so those characters cannot alias a slash.
-	const stripped = cwd.replace(/^[/\\]/, "");
-	const encoded = stripped
-		.replace(/%/g, "%25")
-		.replace(/\\/g, "%5C")
-		.replace(/:/g, "%3A")
-		.replace(/-/g, "%2D")
-		.replace(/\//g, "-");
-	const name = `--${encoded}--`;
-	// `%00` is not produced by the percent-encoding above, so the short name cannot alias a normal path.
-	if (Buffer.byteLength(name) <= MEMORY_DIR_NAME_MAX_BYTES) return name;
-	return `--%00${createHash("sha256").update(cwd).digest("hex")}--`;
+	return `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
 }
 
 function unixNow(): number {

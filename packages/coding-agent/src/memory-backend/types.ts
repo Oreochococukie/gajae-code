@@ -50,8 +50,7 @@ export interface MemoryBackend {
 	 * Clear stored memory (`/memory clear`).
 	 * For the local backend, memory rows and memory jobs are deleted from the shared
 	 * database with no project filter, and filesystem cleanup removes only the
-	 * current project's directory. Ambiguous legacy directory names remain for a
-	 * user-directed cleanup, because the previous path mapping was not injective.
+	 * current project's directory.
 	 */
 	clear(agentDir: string, cwd: string, session?: AgentSession): Promise<void>;
 

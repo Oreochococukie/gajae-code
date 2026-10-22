@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getAgentDir, getMemoriesDir, isEnoent } from "@gajae-code/utils";
@@ -13,22 +12,8 @@ function getMemoryRoot(agentDir: string, cwd: string): string {
 	return path.join(getMemoriesDir(agentDir), encodeProjectPath(cwd));
 }
 
-const MEMORY_DIR_NAME_MAX_BYTES = 255;
-
 function encodeProjectPath(cwd: string): string {
-	// One leading separator stays stripped so slash-only paths keep their historical directory name.
-	// Percent-encode `%`, `\`, `:`, and `-` before `/` becomes `-`, so those characters cannot alias a slash.
-	const stripped = cwd.replace(/^[/\\]/, "");
-	const encoded = stripped
-		.replace(/%/g, "%25")
-		.replace(/\\/g, "%5C")
-		.replace(/:/g, "%3A")
-		.replace(/-/g, "%2D")
-		.replace(/\//g, "-");
-	const name = `--${encoded}--`;
-	// `%00` is not produced by the percent-encoding above, so the short name cannot alias a normal path.
-	if (Buffer.byteLength(name) <= MEMORY_DIR_NAME_MAX_BYTES) return name;
-	return `--%00${createHash("sha256").update(cwd).digest("hex")}--`;
+	return `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
 }
 /**
  * Snapshot of memory roots for every registered session, deduped.
