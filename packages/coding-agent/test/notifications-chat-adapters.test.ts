@@ -198,6 +198,82 @@ describe("Discord and Slack notification adapters", () => {
 		}
 	});
 
+	test("still allows an https url glued after a path prefix", () => {
+		const url = "https://example.com/docs";
+		const glued = `Read /home/alice/log(${url})`;
+		const engine = new NotificationPresentationEngine([createDiscordAdapter(), createSlackAdapter()], {
+			redact: true,
+		});
+		const ask = engine.fanout({
+			type: "action_needed",
+			id: "ask-glued-ok",
+			kind: "ask",
+			sessionId: "session-abcdef",
+			question: glued,
+			options: [glued],
+		});
+		for (const text of renderedBodies(ask)) expect(text).toContain(url);
+		const frame = engine.fanout({
+			type: "frame",
+			sessionId: "session-abcdef",
+			frame: { type: "context_update", text: glued },
+		});
+		for (const text of renderedBodies(frame)) expect(text).toContain(url);
+	});
+
+	test("still allows a private-use marker beside an https url", () => {
+		const marker = "\uE0000\uE001";
+		const n = 20;
+		const url = `https://example.com/${"a".repeat(n)}`;
+		const question = `${marker.repeat(n)} ${url}`;
+		const engine = new NotificationPresentationEngine([createDiscordAdapter(), createSlackAdapter()], {
+			redact: true,
+		});
+		const ask = engine.fanout({
+			type: "action_needed",
+			id: "ask-marker",
+			kind: "ask",
+			sessionId: "session-abcdef",
+			question,
+			options: ["Yes"],
+		});
+		for (const text of renderedBodies(ask)) {
+			expect(text).toContain(marker);
+			expect(text).toContain(url);
+			expect(text.length).toBeLessThan(question.length * 4);
+		}
+	});
+
+	test("masks a path glued directly before an https url", () => {
+		const url = "https://example.com/docs";
+		const file = "/home/alice/log";
+		const glued = `Read ${file}(${url})`;
+		const engine = new NotificationPresentationEngine([createDiscordAdapter(), createSlackAdapter()], {
+			redact: true,
+		});
+		const ask = engine.fanout({
+			type: "action_needed",
+			id: "ask-glued-path",
+			kind: "ask",
+			sessionId: "session-abcdef",
+			question: glued,
+			options: [glued],
+		});
+		for (const text of renderedBodies(ask)) {
+			expect(text).toContain(url);
+			expect(text).not.toContain(file);
+		}
+		const frame = engine.fanout({
+			type: "frame",
+			sessionId: "session-abcdef",
+			frame: { type: "context_update", text: glued },
+		});
+		for (const text of renderedBodies(frame)) {
+			expect(text).toContain(url);
+			expect(text).not.toContain(file);
+		}
+	});
+
 	test("masks an absolute path after an angle link and a slack label", () => {
 		const url = "https://example.com/docs";
 		const file = "/home/alice/private.txt";
@@ -308,18 +384,27 @@ describe("Discord and Slack notification adapters", () => {
 				fc.constantFrom("example.com", "[::1]", "[::1]:8080"),
 				fc.constantFrom("/a", "/a/b", "/a(b)/c", "/docs"),
 				fc.stringMatching(/^[a-z][a-z0-9]{0,7}$/),
-				fc.constantFrom("space", "angle", "slack"),
-				(host, urlPath, leaf, kind) => {
-					const url = `https://${host}${urlPath}`;
+				fc.constantFrom("space", "angle", "slack", "glued"),
+				fc.constantFrom("", "\uE0000\uE001"),
+				fc.stringMatching(/^[a-z]{16,32}$/),
+				(host, urlPath, leaf, kind, marker, longTail) => {
+					const url = `https://${host}${urlPath}/${longTail}`;
 					const file = `/var/notify-canary/${leaf}.json`;
 					const marked =
-						kind === "angle" ? `<${url}>${file}` : kind === "slack" ? `<${url}|${file}>` : `${url} ${file}`;
+						kind === "angle"
+							? `<${url}>${file}`
+							: kind === "slack"
+								? `<${url}|${file}>`
+								: kind === "glued"
+									? `${file}(${url})`
+									: `${url} ${file}`;
+					const question = `${marker}Open ${marked}`;
 					const ask = engine.fanout({
 						type: "action_needed",
 						id: "ask-prop",
 						kind: "ask",
 						sessionId: "session-abcdef",
-						question: `Open ${marked}`,
+						question,
 						options: [marked],
 					});
 					const again = engine.fanout({
@@ -327,16 +412,18 @@ describe("Discord and Slack notification adapters", () => {
 						id: "ask-prop",
 						kind: "ask",
 						sessionId: "session-abcdef",
-						question: `Open ${marked}`,
+						question,
 						options: [marked],
 					});
 					expect(renderedBodies(ask)).toEqual(renderedBodies(again));
 					for (const text of renderedBodies(ask)) {
 						expect(text).toContain(url);
+						if (marker) expect(text).toContain(marker);
 						expect(text).not.toContain(file);
 						expect(text).not.toContain(`>${file}`);
 						expect(text).not.toContain(`|${file}`);
 						expect(text).not.toContain(`<path>${urlPath}`);
+						expect(text.length).toBeLessThan(question.length * 8);
 					}
 				},
 			),

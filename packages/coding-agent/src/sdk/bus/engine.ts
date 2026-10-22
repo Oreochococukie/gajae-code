@@ -7,13 +7,14 @@ import { buildRedactedAction, type RedactableAction } from "./config";
  * closing quote or backtick, or chat markup (`>` or a Slack `|`).
  * Balanced `()` and `[]` stay inside that span, and nothing inside the span
  * is path-masked. Text after that markup is still path-masked.
+ * Each span is copied once. The surrounding text is path-masked on its own,
+ * so a path glued to a link cannot consume the link.
  * Asks stay answerable.
  * Runs before adapter truncation.
  */
 function redactEgressText(value: string): string {
 	const scrubbed = redactCrashSecrets(value);
-	const urls: string[] = [];
-	let shielded = "";
+	let out = "";
 	let cursor = 0;
 	for (const match of scrubbed.matchAll(/https?:\/\//gi)) {
 		const start = match.index ?? 0;
@@ -21,13 +22,12 @@ function redactEgressText(value: string): string {
 		const prev = start > 0 ? scrubbed.charAt(start - 1) : "";
 		if (prev !== "" && /[A-Za-z0-9+.-]/.test(prev)) continue;
 		const end = httpUrlEnd(scrubbed, start);
-		shielded += scrubbed.slice(cursor, start);
-		shielded += `\uE000${urls.length}\uE001`;
-		urls.push(scrubbed.slice(start, end));
+		out += replaceAbsolutePaths(scrubbed.slice(cursor, start));
+		out += scrubbed.slice(start, end);
 		cursor = end;
 	}
-	shielded += scrubbed.slice(cursor);
-	return replaceAbsolutePaths(shielded).replace(/\uE000(\d+)\uE001/g, (_match, index) => urls[Number(index)] ?? "");
+	out += replaceAbsolutePaths(scrubbed.slice(cursor));
+	return out;
 }
 
 /** End of one URL span. An unmatched `)` or `]` ends the span before that character. Chat markup `>` and Slack `|` end it too. */
