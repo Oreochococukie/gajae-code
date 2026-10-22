@@ -775,7 +775,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.statusLine.setAutoCompactEnabled(session.autoCompactionEnabled);
 		this.#eventBusUnsubscribers.push(
 			this.session.subscribeCommittedSessionSwitch(() => {
-				if (!this.#stopped) this.#applySwitchedSessionMode();
+				if (this.#stopped) return;
+				return this.#applySwitchedSessionMode();
 			}),
 		);
 
@@ -1742,24 +1743,27 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/** Match plan, goal, and the mode gate to the session a switch just committed. */
-	#applySwitchedSessionMode(): void {
-		const mode = this.sessionManager.buildSessionContext().mode;
+	async #applySwitchedSessionMode(): Promise<void> {
+		const sessionContext = this.sessionManager.buildSessionContext();
+		const mode = sessionContext.mode;
 		const goalState = this.session.getGoalModeState();
-		const planState = this.session.getPlanModeState();
-		const planPaused = mode === "plan_paused";
-		const planEnabled = planState?.enabled === true;
 		this.#modeGate.exit("goal");
 		this.#modeGate.exit("plan");
 		this.#goalModeController.cancelContinuation();
 		this.#goalModeController.setEnabledForCompatibility(goalState?.enabled === true);
 		this.#goalModeController.setPausedForCompatibility(goalState !== undefined && goalState.enabled !== true);
-		this.#planModeController.setEnabledForCompatibility(planEnabled);
-		this.#planModeController.setPausedForCompatibility(planPaused);
-		this.#planModeController.setPlanFilePathForCompatibility(planEnabled ? planState?.planFilePath : undefined);
-		if (goalState) this.#modeGate.enter("goal");
-		else if (planEnabled || planPaused) this.#modeGate.enter("plan");
+		this.#planModeController.setEnabledForCompatibility(false);
+		this.#planModeController.setPausedForCompatibility(false);
+		this.#planModeController.setPlanFilePathForCompatibility(undefined);
+		if (mode === "plan" || mode === "plan_paused") await this.#planModeController.restoreFromSession(sessionContext);
+		else if (goalState) this.#modeGate.enter("goal");
+		const planActive = this.#planModeController.enabled || this.#planModeController.paused;
 		this.#updateGoalModeStatus();
-		this.#updatePlanModeStatus(planEnabled || planPaused ? { enabled: planEnabled, paused: planPaused } : undefined);
+		this.#updatePlanModeStatus(
+			planActive
+				? { enabled: this.#planModeController.enabled, paused: this.#planModeController.paused }
+				: undefined,
+		);
 	}
 
 	/** Restore mode state from session entries on resume. */

@@ -14038,11 +14038,14 @@ export class AgentSession {
 
 	/**
 	 * The loaded session file is the mode source after a switch to a different
-	 * file. A saved goal is installed only when goal mode is enabled.
+	 * file. A saved goal is installed only when goal mode is enabled. A saved
+	 * plan is installed only when plan mode is enabled and tools are available.
 	 */
 	#rebindSwitchedSessionMode(sessionContext: SessionContext): void {
 		const mode = sessionContext.mode;
-		if (mode === "plan") {
+		const planEligible =
+			mode === "plan" && this.settings.get("plan.enabled") && !this.isExplicitEmptyToolSelection();
+		if (planEligible) {
 			const rawPath = sessionContext.modeData?.planFilePath;
 			const planFilePath = typeof rawPath === "string" ? rawPath : "local://PLAN.md";
 			this.setPlanModeState({ enabled: true, planFilePath });

@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent } from "@gajae-code/agent-core";
 import { getBundledModel } from "@gajae-code/ai";
@@ -10,6 +11,8 @@ import { initTheme } from "@gajae-code/coding-agent/modes/theme/theme";
 import { AgentSession } from "@gajae-code/coding-agent/session/agent-session";
 import { AuthStorage } from "@gajae-code/coding-agent/session/auth-storage";
 import { SessionManager } from "@gajae-code/coding-agent/session/session-manager";
+import type { ToolSession } from "@gajae-code/coding-agent/tools";
+import { ResolveTool } from "@gajae-code/coding-agent/tools/resolve";
 import { TempDir } from "@gajae-code/utils";
 import { InteractiveMode } from "../src/modes/interactive-mode";
 
@@ -47,6 +50,7 @@ describe("interactive controllers follow a committed session switch", () => {
 
 	async function createSession(
 		globalSettings?: Parameters<typeof Settings.isolated>[0],
+		options?: { emptyTools?: boolean },
 	): Promise<{ session: AgentSession; mode: InteractiveMode; tempDir: TempDir }> {
 		const tempDir = TempDir.createSync("switch-mode-controllers-");
 		tempDirs.push(tempDir);
@@ -64,7 +68,7 @@ describe("interactive controllers follow a committed session switch", () => {
 			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
 			settings: Settings.isolated({ "compaction.enabled": false, ...globalSettings }),
 			modelRegistry: new ModelRegistry(authStorage),
-			explicitEmptyToolSelection: true,
+			explicitEmptyToolSelection: options?.emptyTools !== false,
 		});
 		sessions.push(session);
 		const mode = new InteractiveMode(session, "test");
@@ -97,25 +101,40 @@ describe("interactive controllers follow a committed session switch", () => {
 		expect(mode.goalModeController.enabled).toBe(true);
 	}
 
-	it("moves the goal controller and gate onto a saved plan", async () => {
+	it("does not activate a saved plan when the tool selection is empty", async () => {
 		const { session, mode, tempDir } = await createSession();
 		await activateGoal(mode);
+		const other = await persistOtherSession(tempDir, { mode: "plan", planFilePath: "successor-plan.md" });
+
+		expect(await session.switchSession(other)).toBe(true);
+		expect(mode.planModeController.enabled).toBe(false);
+		expect(mode.planModeController.paused).toBe(false);
+		expect(session.getPlanModeState()).toBeUndefined();
+		expect(session.peekStandingResolveHandler()).toBeUndefined();
+		expect(mode.goalModeController.enabled).toBe(false);
+	});
+
+	it("rehydrates a saved plan and accepts approval through resolve", async () => {
+		const { session, mode, tempDir } = await createSession(undefined, { emptyTools: false });
 		const planFilePath = "successor-plan.md";
+		fs.writeFileSync(path.join(tempDir.path(), planFilePath), "# Ship the release\n\nDo the work.\n");
 		const other = await persistOtherSession(tempDir, { mode: "plan", planFilePath });
 
 		expect(await session.switchSession(other)).toBe(true);
 		expect(mode.planModeController.enabled).toBe(true);
 		expect(mode.planModeController.planFilePath).toBe(planFilePath);
-		expect(mode.goalModeController.enabled).toBe(false);
-		expect(mode.goalModeController.paused).toBe(false);
-
+		expect(session.peekStandingResolveHandler()).toBeDefined();
+		const tool = new ResolveTool(session as unknown as ToolSession);
+		const result = await tool.execute("plan-approval", { action: "apply", reason: "ready" });
+		expect(result.content).toEqual([{ type: "text", text: "Plan ready for approval." }]);
 		await mode.goalModeController.enter({ objective: "must stay blocked", silent: true });
 		expect(mode.goalModeController.enabled).toBe(false);
 	});
 
 	it("reconciles controllers when cleanup fails after the successor commits", async () => {
-		const { session, mode, tempDir } = await createSession();
+		const { session, mode, tempDir } = await createSession(undefined, { emptyTools: false });
 		await activateGoal(mode);
+		fs.writeFileSync(path.join(tempDir.path(), "cleanup-plan.md"), "# Cleanup plan\n\nStill there.\n");
 		const other = await persistOtherSession(tempDir, { mode: "plan", planFilePath: "cleanup-plan.md" });
 		const unregister = session.registerToolSessionTransitionCleanup(() => {
 			throw new Error("switch cleanup boom");
@@ -124,6 +143,7 @@ describe("interactive controllers follow a committed session switch", () => {
 			await expect(session.switchSession(other)).rejects.toThrow("Tool session transition cleanup failed");
 			expect(mode.planModeController.enabled).toBe(true);
 			expect(mode.planModeController.planFilePath).toBe("cleanup-plan.md");
+			expect(session.peekStandingResolveHandler()).toBeDefined();
 			expect(mode.goalModeController.enabled).toBe(false);
 			await mode.goalModeController.enter({ objective: "must stay blocked", silent: true });
 			expect(mode.goalModeController.enabled).toBe(false);
@@ -165,8 +185,19 @@ describe("interactive controllers follow a committed session switch", () => {
 		expect(mode.planModeController.enabled).toBe(false);
 	});
 
+	it("does not activate plan mode when plan mode is disabled", async () => {
+		const { session, mode, tempDir } = await createSession({ "plan.enabled": false }, { emptyTools: false });
+		const other = await persistOtherSession(tempDir, { mode: "plan", planFilePath: "disabled-plan.md" });
+
+		expect(await session.switchSession(other)).toBe(true);
+		expect(session.getPlanModeState()).toBeUndefined();
+		expect(mode.planModeController.enabled).toBe(false);
+		expect(mode.planModeController.paused).toBe(false);
+		expect(session.peekStandingResolveHandler()).toBeUndefined();
+	});
+
 	it("pauses the plan controller for a saved paused plan", async () => {
-		const { session, mode, tempDir } = await createSession();
+		const { session, mode, tempDir } = await createSession(undefined, { emptyTools: false });
 		await activateGoal(mode);
 		const other = await persistOtherSession(tempDir, { mode: "plan_paused" });
 
