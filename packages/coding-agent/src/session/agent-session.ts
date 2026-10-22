@@ -3031,6 +3031,7 @@ export class AgentSession {
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
 	#eventListeners: AgentSessionEventListener[] = [];
 	#sessionIdentityChangeListeners = new Set<() => void | Promise<void>>();
+	#committedSessionSwitchListeners = new Set<() => void | Promise<void>>();
 	#eventListenerSnapshot: readonly AgentSessionEventListener[] = Object.freeze([]);
 	/** Resolution-time switches that occur before a consumer can subscribe. */
 	#pendingFallbackSwitches: Extract<AgentSessionEvent, { type: "model_fallback_switched" }>[] = [];
@@ -10916,6 +10917,12 @@ export class AgentSession {
 		return () => this.#sessionIdentityChangeListeners.delete(listener);
 	}
 
+	/** Fires after a different-file switch commits, including when later cleanup throws. */
+	subscribeCommittedSessionSwitch(listener: () => void | Promise<void>): () => void {
+		this.#committedSessionSwitchListeners.add(listener);
+		return () => this.#committedSessionSwitchListeners.delete(listener);
+	}
+
 	/**
 	 * Temporarily disconnect from agent events.
 	 * User listeners are preserved and will receive events again after resubscribe().
@@ -14031,8 +14038,7 @@ export class AgentSession {
 
 	/**
 	 * The loaded session file is the mode source after a switch to a different
-	 * file. Predecessor plan/goal slots must not stay live, or the next prompt
-	 * writes them into the successor transcript.
+	 * file. A saved goal is installed only when goal mode is enabled.
 	 */
 	#rebindSwitchedSessionMode(sessionContext: SessionContext): void {
 		const mode = sessionContext.mode;
@@ -14046,20 +14052,11 @@ export class AgentSession {
 			this.#planReferencePath = "local://PLAN.md";
 		}
 
-		if (mode === "goal" || mode === "goal_paused") {
-			const goal = normalizeGoal(sessionContext.modeData?.goal);
-			if (goal) {
-				this.setGoalModeState({
-					enabled: mode === "goal",
-					mode: "active",
-					goal,
-				});
-			} else {
-				this.setGoalModeState(undefined);
-			}
-		} else {
-			this.setGoalModeState(undefined);
-		}
+		const savedGoal =
+			(mode === "goal" || mode === "goal_paused") && this.settings.get("goal.enabled")
+				? normalizeGoal(sessionContext.modeData?.goal)
+				: undefined;
+		this.setGoalModeState(savedGoal ? { enabled: mode === "goal", mode: "active", goal: savedGoal } : undefined);
 		this.#resetInjectedContextSignatures();
 	}
 
@@ -29525,7 +29522,16 @@ export class AgentSession {
 				}
 			}
 			this.#endSessionTransition();
-			if (sessionIdentityCommitted) await this.notifySessionIdentityChanged();
+			if (sessionIdentityCommitted) {
+				for (const listener of [...this.#committedSessionSwitchListeners]) {
+					try {
+						await listener();
+					} catch (error) {
+						logger.warn("Committed session switch listener failed", { error: String(error) });
+					}
+				}
+				await this.notifySessionIdentityChanged();
+			}
 		}
 	}
 

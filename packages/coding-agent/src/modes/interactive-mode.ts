@@ -773,6 +773,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			},
 		});
 		this.statusLine.setAutoCompactEnabled(session.autoCompactionEnabled);
+		this.#eventBusUnsubscribers.push(
+			this.session.subscribeCommittedSessionSwitch(() => {
+				if (!this.#stopped) this.#applySwitchedSessionMode();
+			}),
+		);
 
 		this.hideThinkingBlock = settings.get("hideThinkingBlock");
 
@@ -1734,6 +1739,27 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async #handleGoalSessionEvent(event: AgentSessionEvent): Promise<void> {
 		await this.#goalModeController.handleSessionEvent(event);
+	}
+
+	/** Match plan, goal, and the mode gate to the session a switch just committed. */
+	#applySwitchedSessionMode(): void {
+		const mode = this.sessionManager.buildSessionContext().mode;
+		const goalState = this.session.getGoalModeState();
+		const planState = this.session.getPlanModeState();
+		const planPaused = mode === "plan_paused";
+		const planEnabled = planState?.enabled === true;
+		this.#modeGate.exit("goal");
+		this.#modeGate.exit("plan");
+		this.#goalModeController.cancelContinuation();
+		this.#goalModeController.setEnabledForCompatibility(goalState?.enabled === true);
+		this.#goalModeController.setPausedForCompatibility(goalState !== undefined && goalState.enabled !== true);
+		this.#planModeController.setEnabledForCompatibility(planEnabled);
+		this.#planModeController.setPausedForCompatibility(planPaused);
+		this.#planModeController.setPlanFilePathForCompatibility(planEnabled ? planState?.planFilePath : undefined);
+		if (goalState) this.#modeGate.enter("goal");
+		else if (planEnabled || planPaused) this.#modeGate.enter("plan");
+		this.#updateGoalModeStatus();
+		this.#updatePlanModeStatus(planEnabled || planPaused ? { enabled: planEnabled, paused: planPaused } : undefined);
 	}
 
 	/** Restore mode state from session entries on resume. */

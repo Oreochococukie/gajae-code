@@ -50,7 +50,9 @@ describe("AgentSession switchSession plan and goal mode", () => {
 		for (const tempDir of tempDirs.splice(0)) tempDir.removeSync();
 	});
 
-	async function createSession(): Promise<{ session: AgentSession; tempDir: TempDir }> {
+	async function createSession(
+		globalSettings?: Parameters<typeof Settings.isolated>[0],
+	): Promise<{ session: AgentSession; tempDir: TempDir }> {
 		const tempDir = TempDir.createSync("switch-mode-");
 		tempDirs.push(tempDir);
 		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
@@ -67,7 +69,7 @@ describe("AgentSession switchSession plan and goal mode", () => {
 				}).stream,
 			}),
 			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
-			settings: Settings.isolated({ "compaction.enabled": false }),
+			settings: Settings.isolated({ "compaction.enabled": false, ...globalSettings }),
 			modelRegistry: new ModelRegistry(authStorage),
 		});
 		sessions.push(session);
@@ -136,6 +138,58 @@ describe("AgentSession switchSession plan and goal mode", () => {
 		expect(text).toContain(successorPlan);
 		expect(text).not.toContain("predecessor-plan.md");
 		expect(text).not.toContain("PREDECESSOR-GOAL-OBJECTIVE");
+	});
+
+	it("does not install a saved goal when goal mode is disabled", async () => {
+		const { session, tempDir } = await createSession({ "goal.enabled": false });
+		const predecessorGoal = "PREDECESSOR-GOAL-OBJECTIVE";
+		const successorGoal = "SUCCESSOR-GOAL-OBJECTIVE";
+		session.setPlanModeState({ enabled: true, planFilePath: "predecessor-plan.md" });
+		session.setGoalModeState({ enabled: true, mode: "active", goal: goal("pred", predecessorGoal) });
+		const other = await persistOtherSession(tempDir, { mode: "goal", goal: goal("succ", successorGoal) });
+
+		expect(await session.switchSession(other)).toBe(true);
+		expect(session.getGoalModeState()).toBeUndefined();
+		expect(session.getPlanModeState()).toBeUndefined();
+		expect(session.getSdkConfigItems().mode).toBe("default");
+
+		await session.prompt("hello");
+		const text = messageText(session.messages);
+		expect(text).not.toContain(successorGoal);
+		expect(text).not.toContain(predecessorGoal);
+		expect(
+			session.messages.some(message => message.role === "custom" && message.customType === "goal-mode-context"),
+		).toBe(false);
+	});
+
+	it("leaves a saved goal uninstalled when cleanup fails and goal mode is disabled", async () => {
+		const { session, tempDir } = await createSession({ "goal.enabled": false });
+		session.setGoalModeState({ enabled: true, mode: "active", goal: goal("pred", "PREDECESSOR-GOAL-OBJECTIVE") });
+		const other = await persistOtherSession(tempDir, {
+			mode: "goal",
+			goal: goal("succ", "SUCCESSOR-GOAL-OBJECTIVE"),
+		});
+		const unregister = session.registerToolSessionTransitionCleanup(() => {
+			throw new Error("switch cleanup boom");
+		});
+		try {
+			await expect(session.switchSession(other)).rejects.toThrow("Tool session transition cleanup failed");
+			expect(path.resolve(session.sessionFile ?? "")).toBe(path.resolve(other));
+			expect(session.getGoalModeState()).toBeUndefined();
+			expect(session.getSdkConfigItems().mode).toBe("default");
+		} finally {
+			unregister();
+		}
+	});
+
+	it("keeps an in-memory goal when goal mode is disabled and the session is not switched", async () => {
+		const { session } = await createSession({ "goal.enabled": false });
+		const objective = "CURRENT-GOAL-OBJECTIVE";
+		session.setGoalModeState({ enabled: true, mode: "active", goal: goal("current", objective) });
+
+		await session.prompt("hello");
+		expect(session.getGoalModeState()?.goal.objective).toBe(objective);
+		expect(messageText(session.messages)).toContain(objective);
 	});
 
 	it("installs the switched session goal record", async () => {
