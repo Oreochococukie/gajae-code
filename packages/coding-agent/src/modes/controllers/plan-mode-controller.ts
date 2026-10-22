@@ -78,6 +78,8 @@ type PlanModeControllerContext = {
 	handleClearCommand(): Promise<boolean>;
 	handleCompactCommand(instructions?: string): Promise<CompactionOutcome>;
 	updateEditorChrome(): void;
+	/** Test seam. Production callers keep the process editor command. */
+	getEditorCommand?: () => string | undefined;
 };
 
 /** Owns plan-mode state, model scope, plan review, approval, and restoration. */
@@ -453,7 +455,7 @@ export class PlanModeController {
 		this.ctx.requestRender();
 	}
 	async #openEditor(planFilePath: string): Promise<string | null> {
-		const command = getEditorCommand();
+		const command = this.ctx.getEditorCommand?.() ?? getEditorCommand();
 		if (!command) {
 			this.ctx.showWarning("No editor configured. Set $VISUAL or $EDITOR environment variable.");
 			return null;

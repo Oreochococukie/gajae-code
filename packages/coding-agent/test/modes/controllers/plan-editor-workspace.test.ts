@@ -18,7 +18,7 @@ afterEach(() => {
 	}
 });
 
-function controllerFor(root: string, warnings: string[], cwd = root) {
+function controllerFor(root: string, warnings: string[], cwd = root, editorCommand?: string) {
 	const seen = { preview: null as string | null, edited: null as string | null };
 	const sessionManager = {
 		getArtifactsDir: () => path.join(root, "artifacts"),
@@ -55,6 +55,7 @@ function controllerFor(root: string, warnings: string[], cwd = root) {
 		handleClearCommand: async () => false,
 		handleCompactCommand: async () => "cancelled",
 		updateEditorChrome: () => {},
+		getEditorCommand: editorCommand ? () => editorCommand : undefined,
 	});
 	controller.setEnabledForCompatibility(true);
 	return { controller, seen };
@@ -69,7 +70,7 @@ writeFileSync(target, process.env.PLAN_EDITOR_BODY ?? "");
 writeFileSync(marker, "ran");
 `;
 
-async function installEditor(dir: string, body: string, marker: string): Promise<void> {
+async function installEditor(dir: string, body: string, marker: string): Promise<string> {
 	const script = path.join(dir, "edit-plan.mjs");
 	await fs.writeFile(script, runtimeEditor);
 	// A runtime script runs on Windows. A POSIX shell fixture does not.
@@ -83,13 +84,14 @@ async function installEditor(dir: string, body: string, marker: string): Promise
 	Bun.env.VISUAL = command;
 	Bun.env.PLAN_EDITOR_BODY = body;
 	Bun.env.PLAN_EDITOR_MARKER = marker;
+	return command;
 }
 
 async function approve(root: string, planFilePath: string, body: string) {
 	const marker = path.join(root, "editor-ran");
 	const warnings: string[] = [];
-	await installEditor(root, body, marker);
-	const { controller, seen } = controllerFor(root, warnings);
+	const command = await installEditor(root, body, marker);
+	const { controller, seen } = controllerFor(root, warnings, root, command);
 	await controller.handleApproval({
 		planFilePath,
 		finalPlanFilePath: planFilePath,
@@ -166,8 +168,8 @@ describe("plan editor workspace root", () => {
 			await fs.writeFile(planPath, "original plan\n");
 			const marker = path.join(parent, "editor-ran");
 			const warnings: string[] = [];
-			await installEditor(parent, "updated plan\n", marker);
-			const { controller, seen } = controllerFor(parent, warnings, "/");
+			const command = await installEditor(parent, "updated plan\n", marker);
+			const { controller, seen } = controllerFor(parent, warnings, "/", command);
 			await controller.handleApproval({
 				planFilePath: planPath,
 				finalPlanFilePath: planPath,
@@ -192,8 +194,8 @@ describe("plan editor workspace root", () => {
 				await fs.writeFile(planPath, "original plan\n");
 				const marker = path.join(parent, "editor-ran");
 				const warnings: string[] = [];
-				await installEditor(parent, "updated plan\n", marker);
-				const { controller, seen } = controllerFor(parent, warnings, drive);
+				const command = await installEditor(parent, "updated plan\n", marker);
+				const { controller, seen } = controllerFor(parent, warnings, drive, command);
 				await controller.handleApproval({
 					planFilePath: planPath,
 					finalPlanFilePath: planPath,
