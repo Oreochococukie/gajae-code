@@ -391,7 +391,7 @@ import {
 	type WorkflowRecoveryZeroProgressMemory,
 } from "../gjc-runtime/workflow-recovery-projection";
 import { GoalRuntime } from "../goals/runtime";
-import type { Goal, GoalModeState } from "../goals/state";
+import { normalizeGoal, type Goal, type GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import {
 	buildSkillStopOutput,
@@ -14027,6 +14027,40 @@ export class AgentSession {
 
 	setGoalModeState(state: GoalModeState | undefined): void {
 		this.#applyGoalModeState(state);
+	}
+
+	/**
+	 * The loaded session file is the mode source after a switch to a different
+	 * file. Predecessor plan/goal slots must not stay live, or the next prompt
+	 * writes them into the successor transcript.
+	 */
+	#rebindSwitchedSessionMode(sessionContext: SessionContext): void {
+		const mode = sessionContext.mode;
+		if (mode === "plan") {
+			const rawPath = sessionContext.modeData?.planFilePath;
+			const planFilePath = typeof rawPath === "string" ? rawPath : "local://PLAN.md";
+			this.setPlanModeState({ enabled: true, planFilePath });
+		} else {
+			this.setPlanModeState(undefined);
+			this.#planReferenceSent = false;
+			this.#planReferencePath = "local://PLAN.md";
+		}
+
+		if (mode === "goal" || mode === "goal_paused") {
+			const goal = normalizeGoal(sessionContext.modeData?.goal);
+			if (goal) {
+				this.setGoalModeState({
+					enabled: mode === "goal",
+					mode: "active",
+					goal,
+				});
+			} else {
+				this.setGoalModeState(undefined);
+			}
+		} else {
+			this.setGoalModeState(undefined);
+		}
+		this.#resetInjectedContextSignatures();
 	}
 
 	getWorkflowGateEmitter(): WorkflowGateEmitter | undefined {
@@ -29293,6 +29327,7 @@ export class AgentSession {
 						await this.#runToolSessionTransitionCleanups();
 					}
 				}
+				if (switchingToDifferentSession) this.#rebindSwitchedSessionMode(sessionContext);
 				this.#reconnectToAgent();
 				// Fence predecessor continuations before session_switch starts SDK runtime
 				// teardown. The previous runtime waits for those continuations to settle;
