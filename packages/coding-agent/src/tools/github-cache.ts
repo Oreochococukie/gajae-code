@@ -19,7 +19,7 @@ import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getGithubCacheDbPath, logger } from "@gajae-code/utils";
+import { getGithubCacheDbPath, logger, redactCrashSecrets } from "@gajae-code/utils";
 import type { Settings } from "../config/settings";
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -288,7 +288,11 @@ export function putCached<T = unknown>(input: PutCachedInput<T>): void {
 	if (!db) return;
 	try {
 		const fetchedAt = input.fetchedAt ?? Date.now();
+		// Scrub the full persisted strings before the insert. The live fetch
+		// result is not rewritten here; a later hit reads this scrubbed row.
 		const payloadJson = JSON.stringify(input.payload);
+		const storedPayload = typeof payloadJson === "string" ? redactCrashSecrets(payloadJson) : payloadJson;
+		const sourceUrl = input.sourceUrl ?? null;
 		db.prepare(
 			"INSERT OR REPLACE INTO github_view_cache (auth_key, repo, kind, number, include_comments, fetched_at, payload, rendered, source_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		).run(
@@ -298,9 +302,9 @@ export function putCached<T = unknown>(input: PutCachedInput<T>): void {
 			input.number,
 			input.includeComments ? 1 : 0,
 			fetchedAt,
-			payloadJson,
-			input.rendered,
-			input.sourceUrl ?? null,
+			storedPayload,
+			redactCrashSecrets(input.rendered),
+			sourceUrl === null ? null : redactCrashSecrets(sourceUrl),
 		);
 		protectDbFiles(getGithubCacheDbPath());
 	} catch (err) {
