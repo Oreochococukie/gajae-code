@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import * as path from "node:path";
 import type { ThinkingLevel } from "@gajae-code/agent-core";
-import type { FileType as FileTypeEnum, glob as globFn } from "@gajae-code/natives";
+import { directoryCaseSensitive, type FileType as FileTypeEnum, type glob as globFn } from "@gajae-code/natives";
 import {
 	CONFIG_DIR_NAME,
 	getConfigDirName,
@@ -1666,14 +1666,66 @@ async function resolveIsolatedPluginPath(home: string, value: string): Promise<s
  * must reject, and reusing that result would cross the home boundary.
  */
 
-/**
- * A project registry entry whose installPath resolves inside the project anchor
- * is the repository's own tree. Empty inputs fail closed (treated as inside).
- * Paths outside the anchor, including the user plugin cache, stay loadable.
- */
-export function projectRegistryInstallPathIsInsideAnchor(projectAnchor: string, installPath: string): boolean {
+/** Reject install paths inside the registry owner's tree. Windows components use the parent directory's case rule. */
+export function projectRegistryInstallPathIsInsideAnchor(
+	projectAnchor: string,
+	installPath: string,
+	options?: { platform?: NodeJS.Platform; sensitivity?: (directory: string) => boolean },
+): boolean {
 	if (projectAnchor.trim() === "" || installPath.trim() === "") return true;
-	return pathIsWithin(projectAnchor, installPath);
+	const platform = options?.platform ?? process.platform;
+	if (platform !== "win32") return pathIsWithin(projectAnchor, installPath);
+	const sensitivity = options?.sensitivity ?? windowsDirectoryIsCaseSensitive;
+	return win32PathIsWithin(projectAnchor, installPath, sensitivity);
+}
+
+function windowsDirectoryIsCaseSensitive(directory: string): boolean {
+	let current = directory;
+	while (true) {
+		try {
+			fs.statSync(current);
+			return directoryCaseSensitive(current) === true;
+		} catch {
+			const parent = path.win32.dirname(current);
+			if (parent === current) return false;
+			current = parent;
+		}
+	}
+}
+
+function win32PathIsWithin(root: string, candidate: string, sensitivity: (directory: string) => boolean): boolean {
+	const spell = (input: string) => {
+		const resolved = path.win32.resolve(input);
+		if (process.platform !== "win32") return resolved;
+		try {
+			return fs.realpathSync(resolved);
+		} catch {
+			return resolved;
+		}
+	};
+	const split = (input: string) => {
+		const parsed = path.win32.parse(input);
+		return {
+			volume: parsed.root,
+			parts: input
+				.slice(parsed.root.length)
+				.split(/[\\/]+/)
+				.filter(Boolean),
+		};
+	};
+	const anchor = split(spell(root));
+	const target = split(spell(candidate));
+	if (anchor.volume.toLowerCase() !== target.volume.toLowerCase()) return false;
+	for (let index = 0; index < anchor.parts.length; index++) {
+		const part = target.parts[index];
+		if (part === undefined) return false;
+		const parent = index === 0 ? anchor.volume : path.win32.join(anchor.volume, ...anchor.parts.slice(0, index));
+		const same = sensitivity(parent)
+			? anchor.parts[index] === part
+			: anchor.parts[index].toLowerCase() === part.toLowerCase();
+		if (!same) return false;
+	}
+	return true;
 }
 
 export async function listClaudePluginRoots(

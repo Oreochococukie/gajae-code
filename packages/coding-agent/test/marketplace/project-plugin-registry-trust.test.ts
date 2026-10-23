@@ -227,4 +227,29 @@ describe("projectRegistryInstallPathIsInsideAnchor", () => {
 		expect(projectRegistryInstallPathIsInsideAnchor(anchor, "")).toBe(true);
 		expect(projectRegistryInstallPathIsInsideAnchor("", path.join(anchor, "x"))).toBe(true);
 	});
+
+	test("case-sensitive Windows parent does not fold a different-case sibling", async () => {
+		const { projectRegistryInstallPathIsInsideAnchor } = await import("../../src/discovery/helpers");
+		const anchor = "C:\\work\\Repo";
+		const sibling = "C:\\work\\repo\\plugin-cache";
+		const parentSensitive = (directory: string) => path.win32.normalize(directory) === "C:\\work";
+		expect(
+			projectRegistryInstallPathIsInsideAnchor(anchor, sibling, { platform: "win32", sensitivity: parentSensitive }),
+		).toBe(false);
+		expect(
+			projectRegistryInstallPathIsInsideAnchor(anchor, "C:\\work\\Repo\\payload", {
+				platform: "win32",
+				sensitivity: parentSensitive,
+			}),
+		).toBe(true);
+		expect(
+			projectRegistryInstallPathIsInsideAnchor(anchor, sibling, { platform: "win32", sensitivity: () => false }),
+		).toBe(true);
+		expect(
+			projectRegistryInstallPathIsInsideAnchor(anchor, "D:\\work\\Repo\\payload", {
+				platform: "win32",
+				sensitivity: parentSensitive,
+			}),
+		).toBe(false);
+	});
 });
