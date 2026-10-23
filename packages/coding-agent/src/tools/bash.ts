@@ -1476,6 +1476,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				isManagedDestination: this.session.isManagedSessionDestination,
 				getSessionId: this.session.getSessionId,
 			},
+			sessionCwd: this.session.cwd,
+			sessionAgentDir: this.session.settings?.getAgentDir?.(),
 		};
 		command = await expandInternalUrls(command, {
 			...internalUrlOptions,
