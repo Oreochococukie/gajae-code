@@ -1068,3 +1068,104 @@ describe("AuthStorage usage cache: API-key credential display", () => {
 		}
 	});
 });
+
+describe("AuthStorage usage cache durable payload", () => {
+	const canary = "usage-raw-canary-7f3a9c";
+
+	function usageCachePayloads(store: ObservableStore): string[] {
+		return [...store.cache.entries()]
+			.filter(([key]) => key.startsWith("usage_cache:"))
+			.map(([, entry]) => entry.value);
+	}
+
+	function reportWithRaw(): UsageReport {
+		const report = makeReport("reader@example.com");
+		report.raw = { authorization: `Bearer ${canary}`, nested: { token: canary } };
+		return report;
+	}
+
+	it("omits the provider raw field from the durable usage cache row", async () => {
+		const store = makeStore([oauthRow(1, "reader@example.com")]);
+		const provider: UsageProvider = {
+			id: "anthropic",
+			fetchUsage: async () => reportWithRaw(),
+		};
+		const storage = new AuthStorage(store, {
+			usageProviderResolver: () => provider,
+		});
+		await storage.reload();
+		try {
+			const [health] = await storage.checkCredentials();
+			expect(health?.ok).toBe(true);
+			expect(health?.report && "raw" in health.report).toBe(false);
+
+			const reports = await storage.fetchUsageReports();
+			expect(reports?.[0]?.limits[0]?.amount.used).toBe(42);
+
+			const rows = usageCachePayloads(store);
+			expect(rows.length).toBeGreaterThan(0);
+			for (const row of rows) {
+				const parsed = JSON.parse(row) as { value: unknown };
+				expect(row).not.toContain(canary);
+				expect(JSON.stringify(parsed.value)).not.toContain('"raw"');
+			}
+			const shown = storage.getCachedUsageReport("anthropic", 1);
+			expect(shown?.report.limits[0]?.amount.used).toBe(42);
+			expect(shown?.report.metadata?.email).toBe("reader@example.com");
+			expect("raw" in (shown?.report ?? {})).toBe(false);
+		} finally {
+			storage.close();
+		}
+	});
+
+	it("keeps limits and metadata on a cached usage report", async () => {
+		const store = makeStore([oauthRow(1, "reader@example.com")]);
+		const plain = makeReport("reader@example.com");
+		const provider: UsageProvider = {
+			id: "anthropic",
+			fetchUsage: async () => plain,
+		};
+		const storage = new AuthStorage(store, {
+			usageProviderResolver: () => provider,
+		});
+		await storage.reload();
+		try {
+			const first = await storage.fetchUsageReports();
+			expect(first?.[0]?.limits[0]?.amount.used).toBe(42);
+			expect(first?.[0]?.metadata?.email).toBe("reader@example.com");
+			const rows = usageCachePayloads(store);
+			expect(rows.some(row => row.includes("reader@example.com"))).toBe(true);
+			expect(rows.some(row => row.includes('"used":42'))).toBe(true);
+			const second = await storage.fetchUsageReports();
+			expect(second?.[0]?.limits[0]?.amount.used).toBe(42);
+			expect(second?.[0]?.metadata?.email).toBe("reader@example.com");
+		} finally {
+			storage.close();
+		}
+	});
+
+	it("allows a null cooldown row when the probe returns no report", async () => {
+		const store = makeStore([oauthRow(2, "empty@example.com")]);
+		let calls = 0;
+		const provider: UsageProvider = {
+			id: "anthropic",
+			fetchUsage: async () => {
+				calls += 1;
+				return null;
+			},
+		};
+		const storage = new AuthStorage(store, {
+			usageProviderResolver: () => provider,
+		});
+		await storage.reload();
+		try {
+			expect(await storage.fetchUsageReports()).toEqual([]);
+			const rows = usageCachePayloads(store);
+			expect(rows.some(row => (JSON.parse(row) as { value: unknown }).value === null)).toBe(true);
+			expect(await storage.fetchUsageReports()).toEqual([]);
+			expect(calls).toBe(1);
+		} finally {
+			storage.close();
+		}
+	});
+});
