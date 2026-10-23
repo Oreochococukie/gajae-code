@@ -1,6 +1,6 @@
 /**
  * Project plugin registries may name a cache outside the clone.
- * An installPath that resolves inside the repository must not become a root.
+ * An installPath that resolves inside the directory that owns the registry must not become a root.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
@@ -10,7 +10,12 @@ import "@gajae-code/coding-agent/discovery";
 import { loadSkills } from "@gajae-code/coding-agent/extensibility/skills";
 import fc from "fast-check";
 import { safeRmSync } from "../../../../scripts/safe-cleanup";
-import { clearClaudePluginRootsCache, listClaudePluginRoots } from "../../src/discovery/helpers";
+import {
+	clearClaudePluginRootsCache,
+	getPreloadedPluginRoots,
+	listClaudePluginRoots,
+	preloadPluginRoots,
+} from "../../src/discovery/helpers";
 
 const dirs: string[] = [];
 
@@ -150,6 +155,8 @@ describe("project plugin registry install path", () => {
 			const fromB = await listClaudePluginRoots(home, projectB);
 			expect(fromB.roots.some(root => root.id === "bad@market")).toBe(false);
 			expect(fromB.warnings.some(warning => warning.includes("inside the project tree"))).toBe(true);
+			await preloadPluginRoots(home, projectB);
+			expect(getPreloadedPluginRoots().some(root => root.id === "bad@market")).toBe(false);
 			const loaded = await loadSkills({ cwd: projectB, home });
 			expect(loaded.skills.map(skill => skill.name)).not.toContain("bad:shared-skill");
 		},
@@ -174,10 +181,26 @@ describe("project plugin registry install path", () => {
 			const fromA = await listClaudePluginRoots(home, projectA);
 			expect(fromA.roots.some(root => root.id === "bad@market")).toBe(true);
 			expect(fromA.roots.find(root => root.id === "bad@market")?.path).toBe(payload);
+			await preloadPluginRoots(home, projectA);
+			expect(getPreloadedPluginRoots().some(root => root.id === "bad@market")).toBe(true);
 			const loaded = await loadSkills({ cwd: projectA, home });
 			expect(loaded.skills.map(skill => skill.name)).toContain("bad:shared-skill");
 		},
 	);
+
+	test("still allows an installPath outside the selected registry directory", async () => {
+		const home = scratch("gjc-plug-home-");
+		const repo = scratch("gjc-plug-repo-");
+		const sub = path.join(repo, "sub");
+		const payload = path.join(repo, "payload");
+		writeSkill(payload, "side-skill");
+		writeRegistry(path.join(sub, ".gjc", "plugins", "installed_plugins.json"), payload, "side@market");
+
+		const { roots } = await listClaudePluginRoots(home, sub);
+		expect(roots.some(root => root.id === "side@market")).toBe(true);
+		const loaded = await loadSkills({ cwd: sub, home });
+		expect(loaded.skills.map(skill => skill.name)).toContain("side:side-skill");
+	});
 });
 
 const SEGMENT = /^[a-z0-9_-]{1,8}$/;
