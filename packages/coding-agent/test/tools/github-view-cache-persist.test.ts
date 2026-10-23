@@ -4,12 +4,14 @@
  * credential-shaped text.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { readFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getOrFetchIssue, getOrFetchPrDiff } from "@gajae-code/coding-agent/tools/gh";
-import { getCached, resetForTests as resetCacheForTests } from "@gajae-code/coding-agent/tools/github-cache";
+import { getCached, putCached, resetForTests as resetCacheForTests } from "@gajae-code/coding-agent/tools/github-cache";
 import * as git from "@gajae-code/coding-agent/utils/git";
+import fc from "fast-check";
 
 const TEST_REPO = "owner/example";
 const TEST_AUTH_KEY = "test-auth";
@@ -57,18 +59,44 @@ function issuePayload(number: number, body: string, url: string) {
 }
 
 async function persistedCacheBytes(): Promise<string> {
+	return cacheFileBytes();
+}
+
+function cacheFileBytes(): string {
 	const dbPath = process.env.GJC_GITHUB_CACHE_DB;
 	if (!dbPath) throw new Error("GJC_GITHUB_CACHE_DB is unset");
 	const parts: Buffer[] = [];
 	for (const suffix of ["", "-wal", "-shm"]) {
 		try {
-			parts.push(await fs.readFile(dbPath + suffix));
+			parts.push(readFileSync(dbPath + suffix));
 		} catch (err) {
 			if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
 		}
 	}
 	return Buffer.concat(parts).toString("utf8");
 }
+
+type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+
+const ordinaryWord = fc.stringMatching(/^[a-z]{1,8}$/);
+const ordinaryText = fc.stringMatching(/^[a-z](?:[a-z ]{0,20})?$/);
+const { value: nestedValue } = fc.letrec<{ value: JsonValue }>(tie => ({
+	value: fc.oneof(
+		{ depthSize: "small" },
+		ordinaryText,
+		fc.integer({ min: -50, max: 50 }),
+		fc.boolean(),
+		fc.constant(null),
+		fc.array(tie("value"), { maxLength: 3 }),
+		fc.dictionary(ordinaryWord, tie("value"), { maxKeys: 3 }),
+	),
+}));
+const credentialBody = fc.stringMatching(/^[A-Za-z0-9]{20}$/);
+const credentialText = fc.oneof(
+	credentialBody.map(body => `ghp_${body}`),
+	credentialBody.map(body => `sk-${body}`),
+	credentialBody.map(body => `Bearer ${body}`),
+);
 
 describe("github view cache persistence", () => {
 	it("still allows an ordinary issue body to round-trip in the view cache", async () => {
@@ -323,5 +351,70 @@ describe("github view cache persistence", () => {
 		expect(slices[1]).not.toContain(GITHUB_TOKEN);
 		expect(slices[1]).toContain("+new");
 		spy.mockRestore();
+	});
+
+	it("property: nested cache values round-trip and omit credentials", () => {
+		let rowNumber = 80;
+		fc.assert(
+			fc.property(
+				nestedValue,
+				fc.constantFrom("issue" as const, "pr" as const),
+				fc.boolean(),
+				ordinaryText,
+				ordinaryText,
+				fc.constantFrom("\n", "\r\n", "\t"),
+				credentialText,
+				(ordinary, kind, includeComments, rendered, sourceTail, boundary, secret) => {
+					const plainNumber = rowNumber++;
+					const plainUrl = `https://github.com/${TEST_REPO}/issues/${plainNumber}/${sourceTail}`;
+					putCached({
+						authKey: TEST_AUTH_KEY,
+						repo: TEST_REPO,
+						kind,
+						number: plainNumber,
+						includeComments,
+						payload: ordinary,
+						rendered,
+						sourceUrl: plainUrl,
+						fetchedAt: 1,
+					});
+					const plain = getCached(TEST_REPO, kind, plainNumber, includeComments, TEST_AUTH_KEY);
+					expect(plain?.payload).toEqual(ordinary);
+					expect(plain?.rendered).toBe(rendered);
+					expect(plain?.sourceUrl).toBe(plainUrl);
+
+					const wrapped = `${boundary}${secret}${boundary}`;
+					const secretNumber = rowNumber++;
+					putCached({
+						authKey: TEST_AUTH_KEY,
+						repo: TEST_REPO,
+						kind,
+						number: secretNumber,
+						includeComments,
+						payload: {
+							outer: ordinary,
+							level: [{ inner: { text: wrapped, [wrapped]: "kept" } }],
+						},
+						rendered: `${rendered}${boundary}${secret}`,
+						sourceUrl: `https://github.com/${TEST_REPO}/issues/${secretNumber}${boundary}${secret}`,
+						fetchedAt: 1,
+					});
+					const stored = getCached(TEST_REPO, kind, secretNumber, includeComments, TEST_AUTH_KEY);
+					expect(stored).not.toBeNull();
+					const payload = stored?.payload as {
+						outer: JsonValue;
+						level: Array<{ inner: { text: string } }>;
+					};
+					const packed = `${stored?.rendered ?? ""}\n${stored?.sourceUrl ?? ""}\n${JSON.stringify(stored?.payload)}`;
+					expect(packed).not.toContain(secret);
+					expect(cacheFileBytes()).not.toContain(secret);
+					expect(payload.outer).toEqual(ordinary);
+					expect(payload.level).toHaveLength(1);
+					expect(payload.level[0]?.inner.text).not.toContain(secret);
+					expect(Object.values(payload.level[0]?.inner ?? {})).toContain("kept");
+				},
+			),
+			{ seed: 71481023, numRuns: 64 },
+		);
 	});
 });
