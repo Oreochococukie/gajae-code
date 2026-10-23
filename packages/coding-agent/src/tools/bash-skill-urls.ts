@@ -353,8 +353,8 @@ async function resolveInternalUrlToPath(
 		return realTarget;
 	}
 
-	const scopedSessionCwd = sessionCwd?.trim();
-	if ((scheme === "rule" || scheme === "memory") && !scopedSessionCwd) {
+	const sessionDirectoryMissing = sessionCwd === undefined || sessionCwd.trim() === "";
+	if ((scheme === "rule" || scheme === "memory") && sessionDirectoryMissing) {
 		throw new ToolError(`${scheme}:// URLs cannot be expanded in bash commands without a session directory.`);
 	}
 
@@ -379,8 +379,8 @@ async function resolveInternalUrlToPath(
 		throw new ToolError(`${scheme}:// URL resolved without a filesystem path and cannot be used in bash: ${url}`);
 	}
 
-	if ((scheme === "rule" || scheme === "memory") && scopedSessionCwd) {
-		return sessionScopedExpansionPath(scheme, resource.sourcePath, scopedSessionCwd, sessionAgentDir);
+	if ((scheme === "rule" || scheme === "memory") && sessionCwd !== undefined) {
+		return sessionScopedExpansionPath(scheme, resource.sourcePath, sessionCwd, sessionAgentDir);
 	}
 
 	return path.resolve(resource.sourcePath);
