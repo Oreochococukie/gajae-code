@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getOrFetchIssue } from "@gajae-code/coding-agent/tools/gh";
+import { getOrFetchIssue, getOrFetchPrDiff } from "@gajae-code/coding-agent/tools/gh";
 import { getCached, resetForTests as resetCacheForTests } from "@gajae-code/coding-agent/tools/github-cache";
 import * as git from "@gajae-code/coding-agent/utils/git";
 
@@ -209,6 +209,119 @@ describe("github view cache persistence", () => {
 			expect(again.sourceUrl ?? "").not.toContain(secret);
 			expect(JSON.stringify(again.payload)).not.toContain(secret);
 		}
+		spy.mockRestore();
+	});
+
+	it("still allows a multiline issue body to round-trip in the view cache", async () => {
+		const body = "Build failed on Tuesday.\nSee the checklist.\r\nNext step.";
+		const url = `https://github.com/${TEST_REPO}/issues/45`;
+		const spy = vi.spyOn(git.github, "json").mockResolvedValue(issuePayload(45, body, url) as never);
+
+		const live = await getOrFetchIssue({
+			cwd: tempDir,
+			repo: TEST_REPO,
+			issue: "45",
+			includeComments: true,
+			cacheAuthKey: TEST_AUTH_KEY,
+		});
+		const again = await getOrFetchIssue({
+			cwd: tempDir,
+			repo: TEST_REPO,
+			issue: "45",
+			includeComments: true,
+			cacheAuthKey: TEST_AUTH_KEY,
+		});
+		expect(again.status).toBe("fresh");
+		expect(again.payload.body).toBe(body);
+		expect(again.rendered).toBe(live.rendered);
+		expect((getCached(TEST_REPO, "issue", 45, true, TEST_AUTH_KEY)?.payload as { body?: string }).body).toBe(body);
+		expect(spy).toHaveBeenCalledTimes(1);
+		spy.mockRestore();
+	});
+
+	it("persisted view cache drops a token glued to a line break", async () => {
+		const glued = (secret: string) => `\n${secret}\r\n${secret}\t${secret}`;
+		const body = `Example:${glued(GITHUB_TOKEN)}${glued(API_KEY)}${glued(BEARER)}`;
+		const url = `https://github.com/${TEST_REPO}/issues/46`;
+		const payload = issuePayload(46, body, url);
+		payload.comments = [
+			{ author: { login: "octocat" }, body: `comment:${glued(GITHUB_TOKEN)}${glued(API_KEY)}${glued(BEARER)}` },
+		];
+		const spy = vi.spyOn(git.github, "json").mockResolvedValue(payload as never);
+
+		const live = await getOrFetchIssue({
+			cwd: tempDir,
+			repo: TEST_REPO,
+			issue: "46",
+			includeComments: true,
+			cacheAuthKey: TEST_AUTH_KEY,
+		});
+		expect(live.status).toBe("miss");
+		expect(live.rendered).toContain(GITHUB_TOKEN);
+		expect(live.payload.body).toContain(`\n${GITHUB_TOKEN}`);
+
+		const disk = await persistedCacheBytes();
+		for (const secret of SECRETS) expect(disk).not.toContain(secret);
+
+		const again = await getOrFetchIssue({
+			cwd: tempDir,
+			repo: TEST_REPO,
+			issue: "46",
+			includeComments: true,
+			cacheAuthKey: TEST_AUTH_KEY,
+		});
+		expect(again.status).toBe("fresh");
+		expect(spy).toHaveBeenCalledTimes(1);
+		const stored = `${again.rendered}\n${JSON.stringify(again.payload)}`;
+		for (const secret of SECRETS) expect(stored).not.toContain(secret);
+		spy.mockRestore();
+	});
+
+	it("persisted view cache drops a token inside a multi-file pull request diff", async () => {
+		const diff = [
+			"diff --git a/a b/a",
+			"index 1111111..2222222 100644",
+			"--- a/a",
+			"+++ b/a",
+			"@@ -1 +1,2 @@",
+			" same",
+			`+${GITHUB_TOKEN}`,
+			"diff --git a/b b/b",
+			"index 3333333..4444444 100644",
+			"--- a/b",
+			"+++ b/b",
+			"@@ -1 +1 @@",
+			"-old",
+			"+new",
+			"",
+		].join("\n");
+		const spy = vi.spyOn(git.github, "text").mockResolvedValue(diff as never);
+		const lookup = {
+			cwd: tempDir,
+			repo: TEST_REPO,
+			number: 9,
+			cacheAuthKey: TEST_AUTH_KEY,
+		};
+
+		const live = await getOrFetchPrDiff(lookup);
+		expect(live.status).toBe("miss");
+		expect(live.payload.unified).toContain(GITHUB_TOKEN);
+		expect(live.rendered).toContain(GITHUB_TOKEN);
+
+		expect(await persistedCacheBytes()).not.toContain(GITHUB_TOKEN);
+
+		const again = await getOrFetchPrDiff(lookup);
+		expect(again.status).toBe("fresh");
+		expect(spy).toHaveBeenCalledTimes(1);
+		expect(again.rendered).toBe(again.payload.unified);
+		expect(again.payload.unified).not.toContain(GITHUB_TOKEN);
+		expect(again.payload.files).toHaveLength(2);
+		const slices = again.payload.files.map(file => again.payload.unified.slice(file.startOffset, file.endOffset));
+		expect(slices[0]?.startsWith("diff --git a/a b/a")).toBe(true);
+		expect(slices[0]).not.toContain("diff --git a/b b/b");
+		expect(slices[1]?.startsWith("diff --git a/b b/b")).toBe(true);
+		expect(slices[1]).not.toContain(GITHUB_TOKEN);
+		expect(slices[1]).toContain("+new");
 		spy.mockRestore();
 	});
 });
