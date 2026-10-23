@@ -1536,6 +1536,25 @@ export async function resolveOrDefaultProjectRegistryPath(cwd: string): Promise<
 
 const pluginRootsCache = new Map<string, { roots: ClaudePluginRoot[]; warnings: string[] }>();
 
+/** Directory that owns a resolved project registry, or "" when there is none. */
+function projectPluginRegistryAnchor(resolvedProjectPath: string | null): string {
+	if (!resolvedProjectPath) return "";
+	return path.dirname(path.dirname(path.dirname(resolvedProjectPath)));
+}
+
+/**
+ * Ordinary loads cache by home, registry files, and project anchor. Two trees can
+ * share one canonical registry file and still need different inside-anchor results.
+ */
+function pluginRootsCacheKey(
+	canonicalHome: string,
+	gjcRegistryPath: string | undefined,
+	projectRegistryPath: string | undefined,
+	projectAnchor: string,
+): string {
+	return `${canonicalHome}:${gjcRegistryPath ?? ""}:${projectRegistryPath ?? ""}:${projectAnchor}`;
+}
+
 /** Invalidate the exact user/project registry pair and their resolved-root cache entry. */
 export async function invalidateClaudePluginRoots(home: string, cwd?: string, isolatedHome = false): Promise<void> {
 	const resolvedProjectPath = cwd ? await resolveActiveProjectRegistryPath(cwd, home, isolatedHome) : null;
@@ -1553,7 +1572,14 @@ export async function invalidateClaudePluginRoots(home: string, cwd?: string, is
 	])) {
 		if (registryPath) invalidateFsCache(registryPath);
 	}
-	pluginRootsCache.delete(`${canonicalHome}:${gjcRegistryPath ?? ""}:${projectRegistryPath ?? ""}`);
+	pluginRootsCache.delete(
+		pluginRootsCacheKey(
+			canonicalHome,
+			gjcRegistryPath,
+			projectRegistryPath,
+			projectPluginRegistryAnchor(resolvedProjectPath),
+		),
+	);
 }
 
 async function canonicalizeThroughExistingAncestor(target: string): Promise<string> {
@@ -1663,7 +1689,8 @@ export async function listClaudePluginRoots(
 	const projectRegistryPath = resolvedProjectPath
 		? await canonicalizePluginRegistryPath(canonicalHome, resolvedProjectPath, isolatedHome)
 		: undefined;
-	const cacheKey = `${canonicalHome}:${gjcRegistryPath ?? ""}:${projectRegistryPath ?? ""}`;
+	const projectAnchor = projectPluginRegistryAnchor(resolvedProjectPath);
+	const cacheKey = pluginRootsCacheKey(canonicalHome, gjcRegistryPath, projectRegistryPath, projectAnchor);
 	if (!isolatedHome) {
 		const cached = pluginRootsCache.get(cacheKey);
 		if (cached) return cached;
@@ -1739,7 +1766,6 @@ export async function listClaudePluginRoots(
 	// Loaded from the nearest .gjc/plugins/installed_plugins.json relative to cwd.
 	// Project entries take precedence over user entries for the same plugin ID.
 	if (resolvedProjectPath) {
-		const projectAnchor = path.dirname(path.dirname(path.dirname(resolvedProjectPath)));
 		const projectContent = projectRegistryPath ? await readFile(projectRegistryPath, registryReadOptions) : null;
 		if (isolatedHome && !projectRegistryPath) {
 			warnings.push(`Ignoring project plugin registry outside the isolated home: ${resolvedProjectPath}`);

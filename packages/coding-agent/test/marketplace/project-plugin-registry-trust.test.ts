@@ -129,6 +129,55 @@ describe("project plugin registry install path", () => {
 			expect(loaded.skills.map(skill => skill.name)).not.toContain("linked:link-skill");
 		},
 	);
+
+	test.skipIf(process.platform === "win32")(
+		"does not adopt an in-repository root warmed from another anchor",
+		async () => {
+			const home = scratch("gjc-plug-home-");
+			const projectA = scratch("gjc-plug-anchor-a-");
+			const projectB = scratch("gjc-plug-anchor-b-");
+			const payload = path.join(projectB, "payload");
+			writeSkill(payload, "shared-skill");
+			const registryB = path.join(projectB, ".gjc", "plugins", "installed_plugins.json");
+			writeRegistry(registryB, payload, "bad@market");
+			const registryA = path.join(projectA, ".gjc", "plugins", "installed_plugins.json");
+			fs.mkdirSync(path.dirname(registryA), { recursive: true });
+			fs.symlinkSync(registryB, registryA);
+
+			clearClaudePluginRootsCache();
+			const fromA = await listClaudePluginRoots(home, projectA);
+			expect(fromA.roots.some(root => root.id === "bad@market")).toBe(true);
+			const fromB = await listClaudePluginRoots(home, projectB);
+			expect(fromB.roots.some(root => root.id === "bad@market")).toBe(false);
+			expect(fromB.warnings.some(warning => warning.includes("inside the project tree"))).toBe(true);
+			const loaded = await loadSkills({ cwd: projectB, home });
+			expect(loaded.skills.map(skill => skill.name)).not.toContain("bad:shared-skill");
+		},
+	);
+
+	test.skipIf(process.platform === "win32")(
+		"still allows an outside installPath after another anchor read the same registry",
+		async () => {
+			const home = scratch("gjc-plug-home-");
+			const projectA = scratch("gjc-plug-anchor-a-");
+			const projectB = scratch("gjc-plug-anchor-b-");
+			const payload = path.join(projectB, "payload");
+			writeSkill(payload, "shared-skill");
+			const registryB = path.join(projectB, ".gjc", "plugins", "installed_plugins.json");
+			writeRegistry(registryB, payload, "bad@market");
+			const registryA = path.join(projectA, ".gjc", "plugins", "installed_plugins.json");
+			fs.mkdirSync(path.dirname(registryA), { recursive: true });
+			fs.symlinkSync(registryB, registryA);
+
+			clearClaudePluginRootsCache();
+			await listClaudePluginRoots(home, projectB);
+			const fromA = await listClaudePluginRoots(home, projectA);
+			expect(fromA.roots.some(root => root.id === "bad@market")).toBe(true);
+			expect(fromA.roots.find(root => root.id === "bad@market")?.path).toBe(payload);
+			const loaded = await loadSkills({ cwd: projectA, home });
+			expect(loaded.skills.map(skill => skill.name)).toContain("bad:shared-skill");
+		},
+	);
 });
 
 const SEGMENT = /^[a-z0-9_-]{1,8}$/;
