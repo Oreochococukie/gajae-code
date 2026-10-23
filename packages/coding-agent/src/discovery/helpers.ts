@@ -12,6 +12,7 @@ import {
 	logger,
 	normalizePathForComparison,
 	parseFrontmatter,
+	pathIsWithin,
 	tryParseJson,
 } from "@gajae-code/utils";
 import type { ExtensionModule } from "../capability/extension-module";
@@ -1639,6 +1640,16 @@ async function resolveIsolatedPluginPath(home: string, value: string): Promise<s
  * must reject, and reusing that result would cross the home boundary.
  */
 
+/**
+ * A project registry entry whose installPath resolves inside the project anchor
+ * is the repository's own tree. Empty inputs fail closed (treated as inside).
+ * Paths outside the anchor, including the user plugin cache, stay loadable.
+ */
+export function projectRegistryInstallPathIsInsideAnchor(projectAnchor: string, installPath: string): boolean {
+	if (projectAnchor.trim() === "" || installPath.trim() === "") return true;
+	return pathIsWithin(projectAnchor, installPath);
+}
+
 export async function listClaudePluginRoots(
 	home: string,
 	cwd?: string,
@@ -1728,6 +1739,7 @@ export async function listClaudePluginRoots(
 	// Loaded from the nearest .gjc/plugins/installed_plugins.json relative to cwd.
 	// Project entries take precedence over user entries for the same plugin ID.
 	if (resolvedProjectPath) {
+		const projectAnchor = path.dirname(path.dirname(path.dirname(resolvedProjectPath)));
 		const projectContent = projectRegistryPath ? await readFile(projectRegistryPath, registryReadOptions) : null;
 		if (isolatedHome && !projectRegistryPath) {
 			warnings.push(`Ignoring project plugin registry outside the isolated home: ${resolvedProjectPath}`);
@@ -1761,6 +1773,12 @@ export async function listClaudePluginRoots(
 							: entry.installPath;
 						if (!installPath) {
 							warnings.push(`Plugin ${pluginId} installPath escapes the isolated home`);
+							continue;
+						}
+						if (projectRegistryInstallPathIsInsideAnchor(projectAnchor, installPath)) {
+							warnings.push(
+								`Ignoring project plugin ${pluginId} installPath inside the project tree: ${installPath}`,
+							);
 							continue;
 						}
 						projectRoots.push({
