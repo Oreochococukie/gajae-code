@@ -180,6 +180,7 @@ describe("github view cache persistence", () => {
 		});
 		expect(live.status).toBe("miss");
 		expect(live.rendered).toContain(GITHUB_TOKEN);
+		expect(live.sourceUrl).toContain(GITHUB_TOKEN);
 
 		const disk = await persistedCacheBytes();
 		for (const secret of SECRETS) {
@@ -205,6 +206,7 @@ describe("github view cache persistence", () => {
 		expect(spy).toHaveBeenCalledTimes(1);
 		for (const secret of SECRETS) {
 			expect(again.rendered).not.toContain(secret);
+			expect(again.sourceUrl ?? "").not.toContain(secret);
 			expect(JSON.stringify(again.payload)).not.toContain(secret);
 		}
 		spy.mockRestore();
