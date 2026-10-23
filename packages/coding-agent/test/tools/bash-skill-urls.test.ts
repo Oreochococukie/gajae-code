@@ -811,9 +811,25 @@ describe("bash session agent directory", () => {
 				await mkdir(settingsAgentDir);
 				await mkdir(requestedAgentDir);
 				const requestedReal = await realpath(requestedAgentDir);
+				const ruleSource = (filePath: string) => ({
+					provider: "test",
+					providerName: "test",
+					path: filePath,
+					level: "user" as const,
+				});
 				setActiveRules([
-					{ name: "profile-a", path: settingsAgentDir, content: "settings-profile" },
-					{ name: "profile-b", path: requestedAgentDir, content: "requested-profile" },
+					{
+						name: "profile-a",
+						path: settingsAgentDir,
+						content: "settings-profile",
+						_source: ruleSource(settingsAgentDir),
+					},
+					{
+						name: "profile-b",
+						path: requestedAgentDir,
+						content: "requested-profile",
+						_source: ruleSource(requestedAgentDir),
+					},
 				]);
 				const tool = createAgentDirBashTool(project, requestedAgentDir, settingsAgentDir);
 				await expect(tool.execute("call-command-a", { command: "printf '%s' rule://profile-a" })).rejects.toThrow(
