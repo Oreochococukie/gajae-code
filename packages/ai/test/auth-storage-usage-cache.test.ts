@@ -14,6 +14,7 @@ import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import fc from "fast-check";
 import {
 	type AuthCredential,
 	type AuthCredentialStore,
@@ -1167,5 +1168,81 @@ describe("AuthStorage usage cache durable payload", () => {
 		} finally {
 			storage.close();
 		}
+	});
+
+	function projectDurableUsage(value: unknown): unknown {
+		if (Array.isArray(value)) return value.map(item => projectDurableUsage(item));
+		if (typeof value !== "object" || value === null) return value;
+		const report = value as { provider?: unknown; fetchedAt?: unknown; limits?: unknown };
+		if (
+			typeof report.provider !== "string" ||
+			typeof report.fetchedAt !== "number" ||
+			!Array.isArray(report.limits)
+		) {
+			return value;
+		}
+		const { raw: _raw, ...safe } = report as { raw?: unknown };
+		return safe;
+	}
+
+	function jsonRoundTrip(value: unknown): unknown {
+		return JSON.parse(JSON.stringify(value));
+	}
+
+	it("property: durable usage cache drops generated raw and keeps the other fields", async () => {
+		const jsonValue = fc.jsonValue({ maxDepth: 2 });
+		const limit = fc.record({
+			id: fc.string({ maxLength: 16 }),
+			label: fc.string({ maxLength: 16 }),
+			scope: fc.record({ provider: fc.constant("anthropic") }),
+			amount: fc.record({
+				used: fc.integer({ min: 0, max: 100 }),
+				limit: fc.integer({ min: 0, max: 100 }),
+				unit: fc.constantFrom("percent", "requests", "tokens"),
+			}),
+		});
+		const report = fc.record({
+			provider: fc.constant("anthropic" as const),
+			fetchedAt: fc.integer({ min: 1, max: 2_000_000_000_000 }),
+			limits: fc.array(limit, { minLength: 1, maxLength: 3 }),
+			metadata: fc.option(fc.dictionary(fc.string({ minLength: 1, maxLength: 12 }), jsonValue, { maxKeys: 3 }), {
+				nil: undefined,
+			}),
+			raw: jsonValue,
+		});
+		await fc.assert(
+			fc.asyncProperty(fc.oneof(report, fc.constant(null)), async generated => {
+				const before = generated === null ? null : structuredClone(generated);
+				const store = makeStore([oauthRow(1, "reader@example.com")]);
+				const provider: UsageProvider = {
+					id: "anthropic",
+					fetchUsage: async () => generated,
+				};
+				const storage = new AuthStorage(store, { usageProviderResolver: () => provider });
+				await storage.reload();
+				try {
+					if (generated !== null) {
+						const [health] = await storage.checkCredentials();
+						expect(health?.ok).toBe(true);
+					}
+					await storage.fetchUsageReports();
+					expect(generated).toEqual(before);
+					const projected = projectDurableUsage(generated);
+					expect(projectDurableUsage(projected)).toEqual(projected);
+					const rows = usageCachePayloads(store);
+					expect(rows.length).toBeGreaterThan(0);
+					for (const row of rows) {
+						const parsed = JSON.parse(row) as { value: unknown };
+						const expected = Array.isArray(parsed.value)
+							? projectDurableUsage(generated === null ? [] : [generated])
+							: projected;
+						expect(jsonRoundTrip(parsed.value)).toEqual(jsonRoundTrip(expected));
+					}
+				} finally {
+					storage.close();
+				}
+			}),
+			{ seed: 535, numRuns: 64 },
+		);
 	});
 });
