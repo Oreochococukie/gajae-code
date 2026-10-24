@@ -2013,6 +2013,44 @@ describe("DiscordNotificationDaemon fake-provider acceptance", () => {
 			await restarted.stop();
 		});
 	});
+	test("scrubs a replayed notification frame and keeps ask option text", async () => {
+		await withDaemon(async (daemon, provider, agentDir) => {
+			const conversation = await daemon.notify({
+				sessionId: "session",
+				endpointGeneration: 1,
+				content: "see notes/todo.txt",
+			});
+			expect(provider.messages.some(message => message.content === "see notes/todo.txt")).toBe(true);
+			await new ChatEffectJournal({ agentDir, transport: "discord" }).enqueue({
+				id: `notification:${conversation.threadId}:legacy-frame`,
+				kind: "post-message",
+				transport: "discord",
+				sessionId: "session",
+				endpointGeneration: conversation.endpointGeneration,
+				payload: {
+					threadId: conversation.threadId,
+					content: "alert xoxb-secret-token at /home/alice/private/repo",
+					nonce: "legacy-frame-nonce",
+				},
+			});
+			await daemon.start();
+			const replayed = provider.messages.find(message => message.content.includes("alert"));
+			expect(replayed?.content).not.toContain("xoxb-secret-token");
+			expect(replayed?.content).not.toContain("/home/alice/private/repo");
+			await daemon.notify({
+				sessionId: "session",
+				endpointGeneration: 1,
+				content: "Choose /srv/prod or /srv/staging",
+				actionId: "ask-1",
+				options: ["Use /srv/prod", "Use /srv/staging"],
+			});
+			const ask = provider.messages.find(message => message.content.includes("/srv/prod"));
+			expect(ask?.content).toContain("/srv/staging");
+			expect(JSON.stringify(ask?.components)).toContain("Use /srv/prod");
+			expect(JSON.stringify(ask?.components)).toContain("Use /srv/staging");
+		});
+	});
+
 	test("completes recovery before Gateway delivery", async () => {
 		const commands: string[] = [];
 		await withDaemon(async (daemon, provider, agentDir) => {

@@ -3,7 +3,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import fc from "fast-check";
 import { createDiscordAdapter, createSlackAdapter } from "../src/sdk/bus/chat-adapters";
-import { NotificationPresentationEngine, type NotificationReplyRoute } from "../src/sdk/bus/engine";
+import {
+	NotificationPresentationEngine,
+	type NotificationReplyRoute,
+	scrubReplayedProviderText,
+} from "../src/sdk/bus/engine";
 
 const URL_SPAN_SEED = 20261024;
 
@@ -54,6 +58,34 @@ describe("Discord and Slack notification adapters", () => {
 			{ sessionId: "session-abcdef", actionId: "ask-1", answer: 0 },
 			{ sessionId: "session-abcdef", actionId: "ask-1", answer: "No" },
 		]);
+	});
+
+	test("scrubs a legacy replayed frame body and keeps ask text", () => {
+		const raw = "alert xoxb-secret-token at /home/alice/private/repo";
+		const once = scrubReplayedProviderText("notification:session:1", raw);
+		expect(once).not.toContain("xoxb-secret-token");
+		expect(once).not.toContain("/home/alice/private/repo");
+		expect(scrubReplayedProviderText("notification:session:1", once)).toBe(once);
+		const ask = "Choose /srv/prod or /srv/staging";
+		expect(scrubReplayedProviderText("action:session:ask:1", ask)).toBe(ask);
+		expect(scrubReplayedProviderText("action-publication:thread:ask:1", ask)).toBe(ask);
+		expect(scrubReplayedProviderText("root:session:1", ask, true)).toBe(ask);
+		expect(scrubReplayedProviderText("root:session:1", ask)).not.toContain("/srv/prod");
+		expect(scrubReplayedProviderText("notification:session:1", "see notes/todo.txt")).toBe("see notes/todo.txt");
+		expect(scrubReplayedProviderText("notification:session:1", "gap / between")).toBe("gap / between");
+	});
+
+	test("replay scrub stays idempotent and does not rewrite ask text", () => {
+		fc.assert(
+			fc.property(fc.string({ maxLength: 120 }), value => {
+				const once = scrubReplayedProviderText("notification:thread:frame", value);
+				expect(scrubReplayedProviderText("notification:thread:frame", once)).toBe(once);
+				expect(scrubReplayedProviderText("action:session:ask:1", value)).toBe(value);
+				expect(scrubReplayedProviderText("action-publication:thread:ask:1", value)).toBe(value);
+				expect(scrubReplayedProviderText("root:session:1", value, true)).toBe(value);
+			}),
+			{ seed: 20261025, numRuns: 64 },
+		);
 	});
 
 	test("redacts public payload boundaries for non-ask events", () => {

@@ -19,6 +19,7 @@ import {
 	normalizeDiscordConversation,
 } from "./discord-conversation";
 import type { DiscordInboundEvent, DiscordMessageComponent, DiscordProvider, DiscordThread } from "./discord-provider";
+import { scrubReplayedProviderText } from "./engine";
 
 const FAILURE = "This conversation is no longer available.";
 
@@ -2225,9 +2226,14 @@ export class DiscordNotificationDaemon {
 						status: "reconciled",
 					};
 				await ensure();
+				if (id.startsWith("notification:") && typeof payload.content !== "string")
+					throw new Error(`Discord effect ${id} has no replayable frame body`);
+				const content = id.startsWith("notification:")
+					? scrubReplayedProviderText(id, payload.content)
+					: payload.content;
 				const posted = await this.options.provider.postMessage({
 					threadId: payload.threadId,
-					content: payload.content,
+					content,
 					nonce: payload.nonce,
 					...(payload.components ? { components: payload.components } : {}),
 				});

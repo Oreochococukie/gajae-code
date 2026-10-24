@@ -6,6 +6,7 @@ import { logger } from "@gajae-code/utils";
 import { ChatDeliveryError } from "../src/sdk/bus/chat-daemon-runtime";
 import { type ChatEffect, ChatEffectJournal, type ChatEffectLease } from "../src/sdk/bus/chat-effect-journal";
 import { ConversationLockTimeoutError, ConversationStore } from "../src/sdk/bus/conversation-store";
+import { scrubReplayedProviderText } from "../src/sdk/bus/engine";
 import type { SlackConversation } from "../src/sdk/bus/slack-conversation";
 import { SlackEndpointBindingError, SlackNotificationDaemon } from "../src/sdk/bus/slack-daemon";
 import { SlackLiveProvider, SlackProviderError } from "../src/sdk/bus/slack-live-provider";
@@ -1286,6 +1287,64 @@ describe("SlackNotificationDaemon fake-provider acceptance", () => {
 				state: "terminal",
 				payload: { threadTs: resumed.rootTs, text: "generation two notification" },
 			});
+		});
+	});
+
+	it("keeps ask option paths readable when a generation rollover posts a new root", async () => {
+		await withDaemon(async (daemon, fake, _injected, setEndpointGeneration) => {
+			await daemon.notify("session", "generation one root", undefined, 1);
+			setEndpointGeneration(2);
+			await daemon.notify("session", "Choose /srv/prod or /srv/staging", "action-1", 2);
+			const askRoot = fake.posts.find(post => post.text.includes("/srv/prod"));
+			expect(askRoot?.text).toContain("/srv/staging");
+			expect(askRoot?.text).not.toContain("<path>");
+			await daemon.postCommandResult("session", "log at /tmp/build.log");
+			expect(fake.posts.some(post => post.text === "log at /tmp/build.log")).toBe(true);
+		});
+	});
+
+	it("scrubs a replayed notification frame and leaves a relative path unchanged", async () => {
+		await withDaemon(async (daemon, fake, _injected, _setEndpointGeneration, agentDir) => {
+			const raw = "alert xoxb-secret-token at /home/alice/private/repo";
+			const opened = await daemon.notify("session", "see notes/todo.txt", undefined, 1);
+			expect(fake.posts.some(post => post.text === "see notes/todo.txt")).toBe(true);
+			expect(opened.rootTs).toBeTruthy();
+			await new ChatEffectJournal({ agentDir, transport: "slack" }).enqueue({
+				id: "notification:session:legacy-frame",
+				kind: "provider-post",
+				transport: "slack",
+				sessionId: "session",
+				endpointGeneration: 1,
+				payload: {
+					channel: "C1",
+					threadTs: opened.rootTs,
+					text: raw,
+					clientMsgId: "legacy-frame",
+					attachmentAuthorityId: endpoint("session").authorityId,
+				},
+			});
+			await new ChatEffectJournal({ agentDir, transport: "slack" }).enqueue({
+				id: "notification:session:already-scrubbed",
+				kind: "provider-post",
+				transport: "slack",
+				sessionId: "session",
+				endpointGeneration: 1,
+				payload: {
+					channel: "C1",
+					threadTs: opened.rootTs,
+					text: "status ok",
+					clientMsgId: "already-scrubbed",
+					attachmentAuthorityId: endpoint("session").authorityId,
+				},
+			});
+			await daemon.start();
+			const replayed = fake.posts.find(post => post.clientMsgId === "legacy-frame");
+			const scrubbed = scrubReplayedProviderText("notification:session:legacy-frame", raw);
+			expect(replayed?.text).toBe(scrubbed);
+			expect(scrubReplayedProviderText("notification:session:legacy-frame", replayed?.text ?? "")).toBe(scrubbed);
+			expect(replayed?.text).not.toContain("xoxb-secret-token");
+			expect(replayed?.text).not.toContain("/home/alice/private/repo");
+			expect(fake.posts.find(post => post.clientMsgId === "already-scrubbed")?.text).toBe("status ok");
 		});
 	});
 

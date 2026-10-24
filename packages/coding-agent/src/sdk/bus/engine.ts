@@ -74,6 +74,17 @@ function copyOwnFrameFields(frame: Record<string, unknown>, redact: boolean): Re
 	return out;
 }
 
+/**
+ * Stored Discord/Slack provider text on the way to the provider.
+ * A proven ask stays literal. Scrubbing the same text again does not change it.
+ * A frame body that is not a string never reaches this function; the daemon
+ * refuses that dispatch instead of sending it.
+ */
+export function scrubReplayedProviderText(effectId: string, value: string, trustedAsk = false): string {
+	if (trustedAsk || effectId.startsWith("action:") || effectId.startsWith("action-publication:")) return value;
+	return redactEgressText(value);
+}
+
 export type NotificationEvent =
 	| ({ type: "action_needed" } & RedactableAction)
 	| { type: "action_resolved"; id: string; sessionId: string; resolvedBy?: string }
