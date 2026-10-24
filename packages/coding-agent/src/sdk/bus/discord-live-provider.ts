@@ -521,8 +521,8 @@ export class DiscordLiveProvider implements DiscordProvider, DiscordDiagnosticPr
 		const activeThreads = active.threads;
 		if (Array.isArray(activeThreads))
 			for (const thread of activeThreads) {
-				const parsed = this.#botOwnedThread(thread, guildId, parentId, botUserId);
-				if (parsed) result.push(parsed);
+				const owned = this.#botOwnedThread(thread, guildId, parentId, botUserId);
+				if (owned) result.push(owned);
 			}
 		const archived = this.#record(
 			await this.#request(`/channels/${parentId}/threads/archived/public?limit=100`, {}, context),
@@ -530,8 +530,8 @@ export class DiscordLiveProvider implements DiscordProvider, DiscordDiagnosticPr
 		const archivedThreads = archived.threads;
 		if (Array.isArray(archivedThreads))
 			for (const thread of archivedThreads) {
-				const parsed = this.#botOwnedThread(thread, guildId, parentId, botUserId);
-				if (parsed) result.push(parsed);
+				const owned = this.#botOwnedThread(thread, guildId, parentId, botUserId);
+				if (owned) result.push(owned);
 			}
 		return result;
 	}
