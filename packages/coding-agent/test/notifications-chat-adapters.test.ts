@@ -171,6 +171,15 @@ describe("Discord and Slack notification adapters", () => {
 			expect(text).toContain("build");
 			expect(text).toContain("finished src/main.ts");
 		}
+		const slash = engine.fanout({
+			type: "frame",
+			sessionId: "session-abcdef",
+			frame: { type: "context_update", text: "root / stays" },
+		});
+		for (const text of renderedBodies(slash)) {
+			expect(text).toContain("root / stays");
+			expect(text).not.toContain("<path>");
+		}
 	});
 
 	test("still allows surrounding whitespace and a relative backslash path", () => {
