@@ -298,7 +298,10 @@ describe("autoloadSkills in executor", () => {
 		});
 	}
 
-	async function preload(agentSource: "project" | "user" | "bundled", skills: Skill[]): Promise<ReturnType<typeof vi.fn>> {
+	async function preload(
+		agentSource: "project" | "user" | "bundled",
+		skills: Skill[],
+	): Promise<ReturnType<typeof vi.fn>> {
 		const session = yieldingSession();
 		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
 		vi.spyOn(skillsModule, "buildSkillPromptMessage").mockImplementation(async skill => ({
@@ -314,10 +317,7 @@ describe("autoloadSkills in executor", () => {
 	}
 
 	it("refuses bundled workflow skill preload from a project agent", async () => {
-		const send = await preload(
-			"project",
-			["ralplan", "ultragoal", "deep-interview", "autoresearch"].map(skillNamed),
-		);
+		const send = await preload("project", ["ralplan", "ultragoal", "deep-interview", "autoresearch"].map(skillNamed));
 		expect(send).not.toHaveBeenCalled();
 	});
 
@@ -375,7 +375,9 @@ describe("autoloadSkills in executor", () => {
 		expect(typeof projectAgentMayPreloadSkill).toBe("function");
 		fc.assert(
 			fc.property(
-				fc.string({ minLength: 1, maxLength: 32 }).filter(name => !isCanonicalGjcWorkflowSkillFilesystemAlias(name)),
+				fc
+					.string({ minLength: 1, maxLength: 32 })
+					.filter(name => !isCanonicalGjcWorkflowSkillFilesystemAlias(name)),
 				fc.constantFrom("project" as const, "user" as const, "bundled" as const),
 				(name, source) => {
 					const decision = projectAgentMayPreloadSkill(source, name);

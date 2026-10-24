@@ -62,10 +62,10 @@ import { ArtifactManager } from "../session/artifacts";
 import type { AuthStorage } from "../session/auth-storage";
 import type { ClientBridge } from "../session/client-bridge";
 import { SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
-import { isCanonicalGjcWorkflowSkillFilesystemAlias } from "../skill-state/canonical-skills";
 import { SessionManager, type SessionMemoryMode } from "../session/session-manager";
 import { FileSessionStorage } from "../session/session-storage";
 import { truncateTail } from "../session/streaming-output";
+import { isCanonicalGjcWorkflowSkillFilesystemAlias } from "../skill-state/canonical-skills";
 // Ensure mandatory subagent result extraction is available even when a session is mocked.
 import "../tools/yield";
 import type { ContextFileEntry } from "../tools";
@@ -83,8 +83,8 @@ import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import { persistTaskTokenLog, taskTokenLogFromUsage } from "./token-log";
 import {
 	type AgentDefinition,
-	type AgentSource,
 	type AgentProgress,
+	type AgentSource,
 	type AutoroutingAttempt,
 	type AutoroutingAttemptCode,
 	type AutoroutingPreflightFailure,
