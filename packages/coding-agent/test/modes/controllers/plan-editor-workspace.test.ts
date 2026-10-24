@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -6,6 +7,24 @@ import fc from "fast-check";
 import { PlanModeController } from "../../../src/modes/controllers/plan-mode-controller";
 import type { AgentSession } from "../../../src/session/agent-session";
 import type { SessionManager } from "../../../src/session/session-manager";
+
+const SYMLINK_DENIED = new Set(["EPERM", "ENOTSUP", "EACCES"]);
+
+function windowsSymlinkAllowed(): boolean {
+	const dir = fsSync.mkdtempSync(path.join(os.tmpdir(), "plan-editor-link-"));
+	try {
+		const target = path.join(dir, "target.txt");
+		fsSync.writeFileSync(target, "x");
+		fsSync.symlinkSync(target, path.join(dir, "link"));
+		return true;
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code ?? "";
+		if (SYMLINK_DENIED.has(code)) return false;
+		throw error;
+	} finally {
+		fsSync.rmSync(dir, { recursive: true, force: true });
+	}
+}
 
 const envKeys = ["EDITOR", "VISUAL", "PLAN_EDITOR_BODY", "PLAN_EDITOR_MARKER"] as const;
 const savedEnv = new Map<string, string | undefined>(envKeys.map(key => [key, Bun.env[key]]));
@@ -278,7 +297,7 @@ describe("plan editor workspace root", () => {
 		expect(canonicalWindowsPathWithin("C:\\session\\local", "C:\\Session\\local\\PLAN.md")).toBe(false);
 	});
 
-	it.skipIf(process.platform !== "win32")(
+	it.skipIf(process.platform !== "win32" || !windowsSymlinkAllowed())(
 		"refuses a local symlink whose real path is a case-only sibling",
 		async () => {
 			const { canonicalWindowsPathWithin, pathIsWithin, writeFileAtomically } = await import(
@@ -310,13 +329,7 @@ describe("plan editor workspace root", () => {
 				const secret = path.join(sibling, "secret.txt");
 				await fs.writeFile(secret, "secret\n");
 				const link = path.join(root, "PLAN.md");
-				try {
-					await fs.symlink(secret, link);
-				} catch (error) {
-					const code = (error as NodeJS.ErrnoException).code;
-					if (code === "EPERM") return;
-					throw error;
-				}
+				await fs.symlink(secret, link);
 				await expect(writeFileAtomically(link, "pwned\n", { trustBoundary: root })).rejects.toThrow(
 					/outside trust boundary/,
 				);

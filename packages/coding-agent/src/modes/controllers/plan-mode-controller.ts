@@ -4,7 +4,7 @@ import type { AgentToolResult, ThinkingLevel } from "@gajae-code/agent-core";
 import type { CompactionOutcome } from "@gajae-code/agent-core/compaction";
 import { type Model, modelsAreEqual } from "@gajae-code/ai/core";
 import { Container, type KeyId, Markdown, Spacer, Text } from "@gajae-code/tui";
-import { isEnoent, pathIsWithin, prompt } from "@gajae-code/utils";
+import { isEnoent, prompt, resolveEquivalentPath, pathIsWithin as rootContainsCandidate } from "@gajae-code/utils";
 import { resolveLocalRoot, resolveLocalUrlToPath } from "../../internal-urls";
 import { humanizePlanTitle, type PlanApprovalDetails, resolvePlanTitle } from "../../plan-mode/approved-plan";
 import planModeApprovedPrompt from "../../prompts/system/plan-mode-approved.md" with { type: "text" };
@@ -13,7 +13,7 @@ import planModeCompactInstructionsPrompt from "../../prompts/system/plan-mode-co
 };
 import type { AgentSession, TemporaryProviderSessionScope } from "../../session/agent-session";
 import type { SessionContext, SessionManager } from "../../session/session-manager";
-import { canonicalWindowsPathWithin, writeFileAtomically } from "../../tools/atomic-file-write";
+import { canonicalWindowsPathWithin, pathIsWithin, writeFileAtomically } from "../../tools/atomic-file-write";
 import { normalizeLocalScheme } from "../../tools/path-utils";
 import { type ResolveToolDetails, runResolveInvocation } from "../../tools/resolve";
 import { ToolError } from "../../tools/tool-errors";
@@ -35,7 +35,9 @@ const ABORT_TIMEOUT_MS = INTERACTIVE_ABORT_CLEANUP_TIMEOUT_MS;
 
 /** Whether `candidate` stays inside `root` after equivalent-path normalization. */
 export function planEditorTargetWithinRoot(root: string, candidate: string): boolean {
-	if (!pathIsWithin(root, candidate)) return false;
+	if (!rootContainsCandidate(root, candidate)) return false;
+	// `pathIsWithin` is `(target, root)`. Normalize first so equivalent paths still match.
+	if (!pathIsWithin(resolveEquivalentPath(candidate), resolveEquivalentPath(root))) return false;
 	if (process.platform !== "win32") return true;
 	return canonicalWindowsPathWithin(root, candidate);
 }
