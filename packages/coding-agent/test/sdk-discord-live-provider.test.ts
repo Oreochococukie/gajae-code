@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import fc from "fast-check";
 import { DiscordNotificationDaemon } from "../src/sdk/bus/discord-daemon";
 import { type DiscordGatewaySocket, DiscordLiveProvider } from "../src/sdk/bus/discord-live-provider";
 import type { DiscordInboundEvent } from "../src/sdk/bus/discord-provider";
@@ -1205,5 +1206,149 @@ describe("DiscordLiveProvider protocol", () => {
 			await daemon.stop();
 			await fs.rm(agentDir, { recursive: true, force: true });
 		}
+	});
+
+	test("property: nonce binding follows the bot-owner reference", async () => {
+		const token = fc.stringMatching(/^[a-z][a-z0-9]{1,7}$/);
+		const sample = fc
+			.record({
+				botId: token,
+				parentId: token,
+				otherId: token,
+				nonce: token,
+				authorMatches: fc.boolean(),
+				authorBot: fc.boolean(),
+				ownerMatches: fc.boolean(),
+				parentMatches: fc.boolean(),
+				starterIdMatches: fc.boolean(),
+				placeOutsiderFirst: fc.boolean(),
+				kind: fc.constantFrom("parent" as const, "fallback" as const, "create" as const),
+			})
+			.filter(value => value.botId !== value.otherId && value.parentId !== value.otherId);
+		const reference = (value: {
+			authorMatches: boolean;
+			authorBot: boolean;
+			ownerMatches: boolean;
+			parentMatches: boolean;
+			starterIdMatches: boolean;
+			kind: "parent" | "fallback" | "create";
+		}): string | null => {
+			if (value.kind === "create") return value.ownerMatches ? "bot-thread" : null;
+			const authorOk = value.authorBot && value.authorMatches;
+			const starterOk = value.kind === "parent" || value.starterIdMatches;
+			return authorOk && value.ownerMatches && value.parentMatches && starterOk ? "bot-thread" : null;
+		};
+		await fc.assert(
+			fc.asyncProperty(sample, async value => {
+				const marker = `<!-- gjc-thread-nonce:${value.nonce} -->`;
+				const authorId = value.authorMatches ? value.botId : value.otherId;
+				const ownerId = value.ownerMatches ? value.botId : value.otherId;
+				const parentOfThread = value.parentMatches ? value.parentId : value.otherId;
+				const messageId = value.kind === "fallback" && !value.starterIdMatches ? "echo" : "bot-thread";
+				const botThread = {
+					id: "bot-thread",
+					parent_id: parentOfThread,
+					owner_id: ownerId,
+					thread_metadata: { archived: false },
+				};
+				const botMessage = {
+					id: messageId,
+					author: { id: authorId, bot: value.authorBot },
+					content: marker,
+					...(value.kind === "parent" ? { thread: botThread } : {}),
+				};
+				const outsider = {
+					id: "evil-msg",
+					author: { id: value.otherId, bot: false },
+					content: marker,
+					thread: {
+						id: "evil-thread",
+						parent_id: value.parentId,
+						owner_id: value.otherId,
+						thread_metadata: { archived: false },
+					},
+				};
+				const posts: string[] = [];
+				const live = new DiscordLiveProvider({
+					applicationId: "app",
+					botToken: "discord-secret-token",
+					apiBaseUrl: "https://discord.test/api",
+					fetchImpl: async (input, init) => {
+						const path = String(input);
+						const method = (init?.method ?? "GET").toUpperCase();
+						if (path.endsWith("/users/@me")) return response({ id: value.botId });
+						if (path.endsWith(`/channels/${value.parentId}/messages?limit=100`)) {
+							if (value.kind === "fallback") return response([]);
+							if (value.kind === "create") return response([outsider]);
+							const messages = [botMessage];
+							if (value.placeOutsiderFirst) messages.unshift(outsider);
+							return response(messages);
+						}
+						if (path.endsWith("/guilds/guild/threads/active")) {
+							if (value.kind !== "fallback") return response({ threads: [] });
+							const threads = [botThread];
+							if (value.placeOutsiderFirst) threads.unshift(outsider.thread);
+							return response({ threads });
+						}
+						if (path.endsWith("/channels/bot-thread/messages?limit=25")) return response([botMessage]);
+						if (path.endsWith("/channels/evil-thread/messages?limit=25")) {
+							return response([{ id: "copied", author: { id: value.otherId, bot: false }, content: marker }]);
+						}
+						if (path.endsWith(`/channels/${value.parentId}/messages`) && method === "POST")
+							return response({ id: "fresh" });
+						if (method === "POST" && path.endsWith("/threads")) {
+							posts.push(path);
+							return response({
+								id: "bot-thread",
+								parent_id: value.parentId,
+								owner_id: ownerId,
+								thread_metadata: { archived: false },
+							});
+						}
+						if (path.includes("archived/public")) return response({ threads: [] });
+						return response({ threads: [] });
+					},
+				});
+				const expected = reference(value);
+				let actual: string | null = null;
+				let threw = false;
+				try {
+					if (value.kind === "create") {
+						actual = (
+							await live.createThread({
+								guildId: "guild",
+								parentId: value.parentId,
+								name: "Session",
+								nonce: value.nonce,
+							})
+						).id;
+					} else {
+						actual =
+							(
+								await live.findThreadByNonce({
+									guildId: "guild",
+									parentId: value.parentId,
+									nonce: value.nonce,
+								})
+							)?.id ?? null;
+					}
+				} catch (error) {
+					threw = true;
+					expect(String(error)).toContain("invalid thread");
+				}
+				expect(actual).not.toBe("evil-thread");
+				expect(posts.every(path => !path.includes("/messages/evil-msg/"))).toBe(true);
+				if (value.kind === "create")
+					expect(posts.some(path => path.includes("/messages/fresh/threads"))).toBe(true);
+				if (expected === null && value.kind === "create") {
+					expect(threw).toBe(true);
+					expect(actual).toBeNull();
+					return;
+				}
+				expect(threw).toBe(false);
+				expect(actual).toBe(expected);
+			}),
+			{ seed: 156, numRuns: 128 },
+		);
 	});
 });
