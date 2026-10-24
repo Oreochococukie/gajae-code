@@ -2095,6 +2095,48 @@ describe("DiscordNotificationDaemon fake-provider acceptance", () => {
 		});
 	});
 
+	test("refuses a replayed Discord notification that has no string body", async () => {
+		await withDaemon(async (daemon, provider, agentDir) => {
+			const conversation = await daemon.notify({
+				sessionId: "session",
+				endpointGeneration: 1,
+				content: "see notes/todo.txt",
+			});
+			expect(conversation.threadId).toBeTruthy();
+			const threadId = conversation.threadId!;
+			const journal = new ChatEffectJournal({ agentDir, transport: "discord" });
+			for (const [suffix, content] of [
+				["bad-null", null],
+				["bad-number", 7],
+				["bad-object", { text: "hidden" }],
+			] as const) {
+				await journal.enqueue({
+					id: `notification:${threadId}:${suffix}`,
+					kind: "post-message",
+					transport: "discord",
+					sessionId: "session",
+					endpointGeneration: 1,
+					payload: { threadId, content, nonce: suffix },
+				});
+			}
+			await journal.enqueue({
+				id: `notification:${threadId}:plain-status`,
+				kind: "post-message",
+				transport: "discord",
+				sessionId: "session",
+				endpointGeneration: 1,
+				payload: { threadId, content: "status ok", nonce: "plain-status" },
+			});
+			await daemon.start();
+			expect(provider.messages.some(message => message.content === "status ok")).toBe(true);
+			expect(provider.messages.some(message => message.content == null || typeof message.content !== "string")).toBe(
+				false,
+			);
+			expect(provider.messages.some(message => message.content === "7")).toBe(false);
+			expect(JSON.stringify(provider.messages)).not.toContain("hidden");
+		});
+	});
+
 	test("scrubs a replayed Discord notification frame", async () => {
 		await withDaemon(async (daemon, provider, agentDir) => {
 			const conversation = await daemon.notify({
