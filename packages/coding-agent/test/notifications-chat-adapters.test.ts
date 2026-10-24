@@ -3,11 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import fc from "fast-check";
 import { createDiscordAdapter, createSlackAdapter } from "../src/sdk/bus/chat-adapters";
-import {
-	NotificationPresentationEngine,
-	type NotificationReplyRoute,
-	scrubReplayedProviderText,
-} from "../src/sdk/bus/engine";
+import { NotificationPresentationEngine, type NotificationReplyRoute } from "../src/sdk/bus/engine";
 
 const URL_SPAN_SEED = 20261024;
 
@@ -60,7 +56,8 @@ describe("Discord and Slack notification adapters", () => {
 		]);
 	});
 
-	test("scrubs a legacy replayed frame body and keeps ask text", () => {
+	test("scrubs a legacy replayed frame body and ask text stays literal", async () => {
+		const { scrubReplayedProviderText } = await import("../src/sdk/bus/engine");
 		const raw = "alert xoxb-secret-token at /home/alice/private/repo";
 		const once = scrubReplayedProviderText("notification:session:1", raw);
 		expect(once).not.toContain("xoxb-secret-token");
@@ -75,7 +72,8 @@ describe("Discord and Slack notification adapters", () => {
 		expect(scrubReplayedProviderText("notification:session:1", "gap / between")).toBe("gap / between");
 	});
 
-	test("replay scrub stays idempotent and does not rewrite ask text", () => {
+	test("replay scrub stays idempotent and does not rewrite ask text", async () => {
+		const { scrubReplayedProviderText } = await import("../src/sdk/bus/engine");
 		fc.assert(
 			fc.property(fc.string({ maxLength: 120 }), value => {
 				const once = scrubReplayedProviderText("notification:thread:frame", value);

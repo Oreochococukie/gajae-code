@@ -6,7 +6,6 @@ import { logger } from "@gajae-code/utils";
 import { ChatDeliveryError } from "../src/sdk/bus/chat-daemon-runtime";
 import { type ChatEffect, ChatEffectJournal, type ChatEffectLease } from "../src/sdk/bus/chat-effect-journal";
 import { ConversationLockTimeoutError, ConversationStore } from "../src/sdk/bus/conversation-store";
-import { scrubReplayedProviderText } from "../src/sdk/bus/engine";
 import type { SlackConversation } from "../src/sdk/bus/slack-conversation";
 import { SlackEndpointBindingError, SlackNotificationDaemon } from "../src/sdk/bus/slack-daemon";
 import { SlackLiveProvider, SlackProviderError } from "../src/sdk/bus/slack-live-provider";
@@ -1303,11 +1302,18 @@ describe("SlackNotificationDaemon fake-provider acceptance", () => {
 		});
 	});
 
-	it("scrubs a replayed notification frame and leaves a relative path unchanged", async () => {
-		await withDaemon(async (daemon, fake, _injected, _setEndpointGeneration, agentDir) => {
-			const raw = "alert xoxb-secret-token at /home/alice/private/repo";
-			const opened = await daemon.notify("session", "see notes/todo.txt", undefined, 1);
+	it("still allows a relative notification path", async () => {
+		await withDaemon(async (daemon, fake) => {
+			await daemon.notify("session", "see notes/todo.txt", undefined, 1);
 			expect(fake.posts.some(post => post.text === "see notes/todo.txt")).toBe(true);
+		});
+	});
+
+	it("scrubs a replayed notification frame body", async () => {
+		await withDaemon(async (daemon, fake, _injected, _setEndpointGeneration, agentDir) => {
+			const { scrubReplayedProviderText } = await import("../src/sdk/bus/engine");
+			const raw = "alert xoxb-secret-token at /home/alice/private/repo";
+			const opened = await daemon.notify("session", "open", undefined, 1);
 			expect(opened.rootTs).toBeTruthy();
 			await new ChatEffectJournal({ agentDir, transport: "slack" }).enqueue({
 				id: "notification:session:legacy-frame",

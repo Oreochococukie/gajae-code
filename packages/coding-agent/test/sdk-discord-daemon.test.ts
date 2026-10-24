@@ -2013,7 +2013,35 @@ describe("DiscordNotificationDaemon fake-provider acceptance", () => {
 			await restarted.stop();
 		});
 	});
-	test("scrubs a replayed notification frame and keeps ask option text", async () => {
+	test("still allows a relative Discord notification path", async () => {
+		await withDaemon(async (daemon, provider) => {
+			await daemon.notify({
+				sessionId: "session",
+				endpointGeneration: 1,
+				content: "see notes/todo.txt",
+			});
+			expect(provider.messages.some(message => message.content === "see notes/todo.txt")).toBe(true);
+		});
+	});
+
+	test("keeps Discord ask option text readable", async () => {
+		await withDaemon(async (daemon, provider) => {
+			await daemon.notify({ sessionId: "session", endpointGeneration: 1, content: "open" });
+			await daemon.notify({
+				sessionId: "session",
+				endpointGeneration: 1,
+				content: "Choose /srv/prod or /srv/staging",
+				actionId: "ask-1",
+				options: ["Use /srv/prod", "Use /srv/staging"],
+			});
+			const ask = provider.messages.find(message => message.content.includes("/srv/prod"));
+			expect(ask?.content).toContain("/srv/staging");
+			expect(JSON.stringify(ask?.components)).toContain("Use /srv/prod");
+			expect(JSON.stringify(ask?.components)).toContain("Use /srv/staging");
+		});
+	});
+
+	test("scrubs a replayed Discord notification frame", async () => {
 		await withDaemon(async (daemon, provider, agentDir) => {
 			const conversation = await daemon.notify({
 				sessionId: "session",
