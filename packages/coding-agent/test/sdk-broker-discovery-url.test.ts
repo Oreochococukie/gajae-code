@@ -66,6 +66,18 @@ describe("readBrokerDiscovery url", () => {
 		expect(await readBrokerDiscovery(dir)).toBeNull();
 	});
 
+	it("rejects an uppercase scheme on a loopback discovery url", async () => {
+		const dir = await makeTempDir();
+		await writeBrokerDiscovery(dir, discoveryRecord(80, "WS://127.0.0.1:80"));
+		expect(await readBrokerDiscovery(dir)).toBeNull();
+	});
+
+	it("rejects a trailing dot on the loopback discovery host", async () => {
+		const dir = await makeTempDir();
+		await writeBrokerDiscovery(dir, discoveryRecord(80, "ws://127.0.0.1.:80"));
+		expect(await readBrokerDiscovery(dir)).toBeNull();
+	});
+
 	it("rejects surrounding whitespace on a loopback discovery url", async () => {
 		const dir = await makeTempDir();
 		await writeBrokerDiscovery(dir, discoveryRecord(1, " ws://127.0.0.1:1"));
