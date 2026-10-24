@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { createDiscordAdapter } from "../src/sdk/bus/chat-adapters";
 import { ChatDeliveryError } from "../src/sdk/bus/chat-daemon-runtime";
 import {
 	type ChatEffect,
@@ -11,7 +12,6 @@ import {
 	type ChatEffectReceipt,
 	type EnqueueChatEffect,
 } from "../src/sdk/bus/chat-effect-journal";
-
 import { ConversationStore } from "../src/sdk/bus/conversation-store";
 import type { DiscordConversation } from "../src/sdk/bus/discord-conversation";
 import {
@@ -26,6 +26,7 @@ import type {
 	DiscordProvider,
 	DiscordThread,
 } from "../src/sdk/bus/discord-provider";
+import { NotificationPresentationEngine } from "../src/sdk/bus/engine";
 import { SdkClientError } from "../src/sdk/client/client";
 import type { SessionAttachment } from "../src/sdk/router";
 
@@ -2021,6 +2022,59 @@ describe("DiscordNotificationDaemon fake-provider acceptance", () => {
 				content: "see notes/todo.txt",
 			});
 			expect(provider.messages.some(message => message.content === "see notes/todo.txt")).toBe(true);
+		});
+	});
+
+	test("still allows an opted-out Discord absolute path", async () => {
+		await withDaemon(async (daemon, provider, agentDir) => {
+			const engine = new NotificationPresentationEngine([createDiscordAdapter()], { redact: false });
+			const [rendered] = engine.fanout({
+				type: "frame",
+				sessionId: "session",
+				frame: { type: "context_update", text: "Build at /srv/prod" },
+			});
+			const content = (rendered?.body as { content: string }).content;
+			expect(content).toContain("/srv/prod");
+			const conversation = await daemon.notify({
+				sessionId: "session",
+				endpointGeneration: 1,
+				content,
+				literal: true,
+			});
+			expect(provider.messages.some(message => message.content.includes("/srv/prod"))).toBe(true);
+			expect(provider.messages.some(message => message.content.includes("<path>"))).toBe(false);
+			await new ChatEffectJournal({ agentDir, transport: "discord" }).enqueue({
+				id: `notification:${conversation.threadId}:opt-out-replay`,
+				kind: "post-message",
+				transport: "discord",
+				sessionId: "session",
+				endpointGeneration: 1,
+				payload: {
+					threadId: conversation.threadId,
+					content: "Keep /srv/optout",
+					nonce: "opt-out-replay",
+					literal: true,
+				},
+			});
+			await daemon.start();
+			expect(provider.messages.find(message => message.content.includes("/srv/optout"))?.content).toContain(
+				"/srv/optout",
+			);
+		});
+	});
+
+	test("masks a redacted Discord frame at the provider", async () => {
+		await withDaemon(async (daemon, provider) => {
+			const engine = new NotificationPresentationEngine([createDiscordAdapter()], { redact: true });
+			const [rendered] = engine.fanout({
+				type: "frame",
+				sessionId: "session",
+				frame: { type: "context_update", text: "Build at /srv/prod" },
+			});
+			const content = (rendered?.body as { content: string }).content;
+			expect(content).not.toContain("/srv/prod");
+			await daemon.notify({ sessionId: "session", endpointGeneration: 1, content });
+			expect(provider.messages.some(message => message.content.includes("/srv/prod"))).toBe(false);
 		});
 	});
 

@@ -76,7 +76,7 @@ function copyOwnFrameFields(frame: Record<string, unknown>, redact: boolean): Re
 
 /**
  * Stored Discord/Slack provider text on the way to the provider.
- * A proven ask stays literal. Scrubbing the same text again does not change it.
+ * A proven ask, or an explicit redact opt-out, stays literal. Scrubbing the same text again does not change it.
  * A frame body that is not a string never reaches this function; the daemon
  * refuses that dispatch instead of sending it.
  */
