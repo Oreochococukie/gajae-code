@@ -2021,12 +2021,13 @@ describe("DiscordNotificationDaemon fake-provider acceptance", () => {
 				content: "see notes/todo.txt",
 			});
 			expect(provider.messages.some(message => message.content === "see notes/todo.txt")).toBe(true);
+			expect(conversation.endpointGeneration).toBe(1);
 			await new ChatEffectJournal({ agentDir, transport: "discord" }).enqueue({
 				id: `notification:${conversation.threadId}:legacy-frame`,
 				kind: "post-message",
 				transport: "discord",
 				sessionId: "session",
-				endpointGeneration: conversation.endpointGeneration,
+				endpointGeneration: 1,
 				payload: {
 					threadId: conversation.threadId,
 					content: "alert xoxb-secret-token at /home/alice/private/repo",
