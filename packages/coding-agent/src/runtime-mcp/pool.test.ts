@@ -866,7 +866,7 @@ describe("MCPConnectionPool", () => {
 		const pool = new MCPConnectionPool({
 			sharedPoolIdleMs: 0,
 			connect: async (name, cfg) => {
-				opened.push(cfg.headers?.Authorization ?? "");
+				opened.push(cfg.type === "http" || cfg.type === "sse" ? (cfg.headers?.Authorization ?? "") : "");
 				return connection(name, cfg, new FakeTransport());
 			},
 		});
@@ -899,7 +899,7 @@ describe("MCPConnectionPool", () => {
 		const pool = new MCPConnectionPool({
 			sharedPoolIdleMs: 0,
 			connect: async (name, cfg) => {
-				opened.push(cfg.headers?.Authorization ?? "");
+				opened.push(cfg.type === "http" || cfg.type === "sse" ? (cfg.headers?.Authorization ?? "") : "");
 				return connection(name, cfg, new FakeTransport());
 			},
 		});
@@ -930,7 +930,7 @@ describe("MCPConnectionPool", () => {
 		const pool = new MCPConnectionPool({
 			sharedPoolIdleMs: 0,
 			connect: async (name, cfg) => {
-				opened.push(cfg.headers?.Authorization ?? "");
+				opened.push(cfg.type === "http" || cfg.type === "sse" ? (cfg.headers?.Authorization ?? "") : "");
 				return connection(name, cfg, new FakeTransport());
 			},
 		});
