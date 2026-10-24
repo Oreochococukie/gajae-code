@@ -1387,6 +1387,23 @@ describe("SlackNotificationDaemon fake-provider acceptance", () => {
 	});
 
 	it("still allows an opted-out absolute path at the provider", async () => {
+		await withDaemon(async (daemon, fake) => {
+			const engine = new NotificationPresentationEngine([createSlackAdapter({ channelId: "C1" })], {
+				redact: false,
+			});
+			const [rendered] = engine.fanout({
+				type: "frame",
+				sessionId: "session",
+				frame: { type: "context_update", text: "Build at /srv/prod" },
+			});
+			const text = (rendered?.body as { text: string }).text;
+			expect(text).toContain("/srv/prod");
+			await daemon.notify("session", text, undefined, 1, undefined, true);
+			expect(fake.posts.some(post => post.text.includes("/srv/prod") && !post.text.includes("<path>"))).toBe(true);
+		});
+	});
+
+	it("replays an opted-out Slack frame at the provider", async () => {
 		await withDaemon(async (daemon, fake, _injected, _setEndpointGeneration, agentDir) => {
 			const engine = new NotificationPresentationEngine([createSlackAdapter({ channelId: "C1" })], {
 				redact: false,
