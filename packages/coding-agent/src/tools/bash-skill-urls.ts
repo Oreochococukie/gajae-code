@@ -1,8 +1,7 @@
 import type * as fsTypes from "node:fs";
 import * as fs from "node:fs/promises";
-import { homedir } from "node:os";
 import * as path from "node:path";
-import { getAgentDir, getMemoriesDir, isEnoent } from "@gajae-code/utils";
+import { getAgentDir, getMemoriesDir, getTrustedHomeDir, isEnoent } from "@gajae-code/utils";
 import { findRepoRoot } from "../capability/fs";
 import type { Skill } from "../extensibility/skills";
 import {
@@ -11,6 +10,8 @@ import {
 	resolveLocalRoot,
 	resolveLocalUrlToPath,
 } from "../internal-urls/local-protocol";
+import { resolveMemoryUrlToPath } from "../internal-urls/memory-protocol";
+import { parseInternalUrl } from "../internal-urls/parse";
 import { validateRelativePath } from "../internal-urls/skill-protocol";
 import type { InternalResource } from "../internal-urls/types";
 import { normalizeLocalScheme } from "./path-utils";
@@ -282,7 +283,7 @@ const PROJECT_RULE_DIR_NAMES = [".agent", ".agents"] as const;
  */
 async function discoveredAncestorRulePath(sessionCwd: string, sourcePath: string): Promise<string | undefined> {
 	const cwd = path.resolve(sessionCwd);
-	const home = path.resolve(homedir());
+	const home = path.resolve(getTrustedHomeDir());
 	if (!isStrictlyInside(home, cwd)) return undefined;
 	const lexical = path.resolve(sourcePath);
 	const realTarget = await canonicalPathOrAncestor(lexical, SESSION_URL_ESCAPE);
@@ -334,6 +335,29 @@ async function containedExpansionPath(root: string, lexicalPath: string): Promis
 	const realTarget = await canonicalPathOrAncestor(resolvedLexical, SESSION_URL_ESCAPE);
 	if (!pathStaysInside(realRoot, realTarget)) return undefined;
 	return realTarget;
+}
+
+/** A memory file that already exists under this session's memory root. */
+async function existingCallerMemoryPath(
+	url: string,
+	sessionCwd: string,
+	sessionAgentDir: string | undefined,
+): Promise<string | undefined> {
+	const agentDir = sessionAgentDir?.trim() ? sessionAgentDir : getAgentDir();
+	const root = memoryRootForSession(agentDir, sessionCwd);
+	let lexical: string;
+	try {
+		lexical = resolveMemoryUrlToPath(parseInternalUrl(url), root);
+	} catch {
+		return undefined;
+	}
+	try {
+		await fs.realpath(lexical);
+	} catch (error) {
+		if (isEnoent(error)) return undefined;
+		throw error;
+	}
+	return containedExpansionPath(root, lexical);
 }
 
 async function sessionScopedExpansionPath(
@@ -407,6 +431,11 @@ async function resolveInternalUrlToPath(
 	const sessionDirectoryMissing = sessionCwd === undefined || sessionCwd.trim() === "";
 	if ((scheme === "rule" || scheme === "memory") && sessionDirectoryMissing) {
 		throw new ToolError(`${scheme}:// URLs cannot be expanded in bash commands without a session directory.`);
+	}
+
+	if (scheme === "memory" && sessionCwd) {
+		const callerMemory = await existingCallerMemoryPath(url, sessionCwd, sessionAgentDir);
+		if (callerMemory) return callerMemory;
 	}
 
 	if (!internalRouter?.canHandle(url)) {
