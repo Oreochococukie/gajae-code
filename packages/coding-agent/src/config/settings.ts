@@ -398,6 +398,11 @@ const GLOBAL_ONLY_SETTINGS = new Set<SettingPath>([
 	"skills.trustProjectSkills",
 	"skills.enablePiProject",
 ]);
+/**
+ * Repository files must not choose the model that receives a subagent prompt.
+ * User config and runtime overrides still apply; only the project layer is removed.
+ */
+const PROJECT_LAYER_DENIED_SETTINGS = new Set<SettingPath>(["task.agentModelOverrides"]);
 const LEGACY_THEME_NAME_REPLACEMENTS = {
 	dark: "red-claw",
 	light: "blue-crab",
@@ -6467,6 +6472,9 @@ export class Settings implements NotificationSettingsReader {
 			const segments = settingPath.split(".");
 			deleteByPath(project, segments);
 			deleteByPath(overrides, segments);
+		}
+		for (const settingPath of PROJECT_LAYER_DENIED_SETTINGS) {
+			deleteByPath(project, settingPath.split("."));
 		}
 		const merged = this.#deepMerge(this.#deepMerge({}, global), project);
 		return this.#deepMerge(merged, overrides);
