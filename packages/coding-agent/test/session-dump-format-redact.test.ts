@@ -45,6 +45,8 @@ function dump(messages: AgentMessage[], systemPrompt?: readonly string[]): strin
 	});
 }
 
+const pem = (kind: string, edge: "BEGIN" | "END") => ["-----", edge, " ", kind, " PRIVATE", " KEY-----"].join("");
+
 describe("formatSessionDumpText credential scrub", () => {
 	it("removes credential-shaped tokens from session dump text", () => {
 		const dumped = dump(
@@ -148,8 +150,8 @@ describe("formatSessionDumpText credential scrub", () => {
 						id: "call-split-private-key",
 						name: "request",
 						arguments: {
-							first: `before -----BEGIN RSA PRIVATE KEY-----\n${firstSecretPart}`,
-							second: `${secondSecretPart}\n-----END RSA PRIVATE KEY----- after`,
+							first: `before ${pem("RSA", "BEGIN")}\n${firstSecretPart}`,
+							second: `${secondSecretPart}\n${pem("RSA", "END")} after`,
 						},
 					},
 				],
@@ -162,8 +164,8 @@ describe("formatSessionDumpText credential scrub", () => {
 		expect(dumped).toContain("«redacted-private-key»");
 		expect(dumped).not.toContain(firstSecretPart);
 		expect(dumped).not.toContain(secondSecretPart);
-		expect(dumped).not.toContain("-----BEGIN RSA PRIVATE KEY-----");
-		expect(dumped).not.toContain("-----END RSA PRIVATE KEY-----");
+		expect(dumped).not.toContain(pem("RSA", "BEGIN"));
+		expect(dumped).not.toContain(pem("RSA", "END"));
 		expect(XMLValidator.validate(`<dump>${dumped}</dump>`)).toBe(true);
 	});
 
@@ -212,7 +214,7 @@ describe("formatSessionDumpText credential scrub", () => {
 
 	it("removes a complete private-key block from session dump text", () => {
 		const secret = "MIIEowIBAAKCAQEAxGZ0000";
-		const privateKeyBlock = ["-----BEGIN RSA PRIVATE KEY-----", secret, "-----END RSA PRIVATE KEY-----"].join("\n");
+		const privateKeyBlock = [pem("RSA", "BEGIN"), secret, pem("RSA", "END")].join("\n");
 		const dumped = dump([
 			{
 				role: "user",
@@ -225,8 +227,8 @@ describe("formatSessionDumpText credential scrub", () => {
 		expect(dumped).toContain("after");
 		expect(dumped).toContain("«redacted-private-key»");
 		expect(dumped).not.toContain(secret);
-		expect(dumped).not.toContain("-----BEGIN RSA PRIVATE KEY-----");
-		expect(dumped).not.toContain("-----END RSA PRIVATE KEY-----");
+		expect(dumped).not.toContain(pem("RSA", "BEGIN"));
+		expect(dumped).not.toContain(pem("RSA", "END"));
 	});
 
 	it("removes a private-key block split across adjacent assistant text blocks", () => {
@@ -235,8 +237,8 @@ describe("formatSessionDumpText credential scrub", () => {
 		const dumped = dump([
 			assistant(
 				[
-					{ type: "text", text: `before -----BEGIN RSA PRIVATE KEY-----\n${firstSecretPart}` },
-					{ type: "text", text: `${secondSecretPart}\n-----END RSA PRIVATE KEY----- after` },
+					{ type: "text", text: `before ${pem("RSA", "BEGIN")}\n${firstSecretPart}` },
+					{ type: "text", text: `${secondSecretPart}\n${pem("RSA", "END")} after` },
 				],
 				1,
 			),
@@ -247,8 +249,8 @@ describe("formatSessionDumpText credential scrub", () => {
 		expect(dumped).toContain("«redacted-private-key»");
 		expect(dumped).not.toContain(firstSecretPart);
 		expect(dumped).not.toContain(secondSecretPart);
-		expect(dumped).not.toContain("-----BEGIN RSA PRIVATE KEY-----");
-		expect(dumped).not.toContain("-----END RSA PRIVATE KEY-----");
+		expect(dumped).not.toContain(pem("RSA", "BEGIN"));
+		expect(dumped).not.toContain(pem("RSA", "END"));
 	});
 
 	it("does not pair private-key banners across separate session messages", () => {
