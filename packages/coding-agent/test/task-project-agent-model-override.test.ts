@@ -199,8 +199,11 @@ describe("task tool repository agent model overrides", () => {
 							loaded.settings.override("task.agentModelOverrides", { [role]: runtimeSelector });
 						}
 						const effective = loaded.settings.get("task.agentModelOverrides");
-						expect(effective[role]).toBe(runtimeSelector ?? globalSelector);
-						expect(effective.planner).toBe(role === "planner" ? (runtimeSelector ?? globalSelector) : undefined);
+						const operatorSelector = runtimeSelector ?? globalSelector;
+						expect(effective[role] as string | undefined).toBe(operatorSelector);
+						expect(effective.planner as string | undefined).toBe(
+							role === "planner" ? operatorSelector : undefined,
+						);
 						expect(loaded.settings.get("task.eager")).toBe(eager);
 					} finally {
 						await loaded.settings.close();
