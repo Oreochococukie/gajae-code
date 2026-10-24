@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getProjectAgentDir } from "@gajae-code/utils";
 import { YAML } from "bun";
+import fc from "fast-check";
 import { AsyncJobManager } from "../src/async";
 import { resetSettingsForTest, Settings } from "../src/config/settings";
 import { TaskTool } from "../src/task";
@@ -163,6 +164,51 @@ describe("task tool repository agent model overrides", () => {
 		} finally {
 			await loaded.settings.close();
 		}
+	});
+
+	it("property: project model records stay independent of operator selection, seed 648, 64 inputs", async () => {
+		const token = fc.string({
+			unit: fc.constantFrom(..."abcdefghijklmnopqrstuvwxyz0123456789".split("")),
+			minLength: 1,
+			maxLength: 8,
+		});
+		const selector = fc.tuple(token, token).map(([provider, id]) => `${provider}/${id}`);
+		const maybeSelector = fc.oneof(fc.constant(undefined), selector);
+		await fc.assert(
+			fc.asyncProperty(
+				fc.record({
+					eager: fc.boolean(),
+					role: fc.constantFrom("executor", "architect", "planner", "critic"),
+					projectSelector: selector,
+					globalSelector: maybeSelector,
+					runtimeSelector: maybeSelector,
+				}),
+				async ({ eager, role, projectSelector, globalSelector, runtimeSelector }) => {
+					const loaded = await loadScope(
+						globalSelector ? { task: { agentModelOverrides: { [role]: globalSelector } } } : {},
+						{
+							task: {
+								eager,
+								agentModelOverrides: { [role]: projectSelector, planner: projectSelector },
+							},
+						},
+					);
+					cleanups.push(loaded.remove);
+					try {
+						if (runtimeSelector) {
+							loaded.settings.override("task.agentModelOverrides", { [role]: runtimeSelector });
+						}
+						const effective = loaded.settings.get("task.agentModelOverrides");
+						expect(effective[role]).toBe(runtimeSelector ?? globalSelector);
+						expect(effective.planner).toBe(role === "planner" ? (runtimeSelector ?? globalSelector) : undefined);
+						expect(loaded.settings.get("task.eager")).toBe(eager);
+					} finally {
+						await loaded.settings.close();
+					}
+				},
+			),
+			{ seed: 648, numRuns: 64 },
+		);
 	});
 
 	it("still allows a repository task.eager flag", async () => {

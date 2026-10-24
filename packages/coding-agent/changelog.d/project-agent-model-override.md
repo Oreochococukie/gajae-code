@@ -1,3 +1,3 @@
 ### Fixed
 
-- A repository settings file can no longer replace the model used when the task tool starts a subagent.
+- Project-layer task.agentModelOverrides is ignored when the task tool starts a subagent. User config and runtime overrides still apply.
