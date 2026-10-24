@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { execFile } from "node:child_process";
 import { lstat, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import { getMemoriesDir } from "@gajae-code/utils";
 import fc from "fast-check";
+import { registerOwnedDeletionRoot, safeRm } from "../../../../scripts/safe-cleanup";
 import { resetActiveRulesForTests, setActiveRules } from "../../src/capability/rule";
 import { disposeAllShellSessions } from "../../src/exec/bash-executor";
 import type { Skill } from "../../src/extensibility/skills";
@@ -378,7 +379,10 @@ const execFileAsync = promisify(execFile);
 const PROPERTY_SEED = 481703;
 
 async function symlinkCreationSupported(): Promise<boolean> {
-	if (process.platform === "win32") return false;
+	const windows = process.platform === "win32";
+	if (windows) {
+		return false;
+	}
 	const dir = await mkdtemp(path.join(tmpdir(), "bash-symlink-probe-"));
 	try {
 		const target = path.join(dir, "target");
@@ -387,7 +391,8 @@ async function symlinkCreationSupported(): Promise<boolean> {
 		return true;
 	} catch (error) {
 		const code = (error as NodeJS.ErrnoException).code;
-		if (code === "EPERM" || code === "EACCES") return false;
+		const denied = code === "EPERM" || code === "EACCES";
+		if (denied) return false;
 		throw error;
 	} finally {
 		await rm(dir, { recursive: true, force: true });
@@ -395,6 +400,36 @@ async function symlinkCreationSupported(): Promise<boolean> {
 }
 
 const symlinkSupported = await symlinkCreationSupported();
+
+async function withGrantedHomeRoot(body: (root: string) => Promise<void>): Promise<void> {
+	const name = `.gjc-bash-ancestor-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+	let canonicalBase = homedir();
+	try {
+		canonicalBase = await realpath(homedir());
+	} catch {
+		canonicalBase = homedir();
+	}
+	const root = path.join(canonicalBase, name);
+	const forget = registerOwnedDeletionRoot(root);
+	await mkdir(root);
+	try {
+		await body(path.join(homedir(), name));
+	} finally {
+		await safeRm(root, { recursive: true, force: true });
+		forget();
+	}
+}
+
+async function homeChildWritable(): Promise<boolean> {
+	try {
+		await withGrantedHomeRoot(async () => {});
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+const canWriteUnderHome = await homeChildWritable();
 
 function memoryRootFor(agentDir: string, cwd: string): string {
 	const encoded = `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
@@ -488,6 +523,171 @@ describe("expandInternalUrls session scope", () => {
 			await rm(agentDir, { recursive: true, force: true });
 		}
 	});
+
+	it.skipIf(!canWriteUnderHome)(
+		"expands a project rule discovered from an ancestor directory in a non-Git session",
+		async () => {
+			await withGrantedHomeRoot(async root => {
+				const project = path.join(root, "work", "project");
+				const cwd = path.join(project, "subdir");
+				const agentRule = path.join(project, ".agent", "rules", "check.md");
+				const agentsRule = path.join(project, ".agents", "rules", "check.md");
+				await mkdir(path.dirname(agentRule), { recursive: true });
+				await mkdir(path.dirname(agentsRule), { recursive: true });
+				await mkdir(cwd);
+				await writeFile(agentRule, "ancestor-rule");
+				await writeFile(agentsRule, "ancestor-rules");
+				const router = createInternalRouter({
+					"rule://check": { sourcePath: agentRule },
+					"rule://checks": { sourcePath: agentsRule },
+				});
+				const options = {
+					skills: [] as Skill[],
+					internalRouter: router,
+					sessionCwd: cwd,
+					sessionAgentDir: path.join(root, "agent"),
+				};
+				await expectExpandsToSource("cat rule://check", options, agentRule);
+				await expectExpandsToSource("cat rule://checks", options, agentsRule);
+			});
+		},
+	);
+
+	it.skipIf(!canWriteUnderHome)(
+		"refuses a non-rule ancestor file, a sibling project rule, and a home rule in a non-Git session",
+		async () => {
+			await withGrantedHomeRoot(async root => {
+				const project = path.join(root, "work", "project");
+				const cwd = path.join(project, "subdir");
+				const notes = path.join(project, "notes.md");
+				const sibling = path.join(root, "work", "other", ".agent", "rules", "check.md");
+				const homeRule = path.join(homedir(), ".agent", "rules", "gjc-bash-home-boundary.md");
+				await mkdir(cwd, { recursive: true });
+				await mkdir(path.dirname(sibling), { recursive: true });
+				await writeFile(notes, "notes");
+				await writeFile(sibling, "sibling");
+				const router = createInternalRouter({
+					"rule://notes": { sourcePath: notes },
+					"rule://sibling": { sourcePath: sibling },
+					"rule://home": { sourcePath: homeRule },
+				});
+				const options = {
+					skills: [] as Skill[],
+					internalRouter: router,
+					sessionCwd: cwd,
+					sessionAgentDir: path.join(root, "agent"),
+				};
+				await expect(expandInternalUrls("cat rule://notes", options)).rejects.toThrow(/outside this session/);
+				await expect(expandInternalUrls("cat rule://sibling", options)).rejects.toThrow(/outside this session/);
+				await expect(expandInternalUrls("cat rule://home", options)).rejects.toThrow(/outside this session/);
+			});
+		},
+	);
+
+	it.skipIf(!canWriteUnderHome)("refuses a rule above the Git root when the session is below home", async () => {
+		await withGrantedHomeRoot(async root => {
+			const repo = path.join(root, "repo");
+			const cwd = path.join(repo, "subdir");
+			const above = path.join(root, ".agent", "rules", "check.md");
+			await mkdir(cwd, { recursive: true });
+			await mkdir(path.dirname(above), { recursive: true });
+			await writeFile(above, "above");
+			await execFileAsync("git", ["init", "-q", repo]);
+			const router = createInternalRouter({ "rule://check": { sourcePath: above } });
+			await expect(
+				expandInternalUrls("cat rule://check", {
+					skills: [],
+					internalRouter: router,
+					sessionCwd: cwd,
+					sessionAgentDir: path.join(root, "agent"),
+				}),
+			).rejects.toThrow(/outside this session/);
+		});
+	});
+
+	it.skipIf(process.platform === "win32" || !symlinkSupported || !canWriteUnderHome)(
+		"refuses an ancestor rule symlink that leaves the ancestor directory",
+		async () => {
+			const outside = await mkdtemp(path.join(tmpdir(), "bash-ancestor-out-"));
+			try {
+				await withGrantedHomeRoot(async root => {
+					const project = path.join(root, "project");
+					const cwd = path.join(project, "subdir");
+					const link = path.join(project, ".agent", "rules", "check.md");
+					const secret = path.join(outside, "secret.md");
+					await mkdir(path.dirname(link), { recursive: true });
+					await mkdir(cwd);
+					await writeFile(secret, "secret");
+					await symlink(secret, link);
+					const router = createInternalRouter({ "rule://check": { sourcePath: link } });
+					await expect(
+						expandInternalUrls("cat rule://check", {
+							skills: [],
+							internalRouter: router,
+							sessionCwd: cwd,
+							sessionAgentDir: path.join(root, "agent"),
+						}),
+					).rejects.toThrow(/outside this session/);
+				});
+			} finally {
+				await rm(outside, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it.skipIf(process.platform === "win32" || !symlinkSupported || !canWriteUnderHome)(
+		"refuses an ancestor rule symlink that stays inside the ancestor but leaves the rule directory",
+		async () => {
+			await withGrantedHomeRoot(async root => {
+				const project = path.join(root, "project");
+				const cwd = path.join(project, "subdir");
+				const sibling = path.join(project, "other-session", "secret.md");
+				const notes = path.join(project, "notes.md");
+				await mkdir(path.dirname(sibling), { recursive: true });
+				await mkdir(cwd);
+				await writeFile(sibling, "secret");
+				await writeFile(notes, "notes");
+				for (const dirName of [".agent", ".agents"]) {
+					const rules = path.join(project, dirName, "rules");
+					await mkdir(rules, { recursive: true });
+					const toSibling = path.join(rules, "check.md");
+					const toNotes = path.join(rules, "notes.md");
+					await symlink(sibling, toSibling);
+					await symlink(notes, toNotes);
+					const router = createInternalRouter({
+						"rule://check": { sourcePath: toSibling },
+						"rule://notes": { sourcePath: toNotes },
+					});
+					const options = {
+						skills: [] as Skill[],
+						internalRouter: router,
+						sessionCwd: cwd,
+						sessionAgentDir: path.join(root, "agent"),
+					};
+					await expect(expandInternalUrls("cat rule://check", options)).rejects.toThrow(/outside this session/);
+					await expect(expandInternalUrls("cat rule://notes", options)).rejects.toThrow(/outside this session/);
+					await rm(toSibling);
+					await rm(toNotes);
+				}
+				const widened = path.join(project, "widened");
+				await mkdir(widened);
+				await writeFile(path.join(widened, "secret.md"), "widened");
+				const linkedRoot = path.join(project, ".agent", "rules");
+				await rm(linkedRoot, { recursive: true, force: true });
+				await symlink(widened, linkedRoot);
+				const widenedRule = path.join(linkedRoot, "secret.md");
+				const widenedRouter = createInternalRouter({ "rule://secret": { sourcePath: widenedRule } });
+				await expect(
+					expandInternalUrls("cat rule://secret", {
+						skills: [],
+						internalRouter: widenedRouter,
+						sessionCwd: cwd,
+						sessionAgentDir: path.join(root, "agent"),
+					}),
+				).rejects.toThrow(/outside this session/);
+			});
+		},
+	);
 
 	it("still allows a rule file at the repo root above the session directory", async () => {
 		const repo = await mkdtemp(path.join(tmpdir(), "bash-rule-repo-"));
@@ -854,6 +1054,51 @@ describe("bash session agent directory", () => {
 				resetActiveRulesForTests();
 				await rm(parent, { recursive: true, force: true });
 			}
+		},
+	);
+
+	it.skipIf(process.platform === "win32" || !canWriteUnderHome)(
+		"expands an ancestor project rule through bash command execution in a non-Git session",
+		async () => {
+			await withGrantedHomeRoot(async root => {
+				const project = path.join(root, "work", "project");
+				const cwd = path.join(project, "subdir");
+				const rulePath = path.join(project, ".agent", "rules", "check.md");
+				const agentDir = path.join(root, "agent");
+				await mkdir(path.dirname(rulePath), { recursive: true });
+				await mkdir(cwd);
+				await mkdir(agentDir);
+				await writeFile(rulePath, "ancestor-rule");
+				setActiveRules([
+					{
+						name: "check",
+						path: rulePath,
+						content: "ancestor-rule",
+						_source: {
+							provider: "test",
+							providerName: "test",
+							path: rulePath,
+							level: "project",
+						},
+					},
+				]);
+				try {
+					const tool = createAgentDirBashTool(cwd, agentDir, path.join(root, "settings-agent"));
+					const ruleReal = await realpath(rulePath);
+					const result = await tool.execute("call-ancestor", { command: "printf '%s' rule://check" });
+					expect(textOf(result)).toContain(ruleReal);
+					const envResult = await tool.execute("call-ancestor-env", {
+						command: "printf '%s' \"$FOO\"",
+						env: { FOO: "rule://check" },
+					});
+					expect(textOf(envResult)).toContain(ruleReal);
+					await expect(
+						tool.execute("call-ancestor-cwd", { command: "pwd -P", cwd: "rule://check" }),
+					).rejects.toThrow(/not a directory/);
+				} finally {
+					resetActiveRulesForTests();
+				}
+			});
 		},
 	);
 });

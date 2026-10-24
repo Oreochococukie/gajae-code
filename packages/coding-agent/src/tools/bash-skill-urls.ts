@@ -1,5 +1,6 @@
 import type * as fsTypes from "node:fs";
 import * as fs from "node:fs/promises";
+import { homedir } from "node:os";
 import * as path from "node:path";
 import { getAgentDir, getMemoriesDir, isEnoent } from "@gajae-code/utils";
 import { findRepoRoot } from "../capability/fs";
@@ -36,7 +37,7 @@ export interface InternalUrlExpansionOptions {
 	internalRouter?: InternalUrlResolver;
 	localOptions?: LocalProtocolOptions;
 	ensureLocalParentDirs?: boolean;
-	/** Project directory of the bash session. `rule://` and `memory://` must stay inside it. */
+	/** Project directory of the bash session. `rule://` and `memory://` must stay inside its boundary. */
 	sessionCwd?: string;
 	/** Agent directory for this session. User rules and the memory root use it. */
 	sessionAgentDir?: string;
@@ -267,6 +268,51 @@ function pathStaysInside(root: string, candidate: string): boolean {
 	return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
+function isStrictlyInside(root: string, candidate: string): boolean {
+	const resolvedRoot = path.resolve(root);
+	const resolvedCandidate = path.resolve(candidate);
+	return pathStaysInside(resolvedRoot, resolvedCandidate) && resolvedCandidate !== resolvedRoot;
+}
+
+const PROJECT_RULE_DIR_NAMES = [".agent", ".agents"] as const;
+
+/**
+ * Real path of a rule file in an ancestor `.agent/rules` or `.agents/rules` directory
+ * below the home directory. Non-Git discovery loads those directories and skips home.
+ */
+async function discoveredAncestorRulePath(sessionCwd: string, sourcePath: string): Promise<string | undefined> {
+	const cwd = path.resolve(sessionCwd);
+	const home = path.resolve(homedir());
+	if (!isStrictlyInside(home, cwd)) return undefined;
+	const lexical = path.resolve(sourcePath);
+	const realTarget = await canonicalPathOrAncestor(lexical, SESSION_URL_ESCAPE);
+	let ancestor = path.dirname(cwd);
+	while (isStrictlyInside(home, ancestor)) {
+		let realAncestor: string;
+		try {
+			realAncestor = await fs.realpath(ancestor);
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+			realAncestor = ancestor;
+		}
+		if (pathStaysInside(realAncestor, realTarget)) {
+			for (const dirName of PROJECT_RULE_DIR_NAMES) {
+				const ruleDir = path.join(dirName, "rules");
+				if (
+					pathStaysInside(path.join(ancestor, ruleDir), lexical) &&
+					pathStaysInside(path.join(realAncestor, ruleDir), realTarget)
+				) {
+					return realTarget;
+				}
+			}
+		}
+		const parent = path.dirname(ancestor);
+		if (parent === ancestor) break;
+		ancestor = parent;
+	}
+	return undefined;
+}
+
 function withoutForeignRuleNames(message: string): string {
 	return message
 		.split(/\r?\n/)
@@ -297,13 +343,18 @@ async function sessionScopedExpansionPath(
 	sessionAgentDir: string | undefined,
 ): Promise<string> {
 	const agentDir = sessionAgentDir?.trim() ? sessionAgentDir : getAgentDir();
+	const repoRoot = scheme === "rule" ? await findRepoRoot(sessionCwd) : null;
 	const roots =
 		scheme === "memory"
 			? [memoryRootForSession(agentDir, sessionCwd)]
-			: [(await findRepoRoot(sessionCwd)) ?? path.resolve(sessionCwd), path.resolve(agentDir)];
+			: [repoRoot ?? path.resolve(sessionCwd), path.resolve(agentDir)];
 	for (const root of roots) {
 		const contained = await containedExpansionPath(root, sourcePath);
 		if (contained) return contained;
+	}
+	if (scheme === "rule" && !repoRoot) {
+		const ancestorRule = await discoveredAncestorRulePath(sessionCwd, sourcePath);
+		if (ancestorRule) return ancestorRule;
 	}
 	throw new ToolError(`${scheme}:// ${SESSION_URL_ESCAPE}.`);
 }
