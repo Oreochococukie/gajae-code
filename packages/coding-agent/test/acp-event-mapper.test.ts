@@ -1183,7 +1183,7 @@ describe("ACP event mapper", () => {
 		}
 	});
 
-	it("keeps an own __proto__ key when rawInput is sanitized", () => {
+	it("preserves an own __proto__ key on sanitized rawInput", () => {
 		const args = JSON.parse('{"command":"echo \\u001b[31mred","__proto__":{"x":1}}') as {
 			command: string;
 		};
