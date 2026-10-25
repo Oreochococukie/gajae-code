@@ -1125,7 +1125,7 @@ describe("ACP event mapper", () => {
 		expect(JSON.stringify(updates)).not.toContain("\\u001b");
 		const update = updates[0]!.update as {
 			title?: string;
-			rawInput?: { command?: string; note?: string };
+			rawInput?: { command?: string; note?: string; extra?: string[]; meta?: { q?: string } };
 			content?: Array<{ content?: { text?: string } }>;
 		};
 		expect(update.title).toBe("run tests");
