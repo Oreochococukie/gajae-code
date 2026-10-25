@@ -1363,6 +1363,40 @@ describe("ACP event mapper", () => {
 		);
 	});
 
+	it("does not throw on a deep or cyclic tool argument", () => {
+		let nested: unknown = { note: "\u001b[31mdeep" };
+		for (let depth = 0; depth < 128; depth++) nested = { child: nested };
+		const deep = mapAgentSessionEventToAcpSessionUpdates(
+			{
+				type: "tool_execution_start",
+				toolCallId: "toolu_deep",
+				toolName: "bash",
+				args: { command: "echo \u001b[31mred", note: "\u001b[31mx", nested },
+			} as AgentSessionEvent,
+			"session-1",
+		);
+		expect(deep).toHaveLength(1);
+		const deepRaw = (deep[0]!.update as { rawInput: { command: string; note: string } }).rawInput;
+		expect(deepRaw.command).toBe("echo red");
+		expect(deepRaw.note).toBe("x");
+
+		const cyclic: Record<string, unknown> = { command: "echo \u001b[31mred" };
+		cyclic.self = cyclic;
+		const cycle = mapAgentSessionEventToAcpSessionUpdates(
+			{
+				type: "tool_execution_start",
+				toolCallId: "toolu_cycle",
+				toolName: "bash",
+				args: cyclic,
+			} as AgentSessionEvent,
+			"session-1",
+		);
+		expect(cycle).toHaveLength(1);
+		const cycleRaw = (cycle[0]!.update as { rawInput: { command: string; self: unknown } }).rawInput;
+		expect(cycleRaw.command).toBe("echo red");
+		expect(cycleRaw.self).toBe(cycleRaw);
+	});
+
 	it("property: nested tool arguments drop controls and keep shape, seed 6722026, 64 inputs", () => {
 		const leaf = fc.string({ maxLength: 24 });
 		fc.assert(
