@@ -602,12 +602,12 @@ function sanitizeClientValue(value: unknown): unknown {
 	const prototype = Object.getPrototypeOf(value);
 	if (prototype !== Object.prototype && prototype !== null) return value;
 	let changed = false;
-	const next: Record<string, unknown> = {};
+	const next = Object.create(prototype) as Record<string, unknown>;
 	for (const key of Object.keys(value)) {
 		const current = (value as Record<string, unknown>)[key];
 		const clean = sanitizeClientValue(current);
 		if (clean !== current) changed = true;
-		next[key] = clean;
+		Object.defineProperty(next, key, { value: clean, enumerable: true, writable: true, configurable: true });
 	}
 	return changed ? next : value;
 }
@@ -746,9 +746,7 @@ function extractToolLocations(args: unknown, cwd?: string): ToolCallLocation[] {
 	const seen = new Set<string>();
 	const pushPath = (raw: string | undefined) => {
 		if (!raw) return;
-		const safe = sanitizeText(raw);
-		if (safe.length === 0) return;
-		const path = toAcpLocationPath(safe, cwd);
+		const path = toAcpLocationPath(raw, cwd);
 		if (seen.has(path)) return;
 		seen.add(path);
 		locations.push({ path });
@@ -803,10 +801,8 @@ function buildDiffContent(entry: unknown, cwd?: string): ToolCallContent | undef
 	if (typeof entry !== "object" || entry === null) return undefined;
 	const candidate = entry as { path?: unknown; oldText?: unknown; newText?: unknown; isError?: unknown };
 	if (candidate.isError === true) return undefined;
-	const rawPath = typeof candidate.path === "string" && candidate.path.length > 0 ? candidate.path : undefined;
-	if (!rawPath) return undefined;
-	const path = sanitizeText(rawPath);
-	if (path.length === 0) return undefined;
+	const path = typeof candidate.path === "string" && candidate.path.length > 0 ? candidate.path : undefined;
+	if (!path) return undefined;
 	const oldText = typeof candidate.oldText === "string" ? candidate.oldText : undefined;
 	const newText = typeof candidate.newText === "string" ? candidate.newText : undefined;
 	if (oldText === undefined && newText === undefined) return undefined;
