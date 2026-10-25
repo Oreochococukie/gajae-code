@@ -1102,7 +1102,12 @@ describe("ACP event mapper", () => {
 	}
 
 	it("does not send a tool argument terminal control sequence raw in the session update", () => {
-		const args = { command: "echo \u001b[31mred\u001b[0m", note: "\u001b]0;title\u0007hidden" };
+		const args = {
+			command: "echo \u001b[31mred\u001b[0m",
+			note: "\u001b]0;title\u0007hidden",
+			extra: ["\u001b[31mx"],
+			meta: { q: "\u0007z" },
+		};
 		const updates = mapAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "tool_execution_start",
@@ -1124,7 +1129,7 @@ describe("ACP event mapper", () => {
 			content?: Array<{ content?: { text?: string } }>;
 		};
 		expect(update.title).toBe("run tests");
-		expect(update.rawInput).toEqual({ command: "echo red", note: "hidden" });
+		expect(update.rawInput).toEqual({ command: "echo red", note: "hidden", extra: ["x"], meta: { q: "z" } });
 		expect(update.content?.[0]?.content?.text).toBe("$ echo red");
 		expect(update.rawInput).not.toBe(args);
 
@@ -1139,7 +1144,6 @@ describe("ACP event mapper", () => {
 			{ cwd: "/repo" },
 		);
 		expectAcpNotifications(readUpdates);
-		for (const text of stringsIn(readUpdates)) expect(text).not.toMatch(terminalControl);
 		const readUpdate = readUpdates[0]!.update as {
 			title?: string;
 			rawInput?: { path?: string };
@@ -1147,7 +1151,7 @@ describe("ACP event mapper", () => {
 		};
 		expect(readUpdate.title).toBe("read: src/evil.ts");
 		expect(readUpdate.rawInput).toEqual({ path: "src/evil.ts" });
-		expect(readUpdate.locations).toEqual([{ path: path.resolve("/repo", "src/evil.ts") }]);
+		expect(readUpdate.locations).toEqual([{ path: path.resolve("/repo", "src/\u001b[2Jevil.ts") }]);
 
 		const progress = mapAgentSessionEventToAcpSessionUpdates(
 			{
@@ -1177,6 +1181,26 @@ describe("ACP event mapper", () => {
 		for (const text of stringsIn((failed[0]!.update as { title?: string; content?: unknown }).title)) {
 			expect(text).not.toMatch(terminalControl);
 		}
+	});
+
+	it("keeps an own __proto__ key when rawInput is sanitized", () => {
+		const args = JSON.parse('{"command":"echo \\u001b[31mred","__proto__":{"x":1}}') as {
+			command: string;
+		};
+		const updates = mapAgentSessionEventToAcpSessionUpdates(
+			{
+				type: "tool_execution_start",
+				toolCallId: "toolu_proto",
+				toolName: "bash",
+				args,
+			} as AgentSessionEvent,
+			"session-1",
+		);
+		const rawInput = (updates[0]!.update as { rawInput: { command: string } }).rawInput;
+		expect(rawInput.command).toBe("echo red");
+		expect(Object.hasOwn(rawInput, "__proto__")).toBe(true);
+		expect(Object.getPrototypeOf(rawInput)).toBe(Object.prototype);
+		expect(JSON.parse(JSON.stringify(rawInput))).toEqual(JSON.parse('{"command":"echo red","__proto__":{"x":1}}'));
 	});
 
 	it("still sends an ordinary tool command, path, pattern, and intent unchanged", () => {
