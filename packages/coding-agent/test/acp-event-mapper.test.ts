@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import path from "node:path";
-import fc from "fast-check";
 import type { SessionNotification } from "@agentclientprotocol/sdk";
 import acpProtocolSchema from "@agentclientprotocol/sdk/schema/schema.json" with { type: "json" };
+import fc from "fast-check";
 import { fromJSONSchema } from "zod/v4";
 import type * as z from "zod/v4/core";
 import {
@@ -1267,35 +1267,42 @@ describe("ACP event mapper", () => {
 	});
 
 	it("property: tool argument controls stay out of the session update, seed 6722026, 64 inputs", () => {
+		const controlPrefix = fc.constantFrom("\u001b[31m", "\u001b]0;title\u0007", "\u0000", "\u007f", "\u001bc");
 		fc.assert(
-			fc.property(fc.string({ maxLength: 80 }), fc.string({ maxLength: 40 }), (command, note) => {
-				const updates = mapAgentSessionEventToAcpSessionUpdates(
-					{
-						type: "tool_execution_start",
-						toolCallId: "toolu_prop",
-						toolName: "bash",
-						args: { command, note },
-					} as AgentSessionEvent,
-					"session-1",
-				);
-				for (const text of stringsIn(updates)) expect(text).not.toMatch(terminalControl);
-				const update = updates[0]!.update as {
-					title: string;
-					rawInput: { command: string; note: string };
-				};
-				const again = mapAgentSessionEventToAcpSessionUpdates(
-					{
-						type: "tool_execution_start",
-						toolCallId: "toolu_prop",
-						toolName: "bash",
-						args: { command: update.rawInput.command, note: update.rawInput.note },
-					} as AgentSessionEvent,
-					"session-1",
-				);
-				const againUpdate = again[0]!.update as { title: string; rawInput: { command: string; note: string } };
-				expect(againUpdate.title).toBe(update.title);
-				expect(againUpdate.rawInput).toEqual(update.rawInput);
-			}),
+			fc.property(
+				controlPrefix,
+				fc.string({ maxLength: 40 }),
+				fc.string({ maxLength: 20 }),
+				(prefix, body, note) => {
+					const command = `${prefix}${body}`;
+					const updates = mapAgentSessionEventToAcpSessionUpdates(
+						{
+							type: "tool_execution_start",
+							toolCallId: "toolu_prop",
+							toolName: "bash",
+							args: { command, note },
+						} as AgentSessionEvent,
+						"session-1",
+					);
+					for (const text of stringsIn(updates)) expect(text).not.toMatch(terminalControl);
+					const update = updates[0]!.update as {
+						title: string;
+						rawInput: { command: string; note: string };
+					};
+					const again = mapAgentSessionEventToAcpSessionUpdates(
+						{
+							type: "tool_execution_start",
+							toolCallId: "toolu_prop",
+							toolName: "bash",
+							args: { command: update.rawInput.command, note: update.rawInput.note },
+						} as AgentSessionEvent,
+						"session-1",
+					);
+					const againUpdate = again[0]!.update as { title: string; rawInput: { command: string; note: string } };
+					expect(againUpdate.title).toBe(update.title);
+					expect(againUpdate.rawInput).toEqual(update.rawInput);
+				},
+			),
 			{ seed: 6722026, numRuns: 64 },
 		);
 	});
