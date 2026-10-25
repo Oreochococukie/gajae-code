@@ -122,8 +122,9 @@ function formatArgsAsXml(args: Record<string, unknown>, indent = "\t", redactCre
 
 /**
  * Format messages and session metadata as markdown/plain text (same shape as /dump clipboard export).
- * Text runs and tool-argument sections are scrubbed within their message/tool boundaries so
- * private-key banners cannot pair across unrelated messages or tool calls.
+ * Text runs, tool-argument sections, and each rendered Bash or Python execution
+ * section are scrubbed inside that section so a private-key banner cannot pair
+ * across unrelated messages.
  */
 export function formatSessionDumpText(options: FormatSessionDumpTextOptions): string {
 	const lines: string[] = [];
@@ -237,14 +238,16 @@ export function formatSessionDumpText(options: FormatSessionDumpTextOptions): st
 			const bashMsg = msg as BashExecutionMessage;
 			if (!bashMsg.excludeFromContext) {
 				lines.push("## Bash Execution\n");
-				lines.push(bashExecutionToText(redactStructuredSecrets(bashMsg) as BashExecutionMessage));
+				const rendered = bashExecutionToText(redactStructuredSecrets(bashMsg) as BashExecutionMessage);
+				lines.push(redactCrashSecrets(rendered));
 				lines.push("\n");
 			}
 		} else if (msg.role === "pythonExecution") {
 			const pythonMsg = msg as PythonExecutionMessage;
 			if (!pythonMsg.excludeFromContext) {
 				lines.push("## Python Execution\n");
-				lines.push(pythonExecutionToText(redactStructuredSecrets(pythonMsg) as PythonExecutionMessage));
+				const rendered = pythonExecutionToText(redactStructuredSecrets(pythonMsg) as PythonExecutionMessage);
+				lines.push(redactCrashSecrets(rendered));
 				lines.push("\n");
 			}
 		} else if (msg.role === "custom" || msg.role === "hookMessage") {

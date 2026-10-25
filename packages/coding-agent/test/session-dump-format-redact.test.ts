@@ -231,6 +231,54 @@ describe("formatSessionDumpText credential scrub", () => {
 		expect(dumped).not.toContain(pem("RSA", "END"));
 	});
 
+	it("removes a private-key block split across a bash command and its output", () => {
+		const firstSecretPart = "MIIEowIB";
+		const secondSecretPart = "AAKCAQEAxGZ0000";
+		const dumped = dump([
+			{
+				role: "bashExecution",
+				command: `before ${pem("RSA", "BEGIN")}\n${firstSecretPart}`,
+				output: `${secondSecretPart}\n${pem("RSA", "END")} after`,
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				timestamp: 1,
+			},
+		] as AgentMessage[]);
+
+		expect(dumped).toContain("before");
+		expect(dumped).toContain("after");
+		expect(dumped).toContain("«redacted-private-key»");
+		expect(dumped).not.toContain(firstSecretPart);
+		expect(dumped).not.toContain(secondSecretPart);
+		expect(dumped).not.toContain(pem("RSA", "BEGIN"));
+		expect(dumped).not.toContain(pem("RSA", "END"));
+	});
+
+	it("removes a private-key block split across python code and its output", () => {
+		const firstSecretPart = "MIIEowIB";
+		const secondSecretPart = "AAKCAQEAxGZ0000";
+		const dumped = dump([
+			{
+				role: "pythonExecution",
+				code: `before ${pem("RSA", "BEGIN")}\n${firstSecretPart}`,
+				output: `${secondSecretPart}\n${pem("RSA", "END")} after`,
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				timestamp: 1,
+			},
+		] as AgentMessage[]);
+
+		expect(dumped).toContain("before");
+		expect(dumped).toContain("after");
+		expect(dumped).toContain("«redacted-private-key»");
+		expect(dumped).not.toContain(firstSecretPart);
+		expect(dumped).not.toContain(secondSecretPart);
+		expect(dumped).not.toContain(pem("RSA", "BEGIN"));
+		expect(dumped).not.toContain(pem("RSA", "END"));
+	});
+
 	it("removes a private-key block split across adjacent assistant text blocks", () => {
 		const firstSecretPart = "MIIEowIB";
 		const secondSecretPart = "AAKCAQEAxGZ0000";
