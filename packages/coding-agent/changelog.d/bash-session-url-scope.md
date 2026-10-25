@@ -1,3 +1,3 @@
 ### Fixed
 
-- Bash expansion of rule and memory URLs stays inside the current session, including a non-Git project rule whose real path stays in an ancestor rule directory below the home directory, so one session cannot read or append another session's files.
+- Bash `rule://` expansion stays in the session directory, the repository root, the agent directory, a non-Git ancestor `.agent` or `.agents` rules directory under the trusted home, or a discovered user rule under `.agent/rules`, `.agents/rules`, or the agent directory, and `memory://` stays in the folded memory root for that cwd and agent directory.

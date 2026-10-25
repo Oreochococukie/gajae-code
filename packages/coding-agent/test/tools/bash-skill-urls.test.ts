@@ -522,6 +522,38 @@ describe("expandInternalUrls session scope", () => {
 		}
 	});
 
+	it.skipIf(process.platform === "win32")(
+		"expands memory for two project paths that fold to the same memory root",
+		async () => {
+			const parent = await mkdtemp(path.join(tmpdir(), "bash-shared-root-"));
+			const agentDir = path.join(parent, "agent");
+			const slashCwd = path.join(parent, "proj", "a");
+			const colonCwd = path.join(parent, "proj:a");
+			try {
+				expect(memoryRootFor(agentDir, slashCwd)).toBe(memoryRootFor(agentDir, colonCwd));
+				const sourcePath = path.join(memoryRootFor(agentDir, slashCwd), "memory_summary.md");
+				await mkdir(path.dirname(sourcePath), { recursive: true });
+				await mkdir(slashCwd, { recursive: true });
+				await mkdir(colonCwd, { recursive: true });
+				await writeFile(sourcePath, "shared-memory");
+				const router = createInternalRouter({ "memory://root/memory_summary.md": { sourcePath } });
+				const shared = { skills: [] as Skill[], internalRouter: router, sessionAgentDir: agentDir };
+				await expectExpandsToSource(
+					"cat memory://root/memory_summary.md",
+					{ ...shared, sessionCwd: slashCwd },
+					sourcePath,
+				);
+				await expectExpandsToSource(
+					"cat memory://root/memory_summary.md",
+					{ ...shared, sessionCwd: colonCwd },
+					sourcePath,
+				);
+			} finally {
+				await rm(parent, { recursive: true, force: true });
+			}
+		},
+	);
+
 	it("still allows a user rule file inside the session agent directory", async () => {
 		const cwd = await mkdtemp(path.join(tmpdir(), "bash-rule-proj-"));
 		const agentDir = await mkdtemp(path.join(tmpdir(), "bash-rule-agent-"));
@@ -544,6 +576,138 @@ describe("expandInternalUrls session scope", () => {
 			await rm(agentDir, { recursive: true, force: true });
 		}
 	});
+
+	function activeUserRule(name: string, filePath: string, provider = "agents") {
+		return {
+			name,
+			path: filePath,
+			content: name,
+			_source: {
+				provider,
+				providerName: provider,
+				path: filePath,
+				level: "user" as const,
+			},
+		};
+	}
+
+	it("expands an active user rule under .agent/rules and .agents/rules", async () => {
+		const trusted = await mkdtemp(path.join(tmpdir(), "bash-user-rule-"));
+		const spy = spyOn(utils, "getTrustedHomeDir").mockReturnValue(trusted);
+		try {
+			const repo = path.join(trusted, "work", "repo");
+			const cwd = path.join(repo, "subdir");
+			const agentsRule = path.join(trusted, ".agents", "rules", "name.md");
+			const agentRule = path.join(trusted, ".agent", "rules", "check.md");
+			const dotted = path.join(trusted, ".agents", "rules", ".", "name.md");
+			await mkdir(path.dirname(agentsRule), { recursive: true });
+			await mkdir(path.dirname(agentRule), { recursive: true });
+			await mkdir(cwd, { recursive: true });
+			await writeFile(agentsRule, "agents-user-rule");
+			await writeFile(agentRule, "agent-user-rule");
+			await execFileAsync("git", ["init", "-q", repo]);
+			setActiveRules([activeUserRule("name", agentsRule), activeUserRule("check", agentRule)]);
+			const router = createInternalRouter({
+				"rule://name": { sourcePath: agentsRule },
+				"rule://dotted": { sourcePath: dotted },
+				"rule://check": { sourcePath: agentRule },
+			});
+			const options = {
+				skills: [] as Skill[],
+				internalRouter: router,
+				sessionCwd: cwd,
+				sessionAgentDir: path.join(trusted, "agent"),
+			};
+			await expectExpandsToSource("cat rule://name", options, agentsRule);
+			await expectExpandsToSource("cat rule://dotted", options, agentsRule);
+			await expectExpandsToSource("cat rule://check", options, agentRule);
+		} finally {
+			spy.mockRestore();
+			resetActiveRulesForTests();
+			await rm(trusted, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects an undiscovered home file, a Cursor user rule, and a Windsurf global rule", async () => {
+		const trusted = await mkdtemp(path.join(tmpdir(), "bash-user-limit-"));
+		const spy = spyOn(utils, "getTrustedHomeDir").mockReturnValue(trusted);
+		try {
+			const repo = path.join(trusted, "work", "repo");
+			const cwd = path.join(repo, "subdir");
+			const undiscovered = path.join(trusted, ".agents", "rules", "other.md");
+			const homeNotes = path.join(trusted, "notes.md");
+			const cursorRule = path.join(trusted, ".cursor", "rules", "style.md");
+			const windsurfRule = path.join(trusted, ".codeium", "windsurf", "memories", "global_rules.md");
+			await mkdir(path.dirname(undiscovered), { recursive: true });
+			await mkdir(path.dirname(cursorRule), { recursive: true });
+			await mkdir(path.dirname(windsurfRule), { recursive: true });
+			await mkdir(cwd, { recursive: true });
+			await writeFile(undiscovered, "undiscovered");
+			await writeFile(homeNotes, "home-notes");
+			await writeFile(cursorRule, "cursor-rule");
+			await writeFile(windsurfRule, "windsurf-rule");
+			await execFileAsync("git", ["init", "-q", repo]);
+			setActiveRules([
+				activeUserRule("notes", homeNotes),
+				activeUserRule("style", cursorRule, "cursor"),
+				activeUserRule("global_rules", windsurfRule, "windsurf"),
+			]);
+			const router = createInternalRouter({
+				"rule://other": { sourcePath: undiscovered },
+				"rule://notes": { sourcePath: homeNotes },
+				"rule://style": { sourcePath: cursorRule },
+				"rule://global_rules": { sourcePath: windsurfRule },
+			});
+			const options = {
+				skills: [] as Skill[],
+				internalRouter: router,
+				sessionCwd: cwd,
+				sessionAgentDir: path.join(trusted, "agent"),
+			};
+			await expect(expandInternalUrls("cat rule://other", options)).rejects.toThrow(/outside this session/);
+			await expect(expandInternalUrls("cat rule://notes", options)).rejects.toThrow(/outside this session/);
+			await expect(expandInternalUrls("cat rule://style", options)).rejects.toThrow(/outside this session/);
+			await expect(expandInternalUrls("cat rule://global_rules", options)).rejects.toThrow(/outside this session/);
+		} finally {
+			spy.mockRestore();
+			resetActiveRulesForTests();
+			await rm(trusted, { recursive: true, force: true });
+		}
+	});
+
+	it.skipIf(process.platform === "win32" || !symlinkSupported)(
+		"rejects a discovered user rule whose real path leaves .agents/rules",
+		async () => {
+			const trusted = await mkdtemp(path.join(tmpdir(), "bash-user-link-"));
+			const outside = await mkdtemp(path.join(tmpdir(), "bash-user-link-out-"));
+			const spy = spyOn(utils, "getTrustedHomeDir").mockReturnValue(trusted);
+			try {
+				const cwd = path.join(trusted, "work", "repo");
+				const link = path.join(trusted, ".agents", "rules", "name.md");
+				const secret = path.join(outside, "secret.md");
+				await mkdir(path.dirname(link), { recursive: true });
+				await mkdir(cwd, { recursive: true });
+				await writeFile(secret, "secret");
+				await symlink(secret, link);
+				await execFileAsync("git", ["init", "-q", cwd]);
+				setActiveRules([activeUserRule("name", link)]);
+				const router = createInternalRouter({ "rule://name": { sourcePath: link } });
+				await expect(
+					expandInternalUrls("cat rule://name", {
+						skills: [],
+						internalRouter: router,
+						sessionCwd: cwd,
+						sessionAgentDir: path.join(trusted, "agent"),
+					}),
+				).rejects.toThrow(/outside this session/);
+			} finally {
+				spy.mockRestore();
+				resetActiveRulesForTests();
+				await rm(trusted, { recursive: true, force: true });
+				await rm(outside, { recursive: true, force: true });
+			}
+		},
+	);
 
 	it.skipIf(!canWriteUnderHome)(
 		"expands a project rule discovered from an ancestor directory in a non-Git session",
@@ -1235,4 +1399,88 @@ describe("bash session agent directory", () => {
 			});
 		},
 	);
+
+	it.skipIf(process.platform === "win32")(
+		"expands an active user rule under .agents/rules in bash command and env",
+		async () => {
+			const trusted = await mkdtemp(path.join(tmpdir(), "bash-user-cat-"));
+			const spy = spyOn(utils, "getTrustedHomeDir").mockReturnValue(trusted);
+			try {
+				const repo = path.join(trusted, "work", "repo");
+				const cwd = path.join(repo, "subdir");
+				const rulePath = path.join(trusted, ".agents", "rules", "name.md");
+				const agentDir = path.join(trusted, "agent");
+				await mkdir(path.dirname(rulePath), { recursive: true });
+				await mkdir(cwd, { recursive: true });
+				await mkdir(agentDir);
+				await writeFile(rulePath, "active-user-rule");
+				await execFileAsync("git", ["init", "-q", repo]);
+				setActiveRules([
+					{
+						name: "name",
+						path: rulePath,
+						content: "name",
+						_source: {
+							provider: "agents",
+							providerName: "agents",
+							path: rulePath,
+							level: "user" as const,
+						},
+					},
+				]);
+				const tool = createAgentDirBashTool(cwd, agentDir, path.join(trusted, "settings-agent"));
+				const commandResult = await tool.execute("call-user-rule", { command: "cat rule://name" });
+				expect(textOf(commandResult)).toContain("active-user-rule");
+				const envResult = await tool.execute("call-user-env", {
+					command: 'cat "$FOO"',
+					env: { FOO: "rule://name" },
+				});
+				expect(textOf(envResult)).toContain("active-user-rule");
+			} finally {
+				spy.mockRestore();
+				resetActiveRulesForTests();
+				await rm(trusted, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it.skipIf(process.platform === "win32")("rejects a Cursor user rule in bash command and env", async () => {
+		const trusted = await mkdtemp(path.join(tmpdir(), "bash-cursor-rule-"));
+		const spy = spyOn(utils, "getTrustedHomeDir").mockReturnValue(trusted);
+		try {
+			const repo = path.join(trusted, "work", "repo");
+			const cwd = path.join(repo, "subdir");
+			const cursorPath = path.join(trusted, ".cursor", "rules", "style.md");
+			const agentDir = path.join(trusted, "agent");
+			await mkdir(path.dirname(cursorPath), { recursive: true });
+			await mkdir(cwd, { recursive: true });
+			await mkdir(agentDir);
+			await writeFile(cursorPath, "cursor-rule");
+			await execFileAsync("git", ["init", "-q", repo]);
+			setActiveRules([
+				{
+					name: "style",
+					path: cursorPath,
+					content: "style",
+					_source: {
+						provider: "cursor",
+						providerName: "cursor",
+						path: cursorPath,
+						level: "user" as const,
+					},
+				},
+			]);
+			const tool = createAgentDirBashTool(cwd, agentDir, path.join(trusted, "settings-agent"));
+			await expect(tool.execute("call-cursor", { command: "cat rule://style" })).rejects.toThrow(
+				/outside this session/,
+			);
+			await expect(
+				tool.execute("call-cursor-env", { command: 'cat "$FOO"', env: { FOO: "rule://style" } }),
+			).rejects.toThrow(/outside this session/);
+		} finally {
+			spy.mockRestore();
+			resetActiveRulesForTests();
+			await rm(trusted, { recursive: true, force: true });
+		}
+	});
 });

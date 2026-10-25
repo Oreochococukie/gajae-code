@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getAgentDir, getMemoriesDir, getTrustedHomeDir, isEnoent } from "@gajae-code/utils";
 import { findRepoRoot } from "../capability/fs";
+import { getActiveRules } from "../capability/rule";
 import type { Skill } from "../extensibility/skills";
 import {
 	initializeLocalRoot,
@@ -279,7 +280,7 @@ const PROJECT_RULE_DIR_NAMES = [".agent", ".agents"] as const;
 
 /**
  * Real path of a rule file in an ancestor `.agent/rules` or `.agents/rules` directory
- * below the home directory. Non-Git discovery loads those directories and skips home.
+ * under the trusted home. Non-Git discovery loads those directories and skips home.
  */
 async function discoveredAncestorRulePath(sessionCwd: string, sourcePath: string): Promise<string | undefined> {
 	const cwd = path.resolve(sessionCwd);
@@ -310,6 +311,40 @@ async function discoveredAncestorRulePath(sessionCwd: string, sourcePath: string
 		const parent = path.dirname(ancestor);
 		if (parent === ancestor) break;
 		ancestor = parent;
+	}
+	return undefined;
+}
+
+/**
+ * Real path of an active user rule that stays inside the trusted home
+ * `.agent/rules` or `.agents/rules` directory. Other user-rule roots stay out.
+ */
+async function discoveredUserRulePath(sourcePath: string): Promise<string | undefined> {
+	const home = path.resolve(getTrustedHomeDir());
+	const lexical = path.resolve(sourcePath);
+	const realTarget = await canonicalPathOrAncestor(lexical, SESSION_URL_ESCAPE);
+	for (const rule of getActiveRules()) {
+		if (rule._source.level !== "user") continue;
+		const ruleLexical = path.resolve(rule.path);
+		let realRule: string;
+		try {
+			realRule = await fs.realpath(ruleLexical);
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+			continue;
+		}
+		if (realRule !== realTarget) continue;
+		for (const dirName of PROJECT_RULE_DIR_NAMES) {
+			const ruleRoot = path.join(home, dirName, "rules");
+			if (!pathStaysInside(ruleRoot, lexical) || !pathStaysInside(ruleRoot, ruleLexical)) continue;
+			let realRoot = ruleRoot;
+			try {
+				realRoot = await fs.realpath(ruleRoot);
+			} catch (error) {
+				if (!isEnoent(error)) throw error;
+			}
+			if (pathStaysInside(realRoot, realTarget)) return realTarget;
+		}
 	}
 	return undefined;
 }
@@ -376,9 +411,13 @@ async function sessionScopedExpansionPath(
 		const contained = await containedExpansionPath(root, sourcePath);
 		if (contained) return contained;
 	}
-	if (scheme === "rule" && !repoRoot) {
-		const ancestorRule = await discoveredAncestorRulePath(sessionCwd, sourcePath);
-		if (ancestorRule) return ancestorRule;
+	if (scheme === "rule") {
+		const userRule = await discoveredUserRulePath(sourcePath);
+		if (userRule) return userRule;
+		if (!repoRoot) {
+			const ancestorRule = await discoveredAncestorRulePath(sessionCwd, sourcePath);
+			if (ancestorRule) return ancestorRule;
+		}
 	}
 	throw new ToolError(`${scheme}:// ${SESSION_URL_ESCAPE}.`);
 }
@@ -486,7 +525,10 @@ export function expandSkillUrls(command: string, skills: readonly Skill[]): stri
 /**
  * Expand filesystem-safe internal URLs in a bash command string. `agent://` and
  * `artifact://` remain internal-reader-only and are rejected before resolution.
- * `rule://` and `memory://` expand only to a path inside the bash session.
+ * `rule://` expands to a session, repository, or agent-directory path, a non-Git
+ * ancestor rule under the trusted home, or a discovered user rule under
+ * `.agent/rules`, `.agents/rules`, or the agent directory. `memory://` expands
+ * only through the session memory-root guard.
  */
 export async function expandInternalUrls(command: string, options: InternalUrlExpansionOptions): Promise<string> {
 	if (!command.includes("://") && !command.includes("local:/")) return command;
