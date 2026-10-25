@@ -1,3 +1,4 @@
+import { sanitizeText } from "@gajae-code/utils";
 import type {
 	SessionNotification,
 	SessionUpdate,
@@ -581,6 +582,36 @@ function extractTodoEntries(phases: unknown[]): Array<{ content: string; status:
 function isTodoStatus(status: unknown): status is TodoStatus {
 	return status === "pending" || status === "in_progress" || status === "completed" || status === "abandoned";
 }
+
+/** Strip terminal controls from tool-argument text copied into a session update. */
+function sanitizeClientValue(value: unknown): unknown {
+	if (typeof value === "string") {
+		const clean = sanitizeText(value);
+		return clean === value ? value : clean;
+	}
+	if (Array.isArray(value)) {
+		let changed = false;
+		const next = value.map(item => {
+			const clean = sanitizeClientValue(item);
+			if (clean !== item) changed = true;
+			return clean;
+		});
+		return changed ? next : value;
+	}
+	if (typeof value !== "object" || value === null) return value;
+	const prototype = Object.getPrototypeOf(value);
+	if (prototype !== Object.prototype && prototype !== null) return value;
+	let changed = false;
+	const next: Record<string, unknown> = {};
+	for (const key of Object.keys(value)) {
+		const current = (value as Record<string, unknown>)[key];
+		const clean = sanitizeClientValue(current);
+		if (clean !== current) changed = true;
+		next[key] = clean;
+	}
+	return changed ? next : value;
+}
+
 export function buildToolCallStartUpdate(input: {
 	toolCallId: string;
 	toolName: string;
@@ -595,7 +626,7 @@ export function buildToolCallStartUpdate(input: {
 		title: buildToolTitle(input.toolName, input.args, input.intent),
 		kind: mapToolKind(input.toolName),
 		status: input.status ?? "pending",
-		rawInput: input.args,
+		rawInput: sanitizeClientValue(input.args),
 	};
 	const content = buildToolStartContent(input.toolName, input.args);
 	if (content.length > 0) {
@@ -635,7 +666,9 @@ function buildToolStartContent(toolName: string, args: unknown): ToolCallContent
 		return [];
 	}
 	const command = extractStringProperty<CommandContainer>(args, "command");
-	return command ? [textToolCallContent(`$ ${command}`)] : [];
+	if (!command) return [];
+	const safeCommand = sanitizeText(command);
+	return safeCommand.length > 0 ? [textToolCallContent(`$ ${safeCommand}`)] : [];
 }
 
 function mergeToolUpdateContent(startContent: ToolCallContent[], resultContent: ToolCallContent[]): ToolCallContent[] {
@@ -676,7 +709,8 @@ function isCommandToolName(toolName: string): boolean {
 function buildToolTitle(toolName: string, args: unknown, intent: string | undefined): string {
 	const trimmedIntent = intent?.trim();
 	if (trimmedIntent) {
-		return trimmedIntent;
+		const safeIntent = sanitizeText(trimmedIntent).trim();
+		if (safeIntent.length > 0) return safeIntent;
 	}
 
 	const subject =
@@ -685,10 +719,11 @@ function buildToolTitle(toolName: string, args: unknown, intent: string | undefi
 		extractStringProperty<PatternContainer>(args, "pattern") ??
 		extractStringProperty<QueryContainer>(args, "query");
 	if (subject) {
-		return `${toolName}: ${subject}`;
+		const safeSubject = sanitizeText(subject);
+		if (safeSubject.length > 0) return sanitizeText(`${toolName}: ${safeSubject}`);
 	}
 
-	return toolName;
+	return sanitizeText(toolName);
 }
 
 /**
@@ -711,7 +746,9 @@ function extractToolLocations(args: unknown, cwd?: string): ToolCallLocation[] {
 	const seen = new Set<string>();
 	const pushPath = (raw: string | undefined) => {
 		if (!raw) return;
-		const path = toAcpLocationPath(raw, cwd);
+		const safe = sanitizeText(raw);
+		if (safe.length === 0) return;
+		const path = toAcpLocationPath(safe, cwd);
 		if (seen.has(path)) return;
 		seen.add(path);
 		locations.push({ path });
@@ -766,8 +803,10 @@ function buildDiffContent(entry: unknown, cwd?: string): ToolCallContent | undef
 	if (typeof entry !== "object" || entry === null) return undefined;
 	const candidate = entry as { path?: unknown; oldText?: unknown; newText?: unknown; isError?: unknown };
 	if (candidate.isError === true) return undefined;
-	const path = typeof candidate.path === "string" && candidate.path.length > 0 ? candidate.path : undefined;
-	if (!path) return undefined;
+	const rawPath = typeof candidate.path === "string" && candidate.path.length > 0 ? candidate.path : undefined;
+	if (!rawPath) return undefined;
+	const path = sanitizeText(rawPath);
+	if (path.length === 0) return undefined;
 	const oldText = typeof candidate.oldText === "string" ? candidate.oldText : undefined;
 	const newText = typeof candidate.newText === "string" ? candidate.newText : undefined;
 	if (oldText === undefined && newText === undefined) return undefined;
