@@ -1,4 +1,3 @@
-import { sanitizeText } from "@gajae-code/utils";
 import type {
 	SessionNotification,
 	SessionUpdate,
@@ -7,6 +6,7 @@ import type {
 	ToolCallLocation,
 	ToolKind,
 } from "@agentclientprotocol/sdk";
+import { sanitizeText } from "@gajae-code/utils";
 import type { AgentSessionEvent } from "../../session/agent-session";
 
 export type { AgentSessionEvent };
