@@ -1184,6 +1184,7 @@ describe("ACP event mapper", () => {
 	});
 
 	it("preserves an own __proto__ key on sanitized rawInput", () => {
+		// sanitizeClientValue copies own keys with defineProperty.
 		const args = JSON.parse('{"command":"echo \\u001b[31mred","__proto__":{"x":1}}') as {
 			command: string;
 		};
@@ -1358,6 +1359,37 @@ describe("ACP event mapper", () => {
 					expect(update.content?.[0]?.content?.text).toBe(`$ ${command}`);
 				}
 			}),
+			{ seed: 6722026, numRuns: 64 },
+		);
+	});
+
+	it("property: nested tool arguments drop controls and keep shape, seed 6722026, 64 inputs", () => {
+		const leaf = fc.string({ maxLength: 24 });
+		fc.assert(
+			fc.property(
+				fc.array(leaf, { maxLength: 3 }),
+				fc.dictionary(fc.stringMatching(/^[a-z]{1,8}$/), leaf, { maxKeys: 3 }),
+				(extra, meta) => {
+					const updates = mapAgentSessionEventToAcpSessionUpdates(
+						{
+							type: "tool_execution_start",
+							toolCallId: "toolu_nested",
+							toolName: "bash",
+							args: { command: "echo ok", extra, meta },
+						} as AgentSessionEvent,
+						"session-1",
+					);
+					const raw = (
+						updates[0]!.update as {
+							rawInput: { command: string; extra: string[]; meta: Record<string, string> };
+						}
+					).rawInput;
+					expect(raw.command).toBe("echo ok");
+					expect(raw.extra).toHaveLength(extra.length);
+					expect(Object.keys(raw.meta).sort()).toEqual(Object.keys(meta).sort());
+					for (const text of stringsIn(raw)) expect(text).not.toMatch(terminalControl);
+				},
+			),
 			{ seed: 6722026, numRuns: 64 },
 		);
 	});
