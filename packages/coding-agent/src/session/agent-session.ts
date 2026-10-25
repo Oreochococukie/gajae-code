@@ -391,7 +391,7 @@ import {
 	type WorkflowRecoveryZeroProgressMemory,
 } from "../gjc-runtime/workflow-recovery-projection";
 import { GoalRuntime } from "../goals/runtime";
-import { normalizeGoal, type Goal, type GoalModeState } from "../goals/state";
+import type { Goal, GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import {
 	buildSkillStopOutput,
@@ -13849,6 +13849,13 @@ export class AgentSession {
 		}
 	}
 
+	/** Drop plan mode and its reference when plan tool activation does not finish. */
+	clearPlanModeBinding(): void {
+		this.setPlanModeState(undefined);
+		this.#planReferenceSent = false;
+		this.#planReferencePath = "local://PLAN.md";
+	}
+
 	async invokeSkill(
 		name: string,
 		args = "",
@@ -14038,8 +14045,8 @@ export class AgentSession {
 
 	/**
 	 * The loaded session file is the mode source after a switch to a different
-	 * file. A saved goal is installed only when goal mode is enabled. A saved
-	 * plan is installed only when plan mode is enabled and tools are available.
+	 * file. A saved plan is installed only when plan mode is enabled and tools
+	 * are available. Goal state is left unchanged.
 	 */
 	#rebindSwitchedSessionMode(sessionContext: SessionContext): void {
 		const mode = sessionContext.mode;
@@ -14050,16 +14057,8 @@ export class AgentSession {
 			const planFilePath = typeof rawPath === "string" ? rawPath : "local://PLAN.md";
 			this.setPlanModeState({ enabled: true, planFilePath });
 		} else {
-			this.setPlanModeState(undefined);
-			this.#planReferenceSent = false;
-			this.#planReferencePath = "local://PLAN.md";
+			this.clearPlanModeBinding();
 		}
-
-		const savedGoal =
-			(mode === "goal" || mode === "goal_paused") && this.settings.get("goal.enabled")
-				? normalizeGoal(sessionContext.modeData?.goal)
-				: undefined;
-		this.setGoalModeState(savedGoal ? { enabled: mode === "goal", mode: "active", goal: savedGoal } : undefined);
 		this.#resetInjectedContextSignatures();
 	}
 
@@ -29269,8 +29268,8 @@ export class AgentSession {
 					await exactRetirement?.commit();
 					transitionCleanupCommitted = true;
 					sessionIdentityCommitted = true;
-					// Bind plan and goal before post-commit cleanup. A cleanup failure
-					// leaves this successor active and must not keep the predecessor slots.
+					// Bind plan before post-commit cleanup. A cleanup failure leaves this
+					// successor active and must not keep the predecessor plan slot.
 					this.#rebindSwitchedSessionMode(sessionContext);
 					// A checkpoint count and entry id belong to the predecessor file.
 					// Leaving them armed lets a later rewind slice the successor and

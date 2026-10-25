@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent } from "@gajae-code/agent-core";
@@ -6,7 +6,6 @@ import { getBundledModel } from "@gajae-code/ai";
 import { createMockModel } from "@gajae-code/ai/providers/mock";
 import { ModelRegistry } from "@gajae-code/coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@gajae-code/coding-agent/config/settings";
-import type { Goal } from "@gajae-code/coding-agent/goals/state";
 import { initTheme } from "@gajae-code/coding-agent/modes/theme/theme";
 import { AgentSession } from "@gajae-code/coding-agent/session/agent-session";
 import { AuthStorage } from "@gajae-code/coding-agent/session/auth-storage";
@@ -15,18 +14,6 @@ import type { ToolSession } from "@gajae-code/coding-agent/tools";
 import { ResolveTool } from "@gajae-code/coding-agent/tools/resolve";
 import { TempDir } from "@gajae-code/utils";
 import { InteractiveMode } from "../src/modes/interactive-mode";
-
-function goal(id: string, objective: string): Goal {
-	return {
-		id,
-		objective,
-		status: "active",
-		tokensUsed: 0,
-		timeUsedSeconds: 0,
-		createdAt: 1,
-		updatedAt: 1,
-	};
-}
 
 describe("interactive controllers follow a committed session switch", () => {
 	const sessions: AgentSession[] = [];
@@ -78,14 +65,13 @@ describe("interactive controllers follow a committed session switch", () => {
 
 	async function persistOtherSession(
 		tempDir: TempDir,
-		mode: { mode: "plan"; planFilePath: string } | { mode: "plan_paused" } | { mode: "goal"; goal: Goal },
+		mode: { mode: "plan"; planFilePath: string } | { mode: "plan_paused" },
 	): Promise<string> {
 		const manager = SessionManager.create(tempDir.path(), tempDir.path());
 		try {
 			manager.appendMessage({ role: "user", content: "other session", timestamp: 1 });
 			if (mode.mode === "plan") manager.appendModeChange("plan", { planFilePath: mode.planFilePath });
 			if (mode.mode === "plan_paused") manager.appendModeChange("plan_paused");
-			if (mode.mode === "goal") manager.appendModeChange("goal", { goal: mode.goal });
 			await manager.ensureOnDisk();
 			await manager.flush();
 			const sessionFile = manager.getSessionFile();
@@ -103,7 +89,6 @@ describe("interactive controllers follow a committed session switch", () => {
 
 	it("does not activate a saved plan when the tool selection is empty", async () => {
 		const { session, mode, tempDir } = await createSession();
-		await activateGoal(mode);
 		const other = await persistOtherSession(tempDir, { mode: "plan", planFilePath: "successor-plan.md" });
 
 		expect(await session.switchSession(other)).toBe(true);
@@ -111,7 +96,6 @@ describe("interactive controllers follow a committed session switch", () => {
 		expect(mode.planModeController.paused).toBe(false);
 		expect(session.getPlanModeState()).toBeUndefined();
 		expect(session.peekStandingResolveHandler()).toBeUndefined();
-		expect(mode.goalModeController.enabled).toBe(false);
 	});
 
 	it("rehydrates a saved plan and accepts approval through resolve", async () => {
@@ -133,7 +117,6 @@ describe("interactive controllers follow a committed session switch", () => {
 
 	it("reconciles controllers when cleanup fails after the successor commits", async () => {
 		const { session, mode, tempDir } = await createSession(undefined, { emptyTools: false });
-		await activateGoal(mode);
 		fs.writeFileSync(path.join(tempDir.path(), "cleanup-plan.md"), "# Cleanup plan\n\nStill there.\n");
 		const other = await persistOtherSession(tempDir, { mode: "plan", planFilePath: "cleanup-plan.md" });
 		const unregister = session.registerToolSessionTransitionCleanup(() => {
@@ -144,9 +127,7 @@ describe("interactive controllers follow a committed session switch", () => {
 			expect(mode.planModeController.enabled).toBe(true);
 			expect(mode.planModeController.planFilePath).toBe("cleanup-plan.md");
 			expect(session.peekStandingResolveHandler()).toBeDefined();
-			expect(mode.goalModeController.enabled).toBe(false);
-			await mode.goalModeController.enter({ objective: "must stay blocked", silent: true });
-			expect(mode.goalModeController.enabled).toBe(false);
+			expect(session.getPlanModeState()?.enabled).toBe(true);
 		} finally {
 			unregister();
 		}
@@ -169,22 +150,6 @@ describe("interactive controllers follow a committed session switch", () => {
 		expect(session.getGoalModeState()?.goal.objective).toBe("predecessor objective");
 	});
 
-	it("does not arm the goal controller when goal mode is disabled", async () => {
-		const { session, mode, tempDir } = await createSession({ "goal.enabled": false });
-		mode.goalModeController.setEnabledForCompatibility(true);
-		session.setGoalModeState({ enabled: true, mode: "active", goal: goal("pred", "PREDECESSOR-GOAL-OBJECTIVE") });
-		const other = await persistOtherSession(tempDir, {
-			mode: "goal",
-			goal: goal("succ", "SUCCESSOR-GOAL-OBJECTIVE"),
-		});
-
-		expect(await session.switchSession(other)).toBe(true);
-		expect(session.getGoalModeState()).toBeUndefined();
-		expect(mode.goalModeController.enabled).toBe(false);
-		expect(mode.goalModeController.paused).toBe(false);
-		expect(mode.planModeController.enabled).toBe(false);
-	});
-
 	it("does not activate plan mode when plan mode is disabled", async () => {
 		const { session, mode, tempDir } = await createSession({ "plan.enabled": false }, { emptyTools: false });
 		const other = await persistOtherSession(tempDir, { mode: "plan", planFilePath: "disabled-plan.md" });
@@ -198,15 +163,50 @@ describe("interactive controllers follow a committed session switch", () => {
 
 	it("pauses the plan controller for a saved paused plan", async () => {
 		const { session, mode, tempDir } = await createSession(undefined, { emptyTools: false });
-		await activateGoal(mode);
 		const other = await persistOtherSession(tempDir, { mode: "plan_paused" });
 
 		expect(await session.switchSession(other)).toBe(true);
 		expect(mode.planModeController.enabled).toBe(false);
 		expect(mode.planModeController.paused).toBe(true);
-		expect(mode.goalModeController.enabled).toBe(false);
-		await mode.goalModeController.enter({ objective: "must stay blocked", silent: true });
-		expect(mode.goalModeController.enabled).toBe(false);
+		expect(session.peekStandingResolveHandler()).toBeUndefined();
+	});
+
+	it("clears the plan slot when plan tool activation throws", async () => {
+		const { session, mode, tempDir } = await createSession(undefined, { emptyTools: false });
+		const planFilePath = "activation-fails.md";
+		fs.writeFileSync(path.join(tempDir.path(), planFilePath), "# Plan\n\nWork.\n");
+		const other = await persistOtherSession(tempDir, { mode: "plan", planFilePath });
+		const original = session.setActiveToolsByName.bind(session);
+		const activation = spyOn(session, "setActiveToolsByName").mockImplementation(async (toolNames, options) => {
+			if (
+				options?.explicit === false &&
+				options.persistMCPSelection === false &&
+				options.retryOnMcpCatalogChange === true
+			) {
+				throw new Error("tool activation failed");
+			}
+			return original(toolNames, options);
+		});
+		try {
+			expect(await session.switchSession(other)).toBe(true);
+			expect(session.getPlanModeState()).toBeUndefined();
+			expect(mode.planModeController.enabled).toBe(false);
+			expect(mode.planModeController.paused).toBe(false);
+			expect(session.peekStandingResolveHandler()).toBeUndefined();
+			await session.prompt("hello");
+			const text = session.messages
+				.map(message => (message.role === "custom" && typeof message.content === "string" ? message.content : ""))
+				.join("\n");
+			expect(text).not.toContain(planFilePath);
+			expect(
+				session.messages.some(message => message.role === "custom" && message.customType === "plan-mode-context"),
+			).toBe(false);
+			expect(
+				session.messages.some(message => message.role === "custom" && message.customType === "plan-mode-reference"),
+			).toBe(false);
+		} finally {
+			activation.mockRestore();
+		}
 	});
 
 	it("keeps controllers when switchSession reloads the same file", async () => {

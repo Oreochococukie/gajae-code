@@ -154,6 +154,8 @@ export class PlanModeController {
 			this.#previousTools = undefined;
 			this.#previousMCPToolNames = undefined;
 			this.ctx.modeGate.exit("plan");
+			this.ctx.session.setStandingResolveHandler?.(null);
+			this.ctx.session.clearPlanModeBinding();
 			throw error;
 		}
 		this.ctx.session.setPlanModeState({
