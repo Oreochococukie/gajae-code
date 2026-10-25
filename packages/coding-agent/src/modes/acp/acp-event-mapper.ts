@@ -583,32 +583,46 @@ function isTodoStatus(status: unknown): status is TodoStatus {
 	return status === "pending" || status === "in_progress" || status === "completed" || status === "abandoned";
 }
 
+/** Nesting past this depth is left unchanged so a huge tool args tree cannot overflow the stack. */
+const CLIENT_VALUE_MAX_DEPTH = 64;
+
 /** Strip terminal controls from tool-argument text copied into a session update. */
 function sanitizeClientValue(value: unknown): unknown {
+	return sanitizeClientValueWalk(value, new WeakMap(), 0);
+}
+
+function sanitizeClientValueWalk(value: unknown, seen: WeakMap<object, unknown>, depth: number): unknown {
 	if (typeof value === "string") {
 		const clean = sanitizeText(value);
 		return clean === value ? value : clean;
 	}
+	if (typeof value !== "object" || value === null || depth >= CLIENT_VALUE_MAX_DEPTH) return value;
+	const existing = seen.get(value);
+	if (existing !== undefined) return existing;
 	if (Array.isArray(value)) {
+		const next: unknown[] = [];
+		seen.set(value, next);
 		let changed = false;
-		const next = value.map(item => {
-			const clean = sanitizeClientValue(item);
+		for (const item of value) {
+			const clean = sanitizeClientValueWalk(item, seen, depth + 1);
 			if (clean !== item) changed = true;
-			return clean;
-		});
+			next.push(clean);
+		}
+		if (!changed) seen.set(value, value);
 		return changed ? next : value;
 	}
-	if (typeof value !== "object" || value === null) return value;
 	const prototype = Object.getPrototypeOf(value);
 	if (prototype !== Object.prototype && prototype !== null) return value;
-	let changed = false;
 	const next = Object.create(prototype) as Record<string, unknown>;
+	seen.set(value, next);
+	let changed = false;
 	for (const key of Object.keys(value)) {
 		const current = (value as Record<string, unknown>)[key];
-		const clean = sanitizeClientValue(current);
+		const clean = sanitizeClientValueWalk(current, seen, depth + 1);
 		if (clean !== current) changed = true;
 		Object.defineProperty(next, key, { value: clean, enumerable: true, writable: true, configurable: true });
 	}
+	if (!changed) seen.set(value, value);
 	return changed ? next : value;
 }
 
