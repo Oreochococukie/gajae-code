@@ -270,7 +270,7 @@ describe("runCrashReportFlow — duplicate handling", () => {
 		const bel = "\u0007";
 		const title =
 			`visible${esc}]52;c;cGF5bG9hZA==${bel}${esc}[2J\n  "forged line" by attacker` +
-			`${esc}]0;spoofed-title${bel}\u009d52;c;c1payload${bel}`;
+			`${esc}]0;spoofed-title${bel}\u009d52;c;c1payload${bel}\u202e`;
 		const author = `login${bel}${esc}[31m`;
 		const h = await harness();
 		const outcome = await runCrashReportFlow({
@@ -297,13 +297,14 @@ describe("runCrashReportFlow — duplicate handling", () => {
 		expect(printed).not.toContain("\u009d");
 		expect(printed).not.toContain("cGF5bG9hZA");
 		expect(printed).not.toContain("spoofed-title");
+		expect(printed).not.toContain("\u202e");
 		const titleRow = printed.split("\n").find(line => line.includes("visible"));
 		expect(titleRow).toBe(`  "visible   "forged line" by attacker" by login`);
 		expect(printed.split("\n").some(line => line.startsWith('  "forged'))).toBe(false);
 	});
 
 	it("still allows a spaced punctuation duplicate title", async () => {
-		const title = "  Crash: TypeError in renderer #12 (macOS) — see https://example.com/issues/12  ";
+		const title = "  Crash:\tTypeError in renderer #12 (macOS) — see https://example.com/issues/12  ";
 		const author = "Some-User";
 		const h = await harness();
 		const outcome = await runCrashReportFlow({
