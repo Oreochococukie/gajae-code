@@ -324,7 +324,7 @@ describe("SettingsList", () => {
 							return {
 								render: () => [current],
 								handleInput: (data: string) => {
-									if (data === "\n") done(current);
+									if (data === "\n") done(current, false);
 								},
 								invalidate() {},
 							};
@@ -352,6 +352,37 @@ describe("SettingsList", () => {
 			list.handleInput("\n");
 			expect(changes).toEqual([original]);
 		}
+	});
+
+	it("commits a prefill-equal submit when the field was edited", () => {
+		const original = "keep\nme";
+		const flattened = "keep me";
+		const changes: string[] = [];
+		const list = new SettingsList(
+			[
+				{
+					id: "compaction.handoffPromptExtension",
+					label: "Handoff Prompt Extension",
+					currentValue: original,
+					submenu: (current, done) => ({
+						render: () => [current],
+						handleInput: (data: string) => {
+							if (data === "\n") done(current, true);
+						},
+						invalidate() {},
+					}),
+				},
+			],
+			5,
+			testTheme,
+			(_id, value) => {
+				changes.push(value);
+			},
+			() => {},
+		);
+		list.handleInput("\n");
+		list.handleInput("\n");
+		expect(changes).toEqual([flattened]);
 	});
 
 	it("commits an edited prefill instead of the stored multiline value", () => {

@@ -175,6 +175,99 @@ describe("settings value display", () => {
 		}
 	});
 
+	it("renders a number or boolean stored in a string setting", async () => {
+		await Settings.init({ inMemory: true });
+		settings.set("compaction.handoffPromptExtension", 42 as never);
+		const handoff = selector(process.cwd(), []);
+		for (let i = 0; i < 3; i++) handoff.handleInput("\x1b[C");
+		const context = raw(handoff);
+		expect(context.includes("[render error")).toBe(false);
+		expect(context).toContain("Handoff Prompt Extension");
+		expect(context).toContain("42");
+
+		settings.set("modelProfile.proxyProvider", true as never);
+		const model = selector(process.cwd(), []);
+		model.handleInput("\x1b[C");
+		const shown = raw(model);
+		expect(shown.includes("[render error")).toBe(false);
+		expect(shown).toContain("Proxy Provider");
+		expect(shown).toContain("true");
+	});
+
+	it("confirms a numeric string setting without changing it", async () => {
+		await Settings.init({ inMemory: true });
+		settings.set("compaction.handoffPromptExtension", 42 as never);
+		const changed: Array<{ path: string; value: unknown }> = [];
+		const component = selector(process.cwd(), changed);
+		openHandoffField(component);
+		component.handleInput("\n");
+		expect(settings.get("compaction.handoffPromptExtension") as unknown).toBe(42);
+		expect(changed.at(-1)).toEqual({ path: "compaction.handoffPromptExtension", value: 42 });
+	});
+
+	it("commits the flattened handoff text after an edit returns to the prefill", async () => {
+		const original = "Keep the summary concise.\nPreserve unresolved risks.";
+		const flattened = "Keep the summary concise. Preserve unresolved risks.";
+		await Settings.init({ inMemory: true });
+		settings.set("compaction.handoffPromptExtension", original);
+		const changed: Array<{ path: string; value: unknown }> = [];
+		const component = selector(process.cwd(), changed);
+		openHandoffField(component);
+		component.handleInput("!");
+		component.handleInput("\x7f");
+		component.handleInput("\n");
+		expect(settings.get("compaction.handoffPromptExtension")).toBe(flattened);
+		expect(changed.at(-1)).toEqual({ path: "compaction.handoffPromptExtension", value: flattened });
+	});
+
+	it("clears a control-only proxy provider after the field is edited", async () => {
+		const original = "\u0000";
+		await Settings.init({ inMemory: true });
+		settings.set("modelProfile.proxyProvider", original);
+		const changed: Array<{ path: string; value: unknown }> = [];
+		const component = selector(process.cwd(), changed);
+		component.handleInput("\x1b[C");
+		const opened = openProxyField(component);
+		expect(opened).toContain("Proxy Provider");
+		expect(opened.includes("\u0000")).toBe(false);
+		component.handleInput("\n");
+		expect(settings.get("modelProfile.proxyProvider")).toBe(original);
+		const reopened = openProxyField(component);
+		expect(reopened).toContain("Proxy Provider");
+		component.handleInput("a");
+		component.handleInput("\x7f");
+		component.handleInput("\n");
+		expect(settings.get("modelProfile.proxyProvider")).toBe("");
+		expect(changed.at(-1)).toEqual({ path: "modelProfile.proxyProvider", value: "" });
+	});
+
+	it("commits a pasted proxy id when paste and enter arrive together", async () => {
+		await Settings.init({ inMemory: true });
+		settings.set("modelProfile.proxyProvider", "old");
+		const changed: Array<{ path: string; value: unknown }> = [];
+		const component = selector(process.cwd(), changed);
+		component.handleInput("\x1b[C");
+		const opened = openProxyField(component);
+		expect(opened).toContain("Proxy Provider");
+		component.handleInput("\x1b[200~NEW\x1b[201~\n");
+		expect(settings.get("modelProfile.proxyProvider")).toBe("oldNEW");
+		expect(changed.at(-1)).toEqual({ path: "modelProfile.proxyProvider", value: "oldNEW" });
+	});
+
+	it("clears an ordinary spaced proxy provider id after an edit", async () => {
+		await Settings.init({ inMemory: true });
+		settings.set("modelProfile.proxyProvider", " litellm ");
+		const changed: Array<{ path: string; value: unknown }> = [];
+		const component = selector(process.cwd(), changed);
+		component.handleInput("\x1b[C");
+		const opened = openProxyField(component);
+		expect(opened).toContain(" litellm ");
+		for (const _character of " litellm ") component.handleInput("\x7f");
+		component.handleInput("\n");
+		expect(settings.get("modelProfile.proxyProvider")).toBe("");
+		expect(changed.at(-1)).toEqual({ path: "modelProfile.proxyProvider", value: "" });
+	});
+
 	it("persists an edited handoff prompt extension", async () => {
 		const original = "Keep the summary concise.\nPreserve unresolved risks.";
 		const edited = "Keep the summary concise. Preserve unresolved risks.!";

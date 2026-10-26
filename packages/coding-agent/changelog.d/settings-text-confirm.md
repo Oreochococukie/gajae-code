@@ -1,3 +1,3 @@
 ### Fixed
 
-- Confirming an unchanged settings or plugin text field keeps the stored string.
+- An untouched settings or plugin text confirm keeps the stored string, an edit commits the submitted text, and plugin enum confirmation keeps the stored option.

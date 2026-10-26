@@ -218,12 +218,12 @@ export class PluginDetailComponent extends Container {
 						label: `  ${key}`,
 						description: schema.description || `Configure ${key}`,
 						currentValue: String(currentValue ?? schema.default ?? ""),
-						submenu: (cv, done) =>
+						submenu: (cv, done, stored) =>
 							new ConfigEnumSubmenu(
 								key,
 								schema.description || `Select value for ${key}`,
 								schema.values,
-								cv,
+								stored ?? cv,
 								value => {
 									this.callbacks.onConfigChange(key, value);
 									done(value);
@@ -342,12 +342,14 @@ class ConfigEnumSubmenu extends Container {
  */
 class ConfigInputSubmenu extends Container {
 	#input: Input;
+	#baseline = "";
+	#edited = false;
 
 	constructor(
 		key: string,
 		schema: PluginSettingSchema,
 		currentValue: string,
-		private readonly onSubmit: (value: string) => void,
+		private readonly onSubmit: (value: string, edited: boolean) => void,
 		private readonly onCancel: () => void,
 	) {
 		super();
@@ -376,10 +378,12 @@ class ConfigInputSubmenu extends Container {
 		if (!schema.secret && currentValue) {
 			this.#input.setValue(currentValue);
 		}
+		this.#baseline = this.#input.getValue();
 
 		this.#input.onSubmit = value => {
+			if (value !== this.#baseline) this.#edited = true;
 			if (value.trim()) {
-				this.onSubmit(value);
+				this.onSubmit(value, this.#edited);
 			} else {
 				this.onCancel();
 			}
@@ -391,17 +395,19 @@ class ConfigInputSubmenu extends Container {
 	}
 
 	handleInput(data: string): void {
+		const before = this.#input.getValue();
 		handleInputOrEscape(data, this.#input, this.onCancel);
+		if (this.#input.getValue() !== before) this.#edited = true;
 	}
 }
 
 export function commitPluginConfigValue(
 	stored: string,
-	prefill: string,
 	submitted: string,
 	type: PluginSettingSchema["type"],
+	edited: boolean,
 ): unknown {
-	if (type === "string" && submitted === prefill.normalize("NFC")) return stored;
+	if (type === "string" && !edited) return stored;
 	return type === "number" ? Number(submitted) : submitted;
 }
 
@@ -417,10 +423,10 @@ export function createPluginTextSubmenu(
 			key,
 			schema,
 			prefill,
-			value => {
-				const committed = commitPluginConfigValue(original, prefill, value, schema.type);
+			(value, edited) => {
+				const committed = commitPluginConfigValue(original, value, schema.type, edited);
 				onConfigChange(key, committed);
-				done(String(committed));
+				done(String(committed), edited);
 			},
 			() => done(),
 		);

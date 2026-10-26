@@ -56,12 +56,14 @@ import type { StatusLinePreviewParts, StatusLineSegmentOptions } from "./tool-st
  */
 class TextInputSubmenu extends Container {
 	#input: Input;
+	#baseline = "";
+	#edited = false;
 
 	constructor(
 		label: string,
 		description: string,
 		currentValue: string,
-		private readonly onSubmit: (value: string) => void,
+		private readonly onSubmit: (value: string, edited: boolean) => void,
 		private readonly onCancel: () => void,
 	) {
 		super();
@@ -77,8 +79,10 @@ class TextInputSubmenu extends Container {
 		if (currentValue) {
 			this.#input.setValue(currentValue);
 		}
+		this.#baseline = this.#input.getValue();
 		this.#input.onSubmit = value => {
-			this.onSubmit(value); // empty string clears the setting
+			if (value !== this.#baseline) this.#edited = true;
+			this.onSubmit(value, this.#edited); // empty string clears the setting
 		};
 		this.addChild(this.#input);
 		this.addChild(new Spacer(1));
@@ -86,11 +90,15 @@ class TextInputSubmenu extends Container {
 	}
 
 	handleInput(data: string): void {
+		const before = this.#input.getValue();
 		handleInputOrEscape(data, this.#input, this.onCancel);
+		if (this.#input.getValue() !== before) this.#edited = true;
 	}
 
 	submit(): void {
-		this.onSubmit(this.#input.getValue());
+		const value = this.#input.getValue();
+		if (value !== this.#baseline) this.#edited = true;
+		this.onSubmit(value, this.#edited);
 	}
 
 	cancel(): void {
@@ -1752,7 +1760,7 @@ export class SettingsSelectorComponent extends Container {
 					label,
 					description,
 					currentValue: this.#getSubmenuCurrentValue(def.path, currentValue),
-					submenu: (cv, done) => this.#createSubmenu(def, cv, done),
+					submenu: (cv, done, stored) => this.#createSubmenu(def, stored ?? cv, done),
 				};
 
 			case "providerOrder": {
@@ -2026,26 +2034,26 @@ export class SettingsSelectorComponent extends Container {
 	#createTextInput(
 		def: SettingDef & { type: "text" },
 		currentValue: string,
-		done: (value?: string) => void,
+		done: (value?: string, edited?: boolean) => void,
 	): Container {
 		this.#textInputActive = true;
-		const wrappedDone = (value?: string) => {
+		const wrappedDone = (value?: string, edited?: boolean) => {
 			this.#textInputActive = false;
-			done(value);
+			done(value, edited);
 		};
 		return new TextInputSubmenu(
 			def.label,
 			def.description,
 			currentValue,
-			value => {
+			(value, edited) => {
 				// Empty string clears the setting; undefined-typed string settings
 				// store "" which the browser.ts expandPath ignores (no-op fallback).
-				// Input stores the display prefill as NFC. An unchanged submit keeps the stored string.
+				// Keep the stored string only when this field was never edited.
 				const stored = settings.get(def.path);
-				const committed = typeof stored === "string" && value === currentValue.normalize("NFC") ? stored : value;
+				const committed = !edited && (typeof stored === "string" || typeof stored === "number") ? stored : value;
 				if (!commitInteractiveSettings(this.callbacks, () => this.#setSettingValue(def.path, committed))) return;
 				this.callbacks.onChange(def.path, committed);
-				wrappedDone(committed);
+				wrappedDone(committed, edited);
 			},
 			() => wrappedDone(),
 		);
