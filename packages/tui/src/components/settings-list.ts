@@ -15,8 +15,8 @@ export interface SettingItem {
 	currentValue: string;
 	/** If provided, Enter/Space cycles through these values */
 	values?: string[];
-	/** If provided, Enter opens this submenu. Receives current value and done callback. */
-	submenu?: (currentValue: string, done: (selectedValue?: string) => void) => Component;
+	/** If provided, Enter opens this submenu. The first argument is the display-safe line; the third is the stored value. */
+	submenu?: (currentValue: string, done: (selectedValue?: string) => void, storedValue?: string) => Component;
 }
 
 export interface SettingsListTheme {
@@ -274,17 +274,22 @@ export class SettingsList implements Component {
 		if (!item) return;
 
 		if (item.submenu) {
-			// Open submenu with the full safe line, not the clipped row. The stored
-			// item value stays unchanged until the submenu confirms.
+			// Display line and stored value stay separate. Unchanged confirm commits the stored value.
 			this.#submenuItemIndex = this.#selectedIndex;
-			const safeValue = sanitizeDisplayLine(item.currentValue);
-			this.#submenuComponent = item.submenu(safeValue, (selectedValue?: string) => {
-				if (selectedValue !== undefined) {
-					item.currentValue = selectedValue;
-					this.#onChange(item.id, selectedValue);
-				}
-				this.#closeSubmenu();
-			});
+			const storedValue = item.currentValue;
+			const displayValue = sanitizeDisplayLine(storedValue);
+			this.#submenuComponent = item.submenu(
+				displayValue,
+				(selectedValue?: string) => {
+					if (selectedValue !== undefined) {
+						const committed = selectedValue === displayValue ? storedValue : selectedValue;
+						item.currentValue = committed;
+						this.#onChange(item.id, committed);
+					}
+					this.#closeSubmenu();
+				},
+				storedValue,
+			);
 		} else if (item.values && item.values.length > 0) {
 			// Cycle through values
 			const currentIndex = item.values.indexOf(item.currentValue);

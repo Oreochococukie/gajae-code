@@ -2040,9 +2040,12 @@ export class SettingsSelectorComponent extends Container {
 			value => {
 				// Empty string clears the setting; undefined-typed string settings
 				// store "" which the browser.ts expandPath ignores (no-op fallback).
-				if (!commitInteractiveSettings(this.callbacks, () => this.#setSettingValue(def.path, value))) return;
-				this.callbacks.onChange(def.path, value);
-				wrappedDone(value);
+				// Input stores the display prefill as NFC. An unchanged submit keeps the stored string.
+				const stored = settings.get(def.path);
+				const committed = typeof stored === "string" && value === currentValue.normalize("NFC") ? stored : value;
+				if (!commitInteractiveSettings(this.callbacks, () => this.#setSettingValue(def.path, committed))) return;
+				this.callbacks.onChange(def.path, committed);
+				wrappedDone(committed);
 			},
 			() => wrappedDone(),
 		);
