@@ -238,18 +238,9 @@ export class PluginDetailComponent extends Container {
 						label: `  ${key}`,
 						description: schema.description || `Configure ${key}`,
 						currentValue: displayValue,
-						submenu: (cv, done) =>
-							new ConfigInputSubmenu(
-								key,
-								schema,
-								cv === "(not set)" ? "" : cv,
-								value => {
-									const parsed = schema.type === "number" ? Number(value) : value;
-									this.callbacks.onConfigChange(key, parsed);
-									done(String(value));
-								},
-								() => done(),
-							),
+						submenu: createPluginTextSubmenu(key, schema, (configKey, value) => {
+							this.callbacks.onConfigChange(configKey, value);
+						}),
 					});
 				}
 			}
@@ -402,6 +393,38 @@ class ConfigInputSubmenu extends Container {
 	handleInput(data: string): void {
 		handleInputOrEscape(data, this.#input, this.onCancel);
 	}
+}
+
+export function commitPluginConfigValue(
+	stored: string,
+	prefill: string,
+	submitted: string,
+	type: PluginSettingSchema["type"],
+): unknown {
+	if (type === "string" && submitted === prefill.normalize("NFC")) return stored;
+	return type === "number" ? Number(submitted) : submitted;
+}
+
+export function createPluginTextSubmenu(
+	key: string,
+	schema: PluginSettingSchema,
+	onConfigChange: (key: string, value: unknown) => void,
+): NonNullable<SettingItem["submenu"]> {
+	return (cv, done, stored) => {
+		const prefill = cv === "(not set)" ? "" : cv;
+		const original = stored ?? prefill;
+		return new ConfigInputSubmenu(
+			key,
+			schema,
+			prefill,
+			value => {
+				const committed = commitPluginConfigValue(original, prefill, value, schema.type);
+				onConfigChange(key, committed);
+				done(String(committed));
+			},
+			() => done(),
+		);
+	};
 }
 
 // =============================================================================

@@ -50,6 +50,16 @@ function selector(cwd: string, changed: Array<{ path: string; value: unknown }>)
 	);
 }
 
+function openHandoffField(component: SettingsSelectorComponent): string {
+	for (let i = 0; i < 3; i++) component.handleInput("\x1b[C");
+	for (const ch of "prompt extension") component.handleInput(ch);
+	expect(raw(component)).toContain("Handoff Prompt Extension");
+	component.handleInput("\n");
+	const opened = raw(component);
+	expect(opened).toContain("Clear field to unset");
+	return opened;
+}
+
 function openProxyField(component: SettingsSelectorComponent): string {
 	let opened = "";
 	for (let i = 0; i < 8; i++) {
@@ -116,6 +126,12 @@ describe("settings value display", () => {
 		component.handleInput("\x1b");
 		expect(settings.get("modelProfile.proxyProvider")).toBe(ATTACK);
 		expect(changed).toEqual([]);
+		component.handleInput("\n");
+		expect(raw(component)).toContain("Clear field to unset");
+		expectNoPayload(raw(component));
+		component.handleInput("\n");
+		expect(settings.get("modelProfile.proxyProvider")).toBe(ATTACK);
+		expect(changed.at(-1)).toEqual({ path: "modelProfile.proxyProvider", value: ATTACK });
 	});
 
 	it("keeps a spaced or mixed-case provider id", async () => {
@@ -133,6 +149,46 @@ describe("settings value display", () => {
 			expect(changed.at(-1)).toEqual({ path: "modelProfile.proxyProvider", value });
 			expect(settings.get("modelProfile.proxyProvider")).toBe(value);
 		}
+	});
+
+	it("keeps a multiline handoff prompt extension when confirmed unchanged", async () => {
+		const cases = [
+			"Keep the summary concise.\nPreserve unresolved risks.",
+			"Keep the summary concise.\r\nPreserve unresolved risks.",
+			" Keep the summary concise. ",
+		];
+		for (const original of cases) {
+			resetSettingsForTest();
+			await Settings.init({ inMemory: true });
+			settings.set("compaction.handoffPromptExtension", original);
+			const changed: Array<{ path: string; value: unknown }> = [];
+			const component = selector(process.cwd(), changed);
+			openHandoffField(component);
+			component.handleInput("\x1b");
+			expect(settings.get("compaction.handoffPromptExtension")).toBe(original);
+			expect(changed).toEqual([]);
+			component.handleInput("\n");
+			expect(raw(component)).toContain("Clear field to unset");
+			component.handleInput("\n");
+			expect(settings.get("compaction.handoffPromptExtension")).toBe(original);
+			expect(changed.at(-1)).toEqual({ path: "compaction.handoffPromptExtension", value: original });
+		}
+	});
+
+	it("persists an edited handoff prompt extension", async () => {
+		const original = "Keep the summary concise.\nPreserve unresolved risks.";
+		const edited = "Keep the summary concise. Preserve unresolved risks.!";
+		await Settings.init({ inMemory: true });
+		settings.set("compaction.handoffPromptExtension", original);
+		const changed: Array<{ path: string; value: unknown }> = [];
+		const component = selector(process.cwd(), changed);
+		const opened = openHandoffField(component);
+		expect(opened).toContain("Keep the summary concise. Preserve unresolved risks.");
+		expect(opened.includes(original)).toBe(false);
+		component.handleInput("!");
+		component.handleInput("\n");
+		expect(settings.get("compaction.handoffPromptExtension")).toBe(edited);
+		expect(changed.at(-1)).toEqual({ path: "compaction.handoffPromptExtension", value: edited });
 	});
 
 	it("property: settings list display, fc.property seed 662202610, numRuns 64", () => {

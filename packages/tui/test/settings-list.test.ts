@@ -305,6 +305,86 @@ describe("SettingsList", () => {
 		expect(c1.includes("\u009d")).toBe(false);
 	});
 
+	it("commits the stored multiline value when the display prefill is confirmed", () => {
+		for (const original of [
+			"Keep the summary concise.\nPreserve unresolved risks.",
+			"Keep the summary concise.\r\nPreserve unresolved risks.",
+		]) {
+			const flattened = "Keep the summary concise. Preserve unresolved risks.";
+			const changes: string[] = [];
+			let prefill = "";
+			const list = new SettingsList(
+				[
+					{
+						id: "compaction.handoffPromptExtension",
+						label: "Handoff Prompt Extension",
+						currentValue: original,
+						submenu: (current, done) => {
+							prefill = current;
+							return {
+								render: () => [current],
+								handleInput: (data: string) => {
+									if (data === "\n") done(current);
+								},
+								invalidate() {},
+							};
+						},
+					},
+				],
+				5,
+				testTheme,
+				(_id, value) => {
+					changes.push(value);
+				},
+				() => {},
+			);
+			const lines = list.render(120);
+			expect(lines.join("\n")).toContain(flattened);
+			for (const line of lines) {
+				expect(line.includes("\n")).toBe(false);
+				expect(line.includes("\r")).toBe(false);
+			}
+			list.handleInput("\n");
+			expect(prefill).toBe(flattened);
+			const prefillLines = list.render(120);
+			expect(prefillLines).toEqual([flattened]);
+			for (const line of prefillLines) expect(line.includes("\n")).toBe(false);
+			list.handleInput("\n");
+			expect(changes).toEqual([original]);
+		}
+	});
+
+	it("commits an edited prefill instead of the stored multiline value", () => {
+		const original = "Keep the summary concise.\nPreserve unresolved risks.";
+		const flattened = "Keep the summary concise. Preserve unresolved risks.";
+		const changes: string[] = [];
+		const list = new SettingsList(
+			[
+				{
+					id: "compaction.handoffPromptExtension",
+					label: "Handoff Prompt Extension",
+					currentValue: original,
+					submenu: (current, done) => ({
+						render: () => [current],
+						handleInput: (data: string) => {
+							if (data === "!") done(`${current}!`);
+						},
+						invalidate() {},
+					}),
+				},
+			],
+			5,
+			testTheme,
+			(_id, value) => {
+				changes.push(value);
+			},
+			() => {},
+		);
+		list.handleInput("\n");
+		list.handleInput("!");
+		expect(changes).toEqual([`${flattened}!`]);
+	});
+
 	it("prefills the text submenu with the full safe line", () => {
 		let seen = "";
 		const long = `\u001b]52;c;cHduZWQ=\u0007${"A".repeat(80)}`;
