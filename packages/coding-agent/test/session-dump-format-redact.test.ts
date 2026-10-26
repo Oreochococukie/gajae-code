@@ -302,9 +302,10 @@ describe("formatSessionDumpText credential scrub", () => {
 	});
 
 	it("does not pair private-key banners across separate session messages", () => {
-		const opening = "first message -----BEGIN PRIVATE KEY-----";
-		const middle = "unrelated message content remains";
-		const closing = "-----END PRIVATE KEY----- last message";
+		// Banners are assembled with pem() so the PEM-shaped fixtures stay intact in rendered diffs.
+		const opening = `first message ${pem("RSA", "BEGIN")}`;
+		const middle = "second message: plain notes between the two banners, no key material";
+		const closing = `${pem("RSA", "END")} last message`;
 		const dumped = dump([
 			{ role: "user", content: opening, timestamp: 1 },
 			{ role: "user", content: middle, timestamp: 2 },
