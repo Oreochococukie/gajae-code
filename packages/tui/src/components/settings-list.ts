@@ -1,3 +1,4 @@
+import { sanitizeDisplayLine } from "@gajae-code/utils";
 import { getKeybindings } from "../keybindings";
 import { extractPrintableText, matchesKey } from "../keys";
 import type { Component } from "../tui";
@@ -176,10 +177,9 @@ export class SettingsList implements Component {
 			const usedWidth = prefixWidth + maxLabelWidth + visibleWidth(separator);
 			const valueMaxWidth = Math.max(0, width - usedWidth - 2);
 
-			const valueText = this.#theme.value(
-				truncateToWidth(item.currentValue, valueMaxWidth, Ellipsis.Omit),
-				isSelected,
-			);
+			// Strip the full value before the width clip so a partial escape cannot remain.
+			const safeValue = sanitizeDisplayLine(item.currentValue);
+			const valueText = this.#theme.value(truncateToWidth(safeValue, valueMaxWidth, Ellipsis.Omit), isSelected);
 
 			lines.push(truncateToWidth(prefix + labelText + separator + valueText, width));
 		}
@@ -274,9 +274,11 @@ export class SettingsList implements Component {
 		if (!item) return;
 
 		if (item.submenu) {
-			// Open submenu, passing current value so it can pre-select correctly
+			// Open submenu with the full safe line, not the clipped row. The stored
+			// item value stays unchanged until the submenu confirms.
 			this.#submenuItemIndex = this.#selectedIndex;
-			this.#submenuComponent = item.submenu(item.currentValue, (selectedValue?: string) => {
+			const safeValue = sanitizeDisplayLine(item.currentValue);
+			this.#submenuComponent = item.submenu(safeValue, (selectedValue?: string) => {
 				if (selectedValue !== undefined) {
 					item.currentValue = selectedValue;
 					this.#onChange(item.id, selectedValue);
