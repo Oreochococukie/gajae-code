@@ -1366,6 +1366,7 @@ describe("ACP event mapper", () => {
 	it("does not throw on a deep or cyclic tool argument", () => {
 		let nested: unknown = { note: "\u001b[31mdeep" };
 		for (let depth = 0; depth < 128; depth++) nested = { child: nested };
+		const started = performance.now();
 		const deep = mapAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "tool_execution_start",
@@ -1375,10 +1376,15 @@ describe("ACP event mapper", () => {
 			} as AgentSessionEvent,
 			"session-1",
 		);
+		expect(performance.now() - started).toBeLessThan(1000);
 		expect(deep).toHaveLength(1);
-		const deepRaw = (deep[0]!.update as { rawInput: { command: string; note: string } }).rawInput;
+		const deepRaw = (deep[0]!.update as { rawInput: { command: string; note: string; nested: unknown } }).rawInput;
 		expect(deepRaw.command).toBe("echo red");
 		expect(deepRaw.note).toBe("x");
+		let deepCursor: unknown = deepRaw.nested;
+		for (let depth = 0; depth < 128; depth++) deepCursor = (deepCursor as { child: unknown }).child;
+		expect((deepCursor as { note: string }).note).toBe("deep");
+		for (const text of stringsIn(deepRaw)) expect(text).not.toMatch(terminalControl);
 
 		const cyclic: Record<string, unknown> = { command: "echo \u001b[31mred" };
 		cyclic.self = cyclic;
@@ -1425,6 +1431,126 @@ describe("ACP event mapper", () => {
 				},
 			),
 			{ seed: 6722026, numRuns: 64 },
+		);
+	});
+
+	function nestChild(leaf: unknown, levels: number): unknown {
+		let nested = leaf;
+		for (let depth = 0; depth < levels; depth++) nested = { child: nested };
+		return nested;
+	}
+
+	it("strips a terminal control nested past 64 object levels in rawInput", () => {
+		const args = {
+			command: "echo \u001b[31mred",
+			nested: nestChild({ note: "\u001b[31mdeep", extra: ["\u0007x", "ok"] }, 64),
+		};
+		const updates = mapAgentSessionEventToAcpSessionUpdates(
+			{
+				type: "tool_execution_start",
+				toolCallId: "toolu_deep_control",
+				toolName: "bash",
+				args,
+			} as AgentSessionEvent,
+			"session-1",
+		);
+		expect(updates).toHaveLength(1);
+		expectAcpNotifications(updates);
+		const raw = (updates[0]!.update as { rawInput: { command: string; nested: unknown } }).rawInput;
+		expect(raw).not.toBe(args);
+		expect(raw.command).toBe("echo red");
+		let cursor: unknown = raw.nested;
+		for (let depth = 0; depth < 64; depth++) cursor = (cursor as { child: unknown }).child;
+		const leaf = cursor as { note: string; extra: string[] };
+		expect(leaf.note).toBe("deep");
+		expect(leaf.extra).toEqual(["x", "ok"]);
+		for (const text of stringsIn(updates)) expect(text).not.toMatch(terminalControl);
+	});
+
+	it("still sends a plain tool argument nested past 64 object levels", () => {
+		const args = {
+			command: "npm test",
+			nested: nestChild({ note: "plain deep", extra: ["ok", "still"] }, 64),
+		};
+		const updates = mapAgentSessionEventToAcpSessionUpdates(
+			{
+				type: "tool_execution_start",
+				toolCallId: "toolu_deep_plain",
+				toolName: "bash",
+				args,
+			} as AgentSessionEvent,
+			"session-1",
+		);
+		const update = updates[0]!.update as {
+			title?: string;
+			rawInput?: { command?: string; nested?: unknown };
+			content?: Array<{ content?: { text?: string } }>;
+		};
+		expect(update.rawInput).toBe(args);
+		expect(update.title).toBe("bash: npm test");
+		expect(update.content?.[0]?.content?.text).toBe("$ npm test");
+		let cursor: unknown = args.nested;
+		for (let depth = 0; depth < 64; depth++) cursor = (cursor as { child: unknown }).child;
+		expect(cursor).toEqual({ note: "plain deep", extra: ["ok", "still"] });
+	});
+
+	it("strips a control in a cycle nested past 64 object levels", () => {
+		const cycle: Record<string, unknown> = { note: "\u001b[31mdeep" };
+		cycle.self = cycle;
+		const args = { command: "echo ok", nested: nestChild(cycle, 64) };
+		const updates = mapAgentSessionEventToAcpSessionUpdates(
+			{
+				type: "tool_execution_start",
+				toolCallId: "toolu_deep_cycle",
+				toolName: "bash",
+				args,
+			} as AgentSessionEvent,
+			"session-1",
+		);
+		let cursor: unknown = (updates[0]!.update as { rawInput: { nested: unknown } }).rawInput.nested;
+		for (let depth = 0; depth < 64; depth++) cursor = (cursor as { child: unknown }).child;
+		const leaf = cursor as { note: string; self: unknown };
+		expect(leaf.note).toBe("deep");
+		expect(leaf.self).toBe(leaf);
+		for (const text of stringsIn(updates)) expect(text).not.toMatch(terminalControl);
+	});
+
+	it("property: a control nested past 64 object levels stays out of rawInput, seed 7264026, 64 inputs", () => {
+		fc.assert(
+			fc.property(
+				fc.integer({ min: 65, max: 96 }),
+				fc.constantFrom("\u001b[31m", "\u001b]0;title\u0007", "\u0000"),
+				fc.stringMatching(/^[A-Za-z0-9 .]{0,12}$/),
+				(levels, prefix, body) => {
+					const args = { command: "echo ok", nested: nestChild({ note: `${prefix}${body}` }, levels) };
+					const updates = mapAgentSessionEventToAcpSessionUpdates(
+						{
+							type: "tool_execution_start",
+							toolCallId: "toolu_deep_prop",
+							toolName: "bash",
+							args,
+						} as AgentSessionEvent,
+						"session-1",
+					);
+					for (const text of stringsIn(updates)) expect(text).not.toMatch(terminalControl);
+					let cursor: unknown = (updates[0]!.update as { rawInput: { nested: unknown } }).rawInput.nested;
+					for (let depth = 0; depth < levels; depth++) cursor = (cursor as { child: unknown }).child;
+					expect((cursor as { note: string }).note).toBe(body);
+					const again = mapAgentSessionEventToAcpSessionUpdates(
+						{
+							type: "tool_execution_start",
+							toolCallId: "toolu_deep_prop",
+							toolName: "bash",
+							args: (updates[0]!.update as { rawInput: unknown }).rawInput,
+						} as AgentSessionEvent,
+						"session-1",
+					);
+					expect((again[0]!.update as { rawInput: unknown }).rawInput).toEqual(
+						(updates[0]!.update as { rawInput: unknown }).rawInput,
+					);
+				},
+			),
+			{ seed: 7264026, numRuns: 64 },
 		);
 	});
 });

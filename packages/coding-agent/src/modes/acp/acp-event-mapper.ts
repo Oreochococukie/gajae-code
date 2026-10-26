@@ -583,8 +583,14 @@ function isTodoStatus(status: unknown): status is TodoStatus {
 	return status === "pending" || status === "in_progress" || status === "completed" || status === "abandoned";
 }
 
-/** Nesting past this depth is left unchanged so a huge tool args tree cannot overflow the stack. */
+/** Shallow copies stay recursive. Deeper rawInput values use one iterative pass. */
 const CLIENT_VALUE_MAX_DEPTH = 64;
+
+function isClientContainer(value: object): boolean {
+	if (Array.isArray(value)) return true;
+	const prototype = Object.getPrototypeOf(value);
+	return prototype === Object.prototype || prototype === null;
+}
 
 /** Strip terminal controls from tool-argument text copied into a session update. */
 function sanitizeClientValue(value: unknown): unknown {
@@ -596,7 +602,8 @@ function sanitizeClientValueWalk(value: unknown, seen: WeakMap<object, unknown>,
 		const clean = sanitizeText(value);
 		return clean === value ? value : clean;
 	}
-	if (typeof value !== "object" || value === null || depth >= CLIENT_VALUE_MAX_DEPTH) return value;
+	if (typeof value !== "object" || value === null) return value;
+	if (depth >= CLIENT_VALUE_MAX_DEPTH) return sanitizeClientTail(value, seen);
 	const existing = seen.get(value);
 	if (existing !== undefined) return existing;
 	if (Array.isArray(value)) {
@@ -611,9 +618,8 @@ function sanitizeClientValueWalk(value: unknown, seen: WeakMap<object, unknown>,
 		if (!changed) seen.set(value, value);
 		return changed ? next : value;
 	}
-	const prototype = Object.getPrototypeOf(value);
-	if (prototype !== Object.prototype && prototype !== null) return value;
-	const next = Object.create(prototype) as Record<string, unknown>;
+	if (!isClientContainer(value)) return value;
+	const next = Object.create(Object.getPrototypeOf(value)) as Record<string, unknown>;
 	seen.set(value, next);
 	let changed = false;
 	for (const key of Object.keys(value)) {
@@ -624,6 +630,89 @@ function sanitizeClientValueWalk(value: unknown, seen: WeakMap<object, unknown>,
 	}
 	if (!changed) seen.set(value, value);
 	return changed ? next : value;
+}
+
+type ClientTailFrame = {
+	source: object;
+	keys: readonly string[] | null;
+	index: number;
+	box: object;
+	changed: boolean;
+	holdKey?: string | number;
+};
+
+/** Iterative copy of one nested rawInput value. Each container is entered once. Keys are copied as-is. */
+function sanitizeClientTail(root: object, seen: WeakMap<object, unknown>): unknown {
+	const cached = seen.get(root);
+	if (cached !== undefined) return cached;
+	if (!isClientContainer(root)) return root;
+
+	const open = (node: object): ClientTailFrame => {
+		const box = Array.isArray(node) ? [] : Object.create(Object.getPrototypeOf(node));
+		seen.set(node, box);
+		return {
+			source: node,
+			keys: Array.isArray(node) ? null : Object.keys(node),
+			index: 0,
+			box,
+			changed: false,
+		};
+	};
+	const put = (frame: ClientTailFrame, key: string | number, child: unknown, dirty: boolean): void => {
+		if (Array.isArray(frame.box)) (frame.box as unknown[]).push(child);
+		else {
+			Object.defineProperty(frame.box, String(key), {
+				value: child,
+				enumerable: true,
+				writable: true,
+				configurable: true,
+			});
+		}
+		if (dirty) frame.changed = true;
+	};
+
+	const stack = [open(root)];
+	let finished: unknown = stack[0]!.box;
+	while (stack.length > 0) {
+		const frame = stack[stack.length - 1]!;
+		const length = frame.keys === null ? (frame.source as unknown[]).length : frame.keys.length;
+		if (frame.index >= length) {
+			finished = frame.changed ? frame.box : frame.source;
+			if (!frame.changed) seen.set(frame.source, frame.source);
+			stack.pop();
+			const parent = stack[stack.length - 1];
+			if (parent && parent.holdKey !== undefined) {
+				put(parent, parent.holdKey, finished, finished !== frame.source);
+				parent.holdKey = undefined;
+			}
+			continue;
+		}
+		const key = frame.keys === null ? frame.index : frame.keys[frame.index]!;
+		const child =
+			frame.keys === null
+				? (frame.source as unknown[])[frame.index]
+				: (frame.source as Record<string, unknown>)[key];
+		frame.index += 1;
+		if (typeof child === "string") {
+			const clean = sanitizeText(child);
+			put(frame, key, clean, clean !== child);
+			continue;
+		}
+		if (typeof child === "object" && child !== null) {
+			const found = seen.get(child);
+			if (found !== undefined) {
+				put(frame, key, found, found !== child);
+				continue;
+			}
+			if (isClientContainer(child)) {
+				frame.holdKey = key;
+				stack.push(open(child));
+				continue;
+			}
+		}
+		put(frame, key, child, false);
+	}
+	return finished;
 }
 
 export function buildToolCallStartUpdate(input: {
