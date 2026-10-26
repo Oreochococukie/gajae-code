@@ -136,8 +136,18 @@ describe("settings value display", () => {
 	});
 
 	it("property: settings list display, fc.property seed 662202610, numRuns 64", () => {
+		const noise = fc.constantFrom(
+			"\u001b]52;c;cHduZWQ=\u0007",
+			"\u001b]8;;https://attacker.invalid\u0007",
+			"\u001b]0;owned\u0007",
+			"\u001b[2K",
+			"\n",
+			"\u0000",
+			"\u009d",
+		);
 		fc.assert(
-			fc.property(fc.string({ maxLength: 48 }), value => {
+			fc.property(fc.string({ maxLength: 24 }), noise, fc.string({ maxLength: 24 }), (left, control, right) => {
+				const value = `${left}${control}${right}`;
 				const list = new SettingsList(
 					[{ id: "modelProfile.proxyProvider", label: "Proxy", currentValue: value }],
 					3,
