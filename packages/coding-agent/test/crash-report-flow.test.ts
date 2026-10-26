@@ -354,8 +354,8 @@ describe("duplicate candidate display", () => {
 
 	it("property: duplicate candidate title and author are one display row", async () => {
 		const prop = fc.asyncProperty(
-			fc.string({ maxLength: 120 }),
-			fc.string({ maxLength: 40 }),
+			fc.string({ unit: "binary", maxLength: 80 }),
+			fc.string({ unit: "binary", maxLength: 40 }),
 			async (title, login) => {
 				const result = await checkForDuplicateIssue(
 					async () => ({
