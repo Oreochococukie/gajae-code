@@ -102,6 +102,12 @@ describe("plugin config text confirm", () => {
 		expect(changes).toEqual(["keepme"]);
 	});
 
+	it("commits the flattened plugin string when delete, paste, and enter arrive together", () => {
+		const { list, changes } = field("keep\nme");
+		list.handleInput("\x7f\x1b[200~e\x1b[201~\n");
+		expect(changes).toEqual(["keep me"]);
+	});
+
 	it("commits a pasted plugin string when paste and enter arrive together", () => {
 		const { list, changes } = field("old");
 		list.handleInput("\x1b[200~NEW\x1b[201~\n");

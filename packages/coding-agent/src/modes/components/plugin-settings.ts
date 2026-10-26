@@ -342,7 +342,6 @@ class ConfigEnumSubmenu extends Container {
  */
 class ConfigInputSubmenu extends Container {
 	#input: Input;
-	#baseline = "";
 	#edited = false;
 
 	constructor(
@@ -378,10 +377,8 @@ class ConfigInputSubmenu extends Container {
 		if (!schema.secret && currentValue) {
 			this.#input.setValue(currentValue);
 		}
-		this.#baseline = this.#input.getValue();
-
+		this.#input.onEdit = () => (this.#edited = true);
 		this.#input.onSubmit = value => {
-			if (value !== this.#baseline) this.#edited = true;
 			if (value.trim()) {
 				this.onSubmit(value, this.#edited);
 			} else {
@@ -395,9 +392,7 @@ class ConfigInputSubmenu extends Container {
 	}
 
 	handleInput(data: string): void {
-		const before = this.#input.getValue();
 		handleInputOrEscape(data, this.#input, this.onCancel);
-		if (this.#input.getValue() !== before) this.#edited = true;
 	}
 }
 

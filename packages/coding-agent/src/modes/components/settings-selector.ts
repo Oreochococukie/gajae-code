@@ -56,7 +56,6 @@ import type { StatusLinePreviewParts, StatusLineSegmentOptions } from "./tool-st
  */
 class TextInputSubmenu extends Container {
 	#input: Input;
-	#baseline = "";
 	#edited = false;
 
 	constructor(
@@ -79,9 +78,8 @@ class TextInputSubmenu extends Container {
 		if (currentValue) {
 			this.#input.setValue(currentValue);
 		}
-		this.#baseline = this.#input.getValue();
+		this.#input.onEdit = () => (this.#edited = true);
 		this.#input.onSubmit = value => {
-			if (value !== this.#baseline) this.#edited = true;
 			this.onSubmit(value, this.#edited); // empty string clears the setting
 		};
 		this.addChild(this.#input);
@@ -90,15 +88,11 @@ class TextInputSubmenu extends Container {
 	}
 
 	handleInput(data: string): void {
-		const before = this.#input.getValue();
 		handleInputOrEscape(data, this.#input, this.onCancel);
-		if (this.#input.getValue() !== before) this.#edited = true;
 	}
 
 	submit(): void {
-		const value = this.#input.getValue();
-		if (value !== this.#baseline) this.#edited = true;
-		this.onSubmit(value, this.#edited);
+		this.onSubmit(this.#input.getValue(), this.#edited);
 	}
 
 	cancel(): void {

@@ -205,6 +205,17 @@ describe("settings value display", () => {
 		expect(changed.at(-1)).toEqual({ path: "compaction.handoffPromptExtension", value: 42 });
 	});
 
+	it("commits the flattened handoff text when delete, paste, and enter arrive together", async () => {
+		await Settings.init({ inMemory: true });
+		settings.set("compaction.handoffPromptExtension", "keep\nme");
+		const changed: Array<{ path: string; value: unknown }> = [];
+		const component = selector(process.cwd(), changed);
+		openHandoffField(component);
+		component.handleInput("\x7f\x1b[200~e\x1b[201~\n");
+		expect(settings.get("compaction.handoffPromptExtension")).toBe("keep me");
+		expect(changed.at(-1)).toEqual({ path: "compaction.handoffPromptExtension", value: "keep me" });
+	});
+
 	it("commits the flattened handoff text after an edit returns to the prefill", async () => {
 		const original = "Keep the summary concise.\nPreserve unresolved risks.";
 		const flattened = "Keep the summary concise. Preserve unresolved risks.";
