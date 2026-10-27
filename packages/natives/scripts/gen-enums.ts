@@ -14,11 +14,38 @@
  *
  * Run after `napi build`: `bun packages/natives/scripts/gen-enums.ts`
  */
+import * as crypto from "node:crypto";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 const nativeDir = path.resolve(import.meta.dir, "../native");
-const dtsPath = path.join(nativeDir, "index.d.ts");
-const jsPath = path.join(nativeDir, "index.js");
+
+async function writeReplacingDestination(dest: string, contents: string): Promise<void> {
+	const tempPath = `${dest}.tmp.${process.pid}.${crypto.randomUUID()}`;
+	await fs.writeFile(tempPath, contents, { flag: "wx", mode: 0o644 });
+	try {
+		// rename replaces a destination symlink; writeFile/Bun.write would follow it.
+		await fs.rename(tempPath, dest);
+	} catch {
+		try {
+			await fs.unlink(dest);
+		} catch (unlinkErr) {
+			if ((unlinkErr as NodeJS.ErrnoException).code !== "ENOENT") {
+				await fs.unlink(tempPath).catch(() => {});
+				const isWindows = process.platform === "win32";
+				throw new Error(
+					`Cannot replace ${path.basename(dest)}${isWindows ? " (file may be in use - close any running processes)" : ""}: ${(unlinkErr as Error).message}`,
+				);
+			}
+		}
+		try {
+			await fs.rename(tempPath, dest);
+		} catch (finalErr) {
+			await fs.unlink(tempPath).catch(() => {});
+			throw new Error(`Failed to install ${path.basename(dest)}: ${(finalErr as Error).message}`);
+		}
+	}
+}
 
 const MARKER_START = "// --- generated native exports (do not edit) ---";
 const MARKER_END = "// --- end generated native exports ---";
@@ -343,8 +370,10 @@ function patchCompatibilityDeclarations(dts: string): string {
 }
 
 export async function generateEnumExports(): Promise<void> {
-	const generatedDts = await Bun.file(dtsPath).text();
-	const existing = await Bun.file(jsPath).text();
+	const dtsFile = path.join(nativeDir, "index.d.ts");
+	const jsFile = path.join(nativeDir, "index.js");
+	const generatedDts = await Bun.file(dtsFile).text();
+	const existing = await Bun.file(jsFile).text();
 	const generatedBlock = buildGeneratedBlock(generatedDts);
 
 	// Patch the generated block in place. `native/index.js` is the hand-edited
@@ -355,13 +384,13 @@ export async function generateEnumExports(): Promise<void> {
 	const blockEnd = existing.indexOf(MARKER_END);
 	if (blockStart === -1 || blockEnd === -1 || blockEnd < blockStart) {
 		throw new Error(
-			`gen-enums: ${jsPath} is missing the generated marker block. ` +
+			`gen-enums: ${jsFile} is missing the generated marker block. ` +
 				`Add\n\n${MARKER_START}\n${MARKER_END}\n\nplaceholders before running.`,
 		);
 	}
 	const js = existing.slice(0, blockStart) + generatedBlock + existing.slice(blockEnd + MARKER_END.length);
 
-	await Bun.write(jsPath, js);
+	await writeReplacingDestination(jsFile, js);
 
 	// Also fix the .d.ts: replace `const enum` with `enum` so TS allows
 	// assigning string literals to enum types without casts.
@@ -373,7 +402,7 @@ export async function generateEnumExports(): Promise<void> {
 				.replaceAll("export declare const enum", "export declare enum"),
 		),
 	);
-	await Bun.write(dtsPath, dtsContent);
+	await writeReplacingDestination(dtsFile, dtsContent);
 
 	const symbolCount = (generatedBlock.match(/^export const /gm) ?? []).length;
 	console.log(

@@ -180,11 +180,12 @@ export function resolveNativeBuildOutputPaths(
 	return { buildOutputDirPrefix, canonicalAddonFilename, canonicalAddonPath };
 }
 
-async function installGeneratedBindings(outputDir: string): Promise<void> {
+export async function installGeneratedBindings(outputDir: string): Promise<void> {
 	const sourcePath = path.join(outputDir, "index.d.ts");
 	const destPath = path.join(nativeDir, "index.d.ts");
 	try {
-		await fs.copyFile(sourcePath, destPath);
+		// Same install as the addon: rename replaces a destination symlink instead of following it.
+		await installBinary(sourcePath, destPath);
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		throw new Error(`Failed to install generated index.d.ts: ${message}`);
