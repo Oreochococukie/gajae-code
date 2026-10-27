@@ -86,6 +86,7 @@ import { disposeKernelSessionsByOwner } from "../eval/py/executor";
 import type { MasterModeContext } from "../master-mode/context";
 import { describeFoldReceipt } from "../session/fold-coordinator";
 import type { BashRestrictionProfile } from "../tools/bash-allowed-prefixes";
+import { wrapUntrustedContent } from "../tools/fetch";
 import { SearchTool } from "../tools/search";
 import "../discovery";
 import { resolveConfigValue } from "../config/resolve-config-value";
@@ -442,9 +443,12 @@ function buildMcpNotificationBatchMessage(entries: McpNotificationEntry[]): Agen
 		lines.push(`- server="${resource.serverName}" uri=${resource.uri}`);
 	}
 	lines.push('Use read(path="mcp://<uri>") to inspect if relevant.');
+	// Frame after the lines are joined. This builder does not truncate; the
+	// fence is the last step before the text becomes the user turn.
+	const text = wrapUntrustedContent(lines.join("\n"));
 	return {
 		role: "user",
-		content: [{ type: "text", text: lines.join("\n") }],
+		content: [{ type: "text", text }],
 		attribution: "agent",
 		timestamp: Date.now(),
 	};
@@ -571,6 +575,8 @@ export interface CreateAgentSessionOptions {
 	/** Load MCP tools for a top-level session only from this caller-owned absolute config file path.
 	 * Mutually exclusive with mcpManager. */
 	mcpConfigPath?: string;
+	/** Lifecycle host wrote this exact file. Caller-selected `--mcp-config` omits it. @internal */
+	lifecycleMcpOrigin?: boolean;
 	/**
 	 * Whether conventional MCP autoload is enabled for a top-level standalone
 	 * session (default: true). When false, native user `~/.gjc/agent/mcp.json`
@@ -1240,7 +1246,10 @@ function buildMCPPromptCommands(manager: MCPManager): LoadedCustomCommand[] {
 								}
 							}
 						}
-						return parts.join("\n\n");
+						const body = parts.join("\n\n");
+						// A blank body must stay blank so the prompt entry still rejects it.
+						if (body.trim().length === 0) return body;
+						return wrapUntrustedContent(body);
 					},
 				},
 			});
@@ -1627,6 +1636,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	}
 	const cwd = options.cwd ?? getProjectDir();
 	const explicitMcpConfigPath = !isCanonicalSubSession && !options.mcpManager ? options.mcpConfigPath : undefined;
+	const lifecycleMcpOrigin = options.lifecycleMcpOrigin === true && explicitMcpConfigPath !== undefined;
 	const agentDir = options.agentDir ?? options.settings?.getAgentDir() ?? getDefaultAgentDir();
 	const profileAuthority =
 		options.profileAuthority ??
@@ -2290,6 +2300,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					: existingSession.models.default
 						? [existingSession.models.default]
 						: [];
+		if (
+			startupRegistryMutationAuthorized &&
+			!hasExplicitModel &&
+			hasExistingSession &&
+			defaultModelEntries.length > 0
+		) {
+			// Resume skips startup discovery, so refresh a missing saved provider
+			// before resolution when this session owns authority to mutate the registry.
+			await refreshMissingQualifiedModelProviders(defaultModelEntries, modelRegistry, credentialSessionId);
+		}
 		const persistedProfileName =
 			persistedDefaultChain?.origin === "profile-activation" ? persistedDefaultChain.identity : undefined;
 		const resolvedPersistedProfileName = persistedProfileName
@@ -3449,7 +3469,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		let inheritedMcpManagerToolNames: string[] = [];
 		let inheritedMcpToolsSnapshot: readonly CustomTool[] = [];
 		let pendingInheritedMcpToolsSnapshot: readonly CustomTool[] | undefined;
-		let deferredExactMcpConfig: { manager: MCPManager; configPath: string } | undefined;
+		let deferredExactMcpConfig: { manager: MCPManager; configPath: string; lifecycleOrigin?: boolean } | undefined;
 		let deferredConventionalMcp:
 			| {
 					manager: MCPManager;
@@ -3765,9 +3785,18 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			ownsMcpManager = true;
 			registerOwnedMcpManagerCleanup(owned);
 			if (options.deferMcpConfigStartup) {
-				deferredExactMcpConfig = { manager: owned, configPath: explicitMcpConfigPath };
+				deferredExactMcpConfig = {
+					manager: owned,
+					configPath: explicitMcpConfigPath,
+					lifecycleOrigin: lifecycleMcpOrigin,
+				};
 			} else {
-				const result = await owned.discoverAndConnect({ configPath: explicitMcpConfigPath });
+				const result = lifecycleMcpOrigin
+					? await owned.discoverAndConnect({
+							configPath: explicitMcpConfigPath,
+							lifecycleOrigin: true,
+						})
+					: await owned.discoverAndConnect({ configPath: explicitMcpConfigPath });
 				const resultTools = result.tools as CustomTool[];
 				exactMcpToolNames.push(...resultTools.map(tool => tool.name));
 				customTools.push(...resultTools);
@@ -6062,7 +6091,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						let loadedToolCount = 0;
 						let hasErrors = false;
 						if (exact) {
-							const result = await exact.manager.discoverAndConnect({ configPath: exact.configPath });
+							const result = await exact.manager.discoverAndConnect({
+								configPath: exact.configPath,
+								...(exact.lifecycleOrigin === true ? { lifecycleOrigin: true } : {}),
+							});
 							// A slash control may commit while the deferred startup flight is
 							// loading. Re-read the manager's fenced publication rather than
 							// replaying the stale startup snapshot into the session registry. A

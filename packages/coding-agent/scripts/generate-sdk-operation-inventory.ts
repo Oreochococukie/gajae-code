@@ -113,6 +113,10 @@ const LOCKED_EXCLUSIONS: Readonly<Record<string, string>> = {
 		"internal rollback compensation, not a user-facing SDK control seam",
 	"agent_session:restoreModelSelectionForRollback":
 		"internal rollback compensation, not a user-facing SDK control seam",
+	"agent_session:beginModelSelectionUsage":
+		"internal model-usage ordering slot for a selection transaction, not a user-facing SDK control seam",
+	"agent_session:recordModelSelectionUsage":
+		"internal model-usage bookkeeping after a completed selection transaction, not a user-facing SDK control seam",
 	"agent_session:materializeActiveDefaultModelProfileAssignment":
 		"internal extension selection materialization seam, not a user-facing SDK control seam",
 	"agent_session:registerToolSessionCleanup":
@@ -167,6 +171,8 @@ const LOCKED_EXCLUSIONS: Readonly<Record<string, string>> = {
 		"test-only parked terminal persistence seam, not a user-facing SDK control seam",
 	"agent_session:flushParkedAgentEndForCoordinatorPersistForTests":
 		"test-only parked terminal flush seam, not a user-facing SDK control seam",
+	"agent_session:waitForAgentEndHandlingForTests":
+		"test-only SDK terminal-event handler completion barrier, not a user-facing SDK control seam",
 	"agent_session:setCancelAndSubmitAbortOutcomeProviderForTests":
 		"test-only cancellation seam, not a user-facing SDK control seam",
 	"agent_session:awaitDisposeCompletion": "test-only disposal completion seam, not a user-facing SDK control seam",
