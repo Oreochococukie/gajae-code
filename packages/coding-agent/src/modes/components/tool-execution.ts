@@ -39,12 +39,149 @@ import { renderStatusLine } from "../../tui";
 import { containsSixelSequence, getSixelLineMask, sanitizeWithOptionalSixelPassthrough } from "../../utils/sixel";
 import { renderDiff } from "./diff";
 
-function ensureInvalidate(component: unknown): Component {
-	const c = component as { render: Component["render"]; invalidate?: () => void };
-	if (!c.invalidate) {
-		c.invalidate = () => {};
+const SGR_FINAL = 0x6d;
+
+function isPaintHex(code: number): boolean {
+	return (code >= 0x30 && code <= 0x39) || (code >= 0x61 && code <= 0x66);
+}
+
+function isFileOscParam(params: string): boolean {
+	if (params.length !== 11 || !params.startsWith("id=")) return false;
+	for (let i = 3; i < 11; i++) if (!isPaintHex(params.charCodeAt(i))) return false;
+	return true;
+}
+
+const FILE_URI_MARK = "!&'()*+,-./:=?_%~";
+
+function isFileOscUri(uri: string): boolean {
+	if (!uri.startsWith("file://")) return false;
+	for (let i = 0; i < uri.length; i++) {
+		const code = uri.charCodeAt(i);
+		const alphaNum =
+			(code >= 0x30 && code <= 0x39) || (code >= 0x41 && code <= 0x5a) || (code >= 0x61 && code <= 0x7a);
+		if (!alphaNum && !FILE_URI_MARK.includes(uri[i]!)) return false;
 	}
-	return c as Component;
+	return true;
+}
+
+/** Renderer file hyperlinks only. Title, clipboard, and other OSC bodies are not kept. */
+function isSafeFileOsc8(body: string): boolean {
+	if (body.length < 2 || body.charCodeAt(0) !== 0x38 || body.charCodeAt(1) !== 0x3b) return false;
+	const semi = body.indexOf(";", 2);
+	if (semi < 0) return false;
+	const params = body.slice(2, semi);
+	const uri = body.slice(semi + 1);
+	if (params !== "" && !isFileOscParam(params)) return false;
+	return uri === "" || isFileOscUri(uri);
+}
+
+function isDroppedPaintControl(code: number): boolean {
+	if (code === 0x09 || code === 0x0a) return false;
+	return code < 0x20 || code === 0x7f || (code >= 0x80 && code <= 0x9f);
+}
+
+type PaintSpan = { next: number; keep: boolean };
+
+function consumeCsi(line: string, index: number): PaintSpan {
+	let cursor = index;
+	while (cursor < line.length) {
+		const code = line.charCodeAt(cursor);
+		if (code >= 0x40 && code <= 0x7e) return { next: cursor + 1, keep: code === SGR_FINAL };
+		const isParam = (code >= 0x30 && code <= 0x3f) || (code >= 0x20 && code <= 0x2f);
+		if (!isParam) return { next: cursor, keep: false };
+		cursor++;
+	}
+	return { next: line.length, keep: false };
+}
+
+function isSixelDcs(line: string, start: number, end: number): boolean {
+	if (TERMINAL.imageProtocol !== ImageProtocol.Sixel) return false;
+	let cursor = start + 2;
+	while (cursor < end) {
+		const code = line.charCodeAt(cursor);
+		if (code === 0x3b || (code >= 0x30 && code <= 0x39)) {
+			cursor++;
+			continue;
+		}
+		return code === 0x71;
+	}
+	return false;
+}
+
+function consumeStringTerm(line: string, index: number, keep: (end: number) => boolean): PaintSpan {
+	let cursor = index;
+	while (cursor < line.length) {
+		const code = line.charCodeAt(cursor);
+		if (code === 0x07) return { next: cursor + 1, keep: false };
+		if (code === 0x1b) {
+			if (line.charCodeAt(cursor + 1) === 0x5c) return { next: cursor + 2, keep: keep(cursor) };
+			return { next: cursor, keep: false };
+		}
+		cursor++;
+	}
+	return { next: line.length, keep: false };
+}
+
+function consumeEscape(line: string, start: number): PaintSpan {
+	if (start + 1 >= line.length) return { next: line.length, keep: false };
+	const kind = line.charCodeAt(start + 1);
+	if (kind === 0x5b) return consumeCsi(line, start + 2);
+	if (kind === 0x5d) return consumeStringTerm(line, start + 2, end => isSafeFileOsc8(line.slice(start + 2, end)));
+	if (kind === 0x50 || kind === 0x5e || kind === 0x5f) {
+		return consumeStringTerm(line, start + 2, end => kind === 0x50 && isSixelDcs(line, start, end));
+	}
+	return { next: Math.min(line.length, start + 2), keep: false };
+}
+
+/**
+ * Drop terminal controls from one painted tool line.
+ * SGR color and a renderer file hyperlink stay. The child render already
+ * chose the edit operation from the original path.
+ */
+export function sanitizePaintedToolLine(line: string): string {
+	let needs = false;
+	for (let i = 0; i < line.length; i++) {
+		const code = line.charCodeAt(i);
+		if (code === 0x1b || code === 0x9b || isDroppedPaintControl(code)) {
+			needs = true;
+			break;
+		}
+	}
+	if (!needs) return line;
+	let out = "";
+	for (let i = 0; i < line.length; ) {
+		const code = line.charCodeAt(i);
+		if (code === 0x1b || code === 0x9b) {
+			const span = code === 0x1b ? consumeEscape(line, i) : consumeCsi(line, i + 1);
+			if (span.next <= i) {
+				i++;
+				continue;
+			}
+			if (span.keep) out += line.slice(i, span.next);
+			i = span.next;
+			continue;
+		}
+		if (!isDroppedPaintControl(code)) out += line[i];
+		i++;
+	}
+	return out.length === line.length ? line : out;
+}
+
+function ensureInvalidate(component: unknown): Component {
+	const inner = component as Component;
+	if (!inner.invalidate) inner.invalidate = () => {};
+	// Paint only. The renderer already resolved edit operations from the original paths.
+	return {
+		render(width: number): string[] {
+			return inner.render(width).map(sanitizePaintedToolLine);
+		},
+		invalidate(): void {
+			inner.invalidate?.();
+		},
+		dispose(): void {
+			inner.dispose?.();
+		},
+	};
 }
 
 const SIXEL_FALLBACK_PLACEHOLDER = "[SIXEL image hidden while IRC sidebar is visible]";
