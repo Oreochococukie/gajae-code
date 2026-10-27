@@ -6,6 +6,10 @@ import { getBundledModel } from "@gajae-code/ai";
 import { createMockModel } from "@gajae-code/ai/providers/mock";
 import { ModelRegistry } from "@gajae-code/coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@gajae-code/coding-agent/config/settings";
+import type { Goal } from "@gajae-code/coding-agent/goals/state";
+import { resolveLocalUrlToPath } from "@gajae-code/coding-agent/internal-urls";
+import { ModeGate } from "@gajae-code/coding-agent/modes/controllers/mode-gate";
+import { PlanModeController } from "@gajae-code/coding-agent/modes/controllers/plan-mode-controller";
 import { initTheme } from "@gajae-code/coding-agent/modes/theme/theme";
 import { AgentSession } from "@gajae-code/coding-agent/session/agent-session";
 import { AuthStorage } from "@gajae-code/coding-agent/session/auth-storage";
@@ -65,13 +69,19 @@ describe("interactive controllers follow a committed session switch", () => {
 
 	async function persistOtherSession(
 		tempDir: TempDir,
-		mode: { mode: "plan"; planFilePath: string } | { mode: "plan_paused" },
+		mode:
+			| { mode: "plan"; planFilePath: string }
+			| { mode: "plan_paused" }
+			| { mode: "goal" | "goal_paused"; goal: Goal }
+			| { mode: "none" },
 	): Promise<string> {
 		const manager = SessionManager.create(tempDir.path(), tempDir.path());
 		try {
 			manager.appendMessage({ role: "user", content: "other session", timestamp: 1 });
 			if (mode.mode === "plan") manager.appendModeChange("plan", { planFilePath: mode.planFilePath });
 			if (mode.mode === "plan_paused") manager.appendModeChange("plan_paused");
+			if (mode.mode === "goal" || mode.mode === "goal_paused")
+				manager.appendModeChange(mode.mode, { goal: mode.goal });
 			await manager.ensureOnDisk();
 			await manager.flush();
 			const sessionFile = manager.getSessionFile();
@@ -80,6 +90,27 @@ describe("interactive controllers follow a committed session switch", () => {
 		} finally {
 			await manager.close();
 		}
+	}
+
+	function savedGoal(objective: string, status: Goal["status"] = "active"): Goal {
+		return {
+			id: `goal-${objective}`,
+			objective,
+			status,
+			tokensUsed: 0,
+			timeUsedSeconds: 0,
+			createdAt: 1,
+			updatedAt: 1,
+		};
+	}
+
+	function writeLocalPlan(session: AgentSession, planFilePath: string, content: string): void {
+		const resolved = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		fs.mkdirSync(path.dirname(resolved), { recursive: true });
+		fs.writeFileSync(resolved, content);
 	}
 
 	async function activateGoal(mode: InteractiveMode): Promise<void> {
@@ -100,11 +131,11 @@ describe("interactive controllers follow a committed session switch", () => {
 
 	it("rehydrates a saved plan and accepts approval through resolve", async () => {
 		const { session, mode, tempDir } = await createSession(undefined, { emptyTools: false });
-		const planFilePath = "successor-plan.md";
-		fs.writeFileSync(path.join(tempDir.path(), planFilePath), "# Ship the release\n\nDo the work.\n");
+		const planFilePath = "local://successor-plan.md";
 		const other = await persistOtherSession(tempDir, { mode: "plan", planFilePath });
 
 		expect(await session.switchSession(other)).toBe(true);
+		writeLocalPlan(session, planFilePath, "# Ship the release\n\nDo the work.\n");
 		expect(mode.planModeController.enabled).toBe(true);
 		expect(mode.planModeController.planFilePath).toBe(planFilePath);
 		expect(session.peekStandingResolveHandler()).toBeDefined();
@@ -117,15 +148,14 @@ describe("interactive controllers follow a committed session switch", () => {
 
 	it("reconciles controllers when cleanup fails after the successor commits", async () => {
 		const { session, mode, tempDir } = await createSession(undefined, { emptyTools: false });
-		fs.writeFileSync(path.join(tempDir.path(), "cleanup-plan.md"), "# Cleanup plan\n\nStill there.\n");
-		const other = await persistOtherSession(tempDir, { mode: "plan", planFilePath: "cleanup-plan.md" });
+		const other = await persistOtherSession(tempDir, { mode: "plan", planFilePath: "local://cleanup-plan.md" });
 		const unregister = session.registerToolSessionTransitionCleanup(() => {
 			throw new Error("switch cleanup boom");
 		});
 		try {
 			await expect(session.switchSession(other)).rejects.toThrow("Tool session transition cleanup failed");
 			expect(mode.planModeController.enabled).toBe(true);
-			expect(mode.planModeController.planFilePath).toBe("cleanup-plan.md");
+			expect(mode.planModeController.planFilePath).toBe("local://cleanup-plan.md");
 			expect(session.peekStandingResolveHandler()).toBeDefined();
 			expect(session.getPlanModeState()?.enabled).toBe(true);
 		} finally {
@@ -173,8 +203,7 @@ describe("interactive controllers follow a committed session switch", () => {
 
 	it("clears the plan slot when plan tool activation throws", async () => {
 		const { session, mode, tempDir } = await createSession(undefined, { emptyTools: false });
-		const planFilePath = "activation-fails.md";
-		fs.writeFileSync(path.join(tempDir.path(), planFilePath), "# Plan\n\nWork.\n");
+		const planFilePath = "local://activation-fails.md";
 		const other = await persistOtherSession(tempDir, { mode: "plan", planFilePath });
 		const original = session.setActiveToolsByName.bind(session);
 		const activation = spyOn(session, "setActiveToolsByName").mockImplementation(async (toolNames, options) => {
@@ -219,5 +248,104 @@ describe("interactive controllers follow a committed session switch", () => {
 		expect(await session.switchSession(sessionFile)).toBe(true);
 		expect(mode.goalModeController.enabled).toBe(true);
 		expect(mode.planModeController.enabled).toBe(false);
+	});
+	it("clears the predecessor goal on a switch to a session without a goal", async () => {
+		const { session, mode, tempDir } = await createSession(undefined, { emptyTools: false });
+		await activateGoal(mode);
+		const other = await persistOtherSession(tempDir, { mode: "none" });
+
+		expect(await session.switchSession(other)).toBe(true);
+		expect(mode.goalModeController.enabled).toBe(false);
+		expect(mode.goalModeController.paused).toBe(false);
+		expect(session.getGoalModeState()).toBeUndefined();
+		await mode.planModeController.enter();
+		expect(mode.planModeController.enabled).toBe(true);
+	});
+
+	it("restores a saved successor goal through the goal controller", async () => {
+		const { session, mode, tempDir } = await createSession(undefined, { emptyTools: false });
+		await activateGoal(mode);
+		const other = await persistOtherSession(tempDir, { mode: "goal", goal: savedGoal("successor objective") });
+
+		expect(await session.switchSession(other)).toBe(true);
+		expect(mode.goalModeController.enabled).toBe(true);
+		expect(session.getGoalModeState()?.goal.objective).toBe("successor objective");
+		await mode.planModeController.enter();
+		expect(mode.planModeController.enabled).toBe(false);
+	});
+
+	it("does not restore a saved successor goal when goal mode is disabled", async () => {
+		const { session, mode, tempDir } = await createSession({ "goal.enabled": false }, { emptyTools: false });
+		const other = await persistOtherSession(tempDir, { mode: "goal", goal: savedGoal("disabled objective") });
+
+		expect(await session.switchSession(other)).toBe(true);
+		expect(mode.goalModeController.enabled).toBe(false);
+		expect(mode.goalModeController.paused).toBe(false);
+		expect(session.getGoalModeState()).toBeUndefined();
+	});
+
+	it("restores a saved plan with the session plan file when the persisted path is unscoped", async () => {
+		const { session, mode, tempDir } = await createSession(undefined, { emptyTools: false });
+		const outside = path.join(tempDir.path(), "outside", "target.md");
+		const other = await persistOtherSession(tempDir, { mode: "plan", planFilePath: outside });
+
+		expect(await session.switchSession(other)).toBe(true);
+		expect(mode.planModeController.enabled).toBe(true);
+		expect(mode.planModeController.planFilePath).toBe("local://PLAN.md");
+		expect(session.getPlanModeState()?.planFilePath).toBe("local://PLAN.md");
+	});
+
+	it("keeps a session-scoped plan path on a cold-resume plan restore", async () => {
+		for (const planFilePath of ["local://drafts/ship-it.md", "local:/notes/plan.md"]) {
+			const { session, mode } = await createSession(undefined, { emptyTools: false });
+			await mode.planModeController.restoreFromSession({
+				...session.sessionManager.buildSessionContext(),
+				mode: "plan",
+				modeData: { planFilePath },
+			});
+			expect(mode.planModeController.enabled).toBe(true);
+			expect(mode.planModeController.planFilePath).toBe(planFilePath);
+			expect(session.getPlanModeState()?.planFilePath).toBe(planFilePath);
+		}
+	});
+
+	it("rejects a conflicting plan restore before plan side effects", async () => {
+		const { session, mode, tempDir } = await createSession(undefined, { emptyTools: false });
+		const other = await persistOtherSession(tempDir, { mode: "plan", planFilePath: "local://held.md" });
+		expect(await session.switchSession(other)).toBe(true);
+		await mode.planModeController.exit({ silent: true });
+		const gate = new ModeGate();
+		expect(gate.enter("goal")).toBe(true);
+		const warnings: string[] = [];
+		const activation = spyOn(session, "setActiveToolsByName");
+		const modelSwitch = spyOn(session, "setModelTemporary");
+		const controller = new PlanModeController({
+			session,
+			sessionManager: session.sessionManager,
+			modeGate: gate,
+			showWarning: (message: string) => warnings.push(message),
+			showStatus: () => {},
+			updatePlanModeStatus: () => {},
+		} as unknown as ConstructorParameters<typeof PlanModeController>[0]);
+		session.setPlanModeState({ enabled: true, planFilePath: "local://held.md" });
+		try {
+			for (const saved of ["plan", "plan_paused"] as const) {
+				await controller.restoreFromSession({
+					...session.sessionManager.buildSessionContext(),
+					mode: saved,
+					modeData: { planFilePath: "local://held.md" },
+				});
+				expect(controller.enabled).toBe(false);
+				expect(controller.paused).toBe(false);
+				expect(gate.activeMode).toBe("goal");
+				expect(session.getPlanModeState()).toBeUndefined();
+			}
+			expect(activation).not.toHaveBeenCalled();
+			expect(modelSwitch).not.toHaveBeenCalled();
+			expect(warnings).toEqual(["Exit goal mode first.", "Exit goal mode first."]);
+		} finally {
+			activation.mockRestore();
+			modelSwitch.mockRestore();
+		}
 	});
 });

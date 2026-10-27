@@ -392,7 +392,7 @@ import {
 	type WorkflowRecoveryZeroProgressMemory,
 } from "../gjc-runtime/workflow-recovery-projection";
 import { GoalRuntime } from "../goals/runtime";
-import type { Goal, GoalModeState } from "../goals/state";
+import { type Goal, type GoalModeState, normalizeGoal } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import {
 	buildSkillStopOutput,
@@ -412,7 +412,7 @@ import {
 	type WorkflowGateEmitter,
 } from "../modes/shared/agent-wire/workflow-gate-broker";
 import { getCurrentThemeName, theme } from "../modes/theme/theme";
-import type { PlanModeState } from "../plan-mode/state";
+import { type PlanModeState, restoredPlanFilePath } from "../plan-mode/state";
 import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type: "text" };
@@ -14193,19 +14193,24 @@ export class AgentSession {
 	/**
 	 * The loaded session file is the mode source after a switch to a different
 	 * file. A saved plan is installed only when plan mode is enabled and tools
-	 * are available. Goal state is left unchanged.
+	 * are available, and only with a session-scoped plan path. A saved goal is
+	 * installed only when goal mode is enabled; otherwise the goal slot is cleared.
 	 */
 	#rebindSwitchedSessionMode(sessionContext: SessionContext): void {
 		const mode = sessionContext.mode;
 		const planEligible =
 			mode === "plan" && this.settings.get("plan.enabled") && !this.isExplicitEmptyToolSelection();
 		if (planEligible) {
-			const rawPath = sessionContext.modeData?.planFilePath;
-			const planFilePath = typeof rawPath === "string" ? rawPath : "local://PLAN.md";
+			const planFilePath = restoredPlanFilePath(sessionContext.modeData?.planFilePath);
 			this.setPlanModeState({ enabled: true, planFilePath });
 		} else {
 			this.clearPlanModeBinding();
 		}
+		const savedGoal =
+			(mode === "goal" || mode === "goal_paused") && this.settings.get("goal.enabled")
+				? normalizeGoal(sessionContext.modeData?.goal)
+				: undefined;
+		this.setGoalModeState(savedGoal ? { enabled: mode === "goal", mode: "active", goal: savedGoal } : undefined);
 		this.#resetInjectedContextSignatures();
 	}
 

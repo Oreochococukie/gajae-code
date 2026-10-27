@@ -7,6 +7,7 @@ import { Container, type KeyId, Markdown, Spacer, Text } from "@gajae-code/tui";
 import { isEnoent, prompt, resolveEquivalentPath, pathIsWithin as rootContainsCandidate } from "@gajae-code/utils";
 import { resolveLocalRoot, resolveLocalUrlToPath } from "../../internal-urls";
 import { humanizePlanTitle, type PlanApprovalDetails, resolvePlanTitle } from "../../plan-mode/approved-plan";
+import { restoredPlanFilePath } from "../../plan-mode/state";
 import planModeApprovedPrompt from "../../prompts/system/plan-mode-approved.md" with { type: "text" };
 import planModeCompactInstructionsPrompt from "../../prompts/system/plan-mode-compact-instructions.md" with {
 	type: "text",
@@ -142,30 +143,28 @@ export class PlanModeController {
 				this.ctx.sessionManager.appendModeChange("none");
 			return;
 		}
+		if (sessionContext.mode !== "plan" && sessionContext.mode !== "plan_paused") return;
+		// A held goal gate keeps goal mode. Reject before any plan model, tool, or pause side effect.
+		if (!this.ctx.modeGate.enter("plan")) {
+			this.ctx.session.clearPlanModeBinding();
+			return this.ctx.showWarning("Exit goal mode first.");
+		}
 		if (sessionContext.mode === "plan") {
-			await this.enter({
-				planFilePath: sessionContext.modeData?.planFilePath as string | undefined,
-				gateLast: true,
-			});
-		} else if (sessionContext.mode === "plan_paused") {
+			await this.enter({ planFilePath: restoredPlanFilePath(sessionContext.modeData?.planFilePath) });
+		} else {
 			this.#paused = true;
 			this.#hasEntered = true;
-			this.ctx.modeGate.enter("plan");
 			this.#updateStatus();
 		}
 	}
 
-	async enter(options?: {
-		planFilePath?: string;
-		workflow?: "parallel" | "iterative";
-		gateLast?: boolean;
-	}): Promise<void> {
+	async enter(options?: { planFilePath?: string; workflow?: "parallel" | "iterative" }): Promise<void> {
 		if (this.#enabled) return;
 		if (this.ctx.session.isExplicitEmptyToolSelection()) {
 			this.ctx.showWarning("Plan mode requires built-in tools and is unavailable in a --no-tools session.");
 			return;
 		}
-		if (!options?.gateLast && !this.ctx.modeGate.enter("plan")) return this.ctx.showWarning("Exit goal mode first.");
+		if (!this.ctx.modeGate.enter("plan")) return this.ctx.showWarning("Exit goal mode first.");
 		this.#paused = false;
 		const planFilePath = options?.planFilePath ?? "local://PLAN.md";
 		const previousTools = this.ctx.session.getActiveToolNames();
@@ -205,22 +204,6 @@ export class PlanModeController {
 		this.#hasEntered = true;
 		await this.#applyModel();
 		this.#updateStatus();
-		if (options?.gateLast && !this.ctx.modeGate.enter("plan")) {
-			this.ctx.session.setStandingResolveHandler?.(null);
-			this.#enabled = false;
-			this.#planFilePath = undefined;
-			this.ctx.session.setPlanModeState(undefined);
-			const previousTools = this.#previousTools;
-			this.#previousTools = undefined;
-			this.#previousMCPToolNames = undefined;
-			if (previousTools !== undefined)
-				await this.ctx.session.setActiveToolsByName([...previousTools], {
-					explicit: false,
-					persistMCPSelection: false,
-					retryOnMcpCatalogChange: true,
-				});
-			return this.ctx.showWarning("Exit goal mode first.");
-		}
 		this.ctx.sessionManager.appendModeChange("plan", { planFilePath });
 		this.ctx.showStatus(`Plan mode enabled. Plan file: ${planFilePath}`);
 	}

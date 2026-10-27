@@ -1744,7 +1744,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#goalModeController.handleSessionEvent(event);
 	}
 
-	/** Match the plan controller and plan gate to the session a switch just committed. */
+	/** Match the plan and goal controllers and the mode gate to the session a switch just committed. */
 	async #applySwitchedSessionMode(): Promise<void> {
 		const sessionContext = this.sessionManager.buildSessionContext();
 		const mode = sessionContext.mode;
@@ -1753,7 +1753,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#planModeController.setPausedForCompatibility(false);
 		this.#planModeController.setPlanFilePathForCompatibility(undefined);
 		try {
-			if (mode === "plan" || mode === "plan_paused")
+			await this.#goalModeController.detachForSessionSwitch();
+			if (mode === "goal" || mode === "goal_paused")
+				await this.#goalModeController.restoreFromSession(sessionContext);
+			else if (mode === "plan" || mode === "plan_paused")
 				await this.#planModeController.restoreFromSession(sessionContext);
 		} finally {
 			const planActive = this.#planModeController.enabled || this.#planModeController.paused;

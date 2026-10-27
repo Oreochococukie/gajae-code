@@ -9,6 +9,8 @@ import type { Goal } from "@gajae-code/coding-agent/goals/state";
 import { AgentSession } from "@gajae-code/coding-agent/session/agent-session";
 import { AuthStorage } from "@gajae-code/coding-agent/session/auth-storage";
 import { SessionManager } from "@gajae-code/coding-agent/session/session-manager";
+import type { ToolSession } from "@gajae-code/coding-agent/tools";
+import { enforcePlanModeWrite } from "@gajae-code/coding-agent/tools/plan-mode-guard";
 import { TempDir } from "@gajae-code/utils";
 
 function goal(id: string, objective: string): Goal {
@@ -78,12 +80,14 @@ describe("AgentSession switchSession plan and goal mode", () => {
 
 	async function persistOtherSession(
 		tempDir: TempDir,
-		mode: { mode: "plan"; planFilePath: string } | { mode: "none" },
+		mode: { mode: "plan"; planFilePath: string } | { mode: "goal" | "goal_paused"; goal: Goal } | { mode: "none" },
 	): Promise<string> {
 		const manager = SessionManager.create(tempDir.path(), tempDir.path());
 		try {
 			manager.appendMessage({ role: "user", content: "other session", timestamp: 1 });
 			if (mode.mode === "plan") manager.appendModeChange("plan", { planFilePath: mode.planFilePath });
+			if (mode.mode === "goal" || mode.mode === "goal_paused")
+				manager.appendModeChange(mode.mode, { goal: mode.goal });
 			await manager.ensureOnDisk();
 			await manager.flush();
 			const sessionFile = manager.getSessionFile();
@@ -94,7 +98,7 @@ describe("AgentSession switchSession plan and goal mode", () => {
 		}
 	}
 
-	it("clears a predecessor plan on a switch to none and leaves the in-memory goal", async () => {
+	it("clears a predecessor plan and goal on a switch to none", async () => {
 		const { session, tempDir } = await createSession();
 		const predecessorPlan = "predecessor-plan.md";
 		const predecessorGoal = "PREDECESSOR-GOAL-OBJECTIVE";
@@ -104,38 +108,99 @@ describe("AgentSession switchSession plan and goal mode", () => {
 
 		expect(await session.switchSession(other)).toBe(true);
 		expect(session.getPlanModeState()).toBeUndefined();
-		expect(session.getGoalModeState()?.goal.objective).toBe(predecessorGoal);
+		expect(session.getGoalModeState()).toBeUndefined();
 		expect(session.getSdkConfigItems().mode).toBe("default");
 
 		await session.prompt("hello");
 		const text = messageText(session.messages);
 		expect(text).not.toContain(predecessorPlan);
-		expect(text).toContain(predecessorGoal);
+		expect(text).not.toContain(predecessorGoal);
 		expect(
 			session.messages.some(message => message.role === "custom" && message.customType === "plan-mode-context"),
 		).toBe(false);
 		expect(
 			session.messages.some(message => message.role === "custom" && message.customType === "goal-mode-context"),
-		).toBe(true);
+		).toBe(false);
+	});
+
+	it("installs the switched session goal when goal mode is enabled", async () => {
+		const { session, tempDir } = await createSession();
+		session.setGoalModeState({ enabled: true, mode: "active", goal: goal("pred", "PREDECESSOR-GOAL-OBJECTIVE") });
+		const other = await persistOtherSession(tempDir, {
+			mode: "goal",
+			goal: goal("succ", "SUCCESSOR-GOAL-OBJECTIVE"),
+		});
+
+		expect(await session.switchSession(other)).toBe(true);
+		expect(session.getGoalModeState()?.goal.objective).toBe("SUCCESSOR-GOAL-OBJECTIVE");
+		expect(session.getGoalModeState()?.enabled).toBe(true);
+
+		await session.prompt("hello");
+		const text = messageText(session.messages);
+		expect(text).toContain("SUCCESSOR-GOAL-OBJECTIVE");
+		expect(text).not.toContain("PREDECESSOR-GOAL-OBJECTIVE");
+	});
+
+	it("does not install a saved goal when goal mode is disabled", async () => {
+		const { session, tempDir } = await createSession({ "goal.enabled": false });
+		const other = await persistOtherSession(tempDir, {
+			mode: "goal",
+			goal: goal("succ", "SUCCESSOR-GOAL-OBJECTIVE"),
+		});
+
+		expect(await session.switchSession(other)).toBe(true);
+		expect(session.getGoalModeState()).toBeUndefined();
+
+		await session.prompt("hello");
+		expect(messageText(session.messages)).not.toContain("SUCCESSOR-GOAL-OBJECTIVE");
+	});
+
+	it("binds the session plan file instead of an unscoped persisted plan path", async () => {
+		const { session, tempDir } = await createSession();
+		const outside = path.join(tempDir.path(), "outside", "target.md");
+		for (const persisted of [outside, "../outside/target.md", "local://../escape.md", "local:///etc/target.md"]) {
+			const other = await persistOtherSession(tempDir, { mode: "plan", planFilePath: persisted });
+			expect(await session.switchSession(other)).toBe(true);
+			expect(session.getPlanModeState()?.planFilePath).toBe("local://PLAN.md");
+		}
+		const toolSession = {
+			cwd: session.sessionManager.getCwd(),
+			getPlanModeState: () => session.getPlanModeState(),
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		} as unknown as ToolSession;
+		expect(() => enforcePlanModeWrite(toolSession, outside, { op: "create" })).toThrow(
+			"Plan mode: only the plan file may be modified",
+		);
+		expect(() => enforcePlanModeWrite(toolSession, "local://PLAN.md", { op: "create" })).not.toThrow();
+	});
+
+	it("keeps a session-scoped persisted plan path", async () => {
+		const { session, tempDir } = await createSession();
+		for (const persisted of ["local://PLAN.md", "local:/notes/plan.md", "local://drafts/ship-it.md"]) {
+			const other = await persistOtherSession(tempDir, { mode: "plan", planFilePath: persisted });
+			expect(await session.switchSession(other)).toBe(true);
+			expect(session.getPlanModeState()?.planFilePath).toBe(persisted);
+		}
 	});
 
 	it("installs the switched session plan record", async () => {
 		const { session, tempDir } = await createSession();
 		session.setPlanModeState({ enabled: true, planFilePath: "predecessor-plan.md" });
 		session.setGoalModeState({ enabled: true, mode: "active", goal: goal("pred", "PREDECESSOR-GOAL-OBJECTIVE") });
-		const successorPlan = "successor-plan.md";
+		const successorPlan = "local://successor-plan.md";
 		const other = await persistOtherSession(tempDir, { mode: "plan", planFilePath: successorPlan });
 
 		expect(await session.switchSession(other)).toBe(true);
 		expect(session.getPlanModeState()?.planFilePath).toBe(successorPlan);
 		expect(session.getPlanModeState()?.enabled).toBe(true);
-		expect(session.getGoalModeState()?.goal.objective).toBe("PREDECESSOR-GOAL-OBJECTIVE");
+		expect(session.getGoalModeState()).toBeUndefined();
 		expect(session.getSdkConfigItems().mode).toBe("plan");
 
 		await session.prompt("hello");
 		const text = messageText(session.messages);
 		expect(text).toContain(successorPlan);
-		expect(text).toContain("PREDECESSOR-GOAL-OBJECTIVE");
+		expect(text).not.toContain("PREDECESSOR-GOAL-OBJECTIVE");
 		expect(text).not.toContain("predecessor-plan.md");
 	});
 
@@ -151,7 +216,7 @@ describe("AgentSession switchSession plan and goal mode", () => {
 			await expect(session.switchSession(other)).rejects.toThrow("Tool session transition cleanup failed");
 			expect(path.resolve(session.sessionFile ?? "")).toBe(path.resolve(other));
 			expect(session.getPlanModeState()).toBeUndefined();
-			expect(session.getGoalModeState()?.goal.objective).toBe("PREDECESSOR-GOAL-OBJECTIVE");
+			expect(session.getGoalModeState()).toBeUndefined();
 			expect(session.getSdkConfigItems().mode).toBe("default");
 		} finally {
 			unregister();
@@ -162,7 +227,7 @@ describe("AgentSession switchSession plan and goal mode", () => {
 		const { session, tempDir } = await createSession();
 		session.setPlanModeState({ enabled: true, planFilePath: "predecessor-plan.md" });
 		session.setGoalModeState({ enabled: true, mode: "active", goal: goal("pred", "PREDECESSOR-GOAL-OBJECTIVE") });
-		const successorPlan = "successor-plan.md";
+		const successorPlan = "local://successor-plan.md";
 		const other = await persistOtherSession(tempDir, { mode: "plan", planFilePath: successorPlan });
 		const unregister = session.registerToolSessionTransitionCleanup(() => {
 			throw new Error("switch cleanup boom");
@@ -172,7 +237,7 @@ describe("AgentSession switchSession plan and goal mode", () => {
 			expect(path.resolve(session.sessionFile ?? "")).toBe(path.resolve(other));
 			expect(session.getPlanModeState()?.planFilePath).toBe(successorPlan);
 			expect(session.getPlanModeState()?.enabled).toBe(true);
-			expect(session.getGoalModeState()?.goal.objective).toBe("PREDECESSOR-GOAL-OBJECTIVE");
+			expect(session.getGoalModeState()).toBeUndefined();
 			expect(session.getSdkConfigItems().mode).toBe("plan");
 		} finally {
 			unregister();
