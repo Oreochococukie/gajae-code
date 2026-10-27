@@ -314,15 +314,15 @@ describe("expandInternalUrls", () => {
 
 	it("surfaces resolver errors with actionable context", async () => {
 		const router = createInternalRouter({
-			"memory://root/missing.md": { error: "Memory file not found" },
+			"rule://missing": { error: "Rule not found" },
 		});
 		await expect(
-			expandInternalUrls("cat memory://root/missing.md", {
+			expandInternalUrls("cat rule://missing", {
 				skills: [],
 				internalRouter: router,
 				sessionCwd: path.join(tmpdir(), "bash-url-session"),
 			}),
-		).rejects.toThrow("Failed to resolve memory:// URL in bash command");
+		).rejects.toThrow("Failed to resolve rule:// URL in bash command");
 	});
 
 	it("does not match local:/ inside filesystem paths (e.g. /repo/local:/PLAN.md)", async () => {
@@ -478,9 +478,9 @@ describe("expandInternalUrls session scope", () => {
 		}
 	});
 
-	it("still allows memory://root and memory://root/ when the router returns the caller file", async () => {
-		const cwd = await mkdtemp(path.join(tmpdir(), "bash-mem-alias-"));
-		const agentDir = await mkdtemp(path.join(tmpdir(), "bash-mem-alias-agent-"));
+	it("rejects memory:// before router resolution, with or without a session directory", async () => {
+		const cwd = await mkdtemp(path.join(tmpdir(), "bash-mem-own-"));
+		const agentDir = await mkdtemp(path.join(tmpdir(), "bash-mem-own-agent-"));
 		try {
 			const sourcePath = path.join(memoryRootFor(agentDir, cwd), "memory_summary.md");
 			await mkdir(path.dirname(sourcePath), { recursive: true });
@@ -488,34 +488,23 @@ describe("expandInternalUrls session scope", () => {
 			const router = createInternalRouter({
 				"memory://root": { sourcePath },
 				"memory://root/": { sourcePath },
+				"memory://root/memory_summary.md": { sourcePath },
 			});
+			const resolveSpy = spyOn(router, "resolve");
 			const options = { skills: [], internalRouter: router, sessionCwd: cwd, sessionAgentDir: agentDir };
-			await expectExpandsToSource("cat memory://root", options, sourcePath);
-			await expectExpandsToSource("cat memory://root/", options, sourcePath);
-		} finally {
-			await rm(cwd, { recursive: true, force: true });
-			await rm(agentDir, { recursive: true, force: true });
-		}
-	});
-
-	it("still allows a memory file inside the session memory root", async () => {
-		const cwd = await mkdtemp(path.join(tmpdir(), "bash-mem-cwd-"));
-		const agentDir = await mkdtemp(path.join(tmpdir(), "bash-mem-agent-"));
-		try {
-			const sourcePath = path.join(memoryRootFor(agentDir, cwd), "memory_summary.md");
-			await mkdir(path.dirname(sourcePath), { recursive: true });
-			await writeFile(sourcePath, "own-memory");
-			const router = createInternalRouter({ "memory://root/memory_summary.md": { sourcePath } });
-			await expectExpandsToSource(
-				"cat memory://root/memory_summary.md",
-				{
-					skills: [],
-					internalRouter: router,
-					sessionCwd: cwd,
-					sessionAgentDir: agentDir,
-				},
-				sourcePath,
+			for (const command of [
+				"cat memory://root",
+				"cat memory://root/",
+				"printf x >> memory://root/memory_summary.md",
+			]) {
+				await expect(expandInternalUrls(command, options)).rejects.toThrow(
+					/memory:\/\/ URLs cannot be expanded in bash commands/,
+				);
+			}
+			await expect(expandInternalUrls("cat memory://root", { skills: [], internalRouter: router })).rejects.toThrow(
+				/memory:\/\/ URLs cannot be expanded in bash commands/,
 			);
+			expect(resolveSpy).not.toHaveBeenCalled();
 		} finally {
 			await rm(cwd, { recursive: true, force: true });
 			await rm(agentDir, { recursive: true, force: true });
@@ -523,30 +512,38 @@ describe("expandInternalUrls session scope", () => {
 	});
 
 	it.skipIf(process.platform === "win32")(
-		"expands memory for two project paths that fold to the same memory root",
+		"does not let two project paths that fold to one memory root share a bash expansion",
 		async () => {
 			const parent = await mkdtemp(path.join(tmpdir(), "bash-shared-root-"));
 			const agentDir = path.join(parent, "agent");
-			const slashCwd = path.join(parent, "proj", "a");
-			const colonCwd = path.join(parent, "proj:a");
+			const firstCwd = path.join(parent, "work", "acme-api", "server");
+			const secondCwd = path.join(parent, "work", "acme", "api-server");
+			const colonCwd = path.join(parent, "work", "acme:api", "server");
 			try {
-				expect(memoryRootFor(agentDir, slashCwd)).toBe(memoryRootFor(agentDir, colonCwd));
-				const sourcePath = path.join(memoryRootFor(agentDir, slashCwd), "memory_summary.md");
-				await mkdir(path.dirname(sourcePath), { recursive: true });
-				await mkdir(slashCwd, { recursive: true });
-				await mkdir(colonCwd, { recursive: true });
-				await writeFile(sourcePath, "shared-memory");
+				const sharedRoot = memoryRootFor(agentDir, firstCwd);
+				expect(memoryRootFor(agentDir, secondCwd)).toBe(sharedRoot);
+				expect(memoryRootFor(agentDir, colonCwd)).toBe(sharedRoot);
+				const sourcePath = path.join(sharedRoot, "memory_summary.md");
+				await mkdir(sharedRoot, { recursive: true });
+				for (const cwd of [firstCwd, secondCwd, colonCwd]) await mkdir(cwd, { recursive: true });
+				await writeFile(sourcePath, "first-project-memory");
 				const router = createInternalRouter({ "memory://root/memory_summary.md": { sourcePath } });
 				const shared = { skills: [] as Skill[], internalRouter: router, sessionAgentDir: agentDir };
+				for (const sessionCwd of [firstCwd, secondCwd, colonCwd]) {
+					await expect(
+						expandInternalUrls("cat memory://root/memory_summary.md", { ...shared, sessionCwd }),
+					).rejects.toThrow(/memory root is not unique per project/);
+					await expect(
+						expandInternalUrls("printf x >> memory://root/memory_summary.md", { ...shared, sessionCwd }),
+					).rejects.toThrow(/memory root is not unique per project/);
+				}
+				const ruleSource = path.join(secondCwd, "deploy.md");
+				await writeFile(ruleSource, "own-rule");
+				const ruleRouter = createInternalRouter({ "rule://deploy": { sourcePath: ruleSource } });
 				await expectExpandsToSource(
-					"cat memory://root/memory_summary.md",
-					{ ...shared, sessionCwd: slashCwd },
-					sourcePath,
-				);
-				await expectExpandsToSource(
-					"cat memory://root/memory_summary.md",
-					{ ...shared, sessionCwd: colonCwd },
-					sourcePath,
+					"cat rule://deploy",
+					{ ...shared, internalRouter: ruleRouter, sessionCwd: secondCwd },
+					ruleSource,
 				);
 			} finally {
 				await rm(parent, { recursive: true, force: true });
@@ -1010,79 +1007,27 @@ describe("expandInternalUrls session scope", () => {
 		}
 	});
 
-	it("refuses a memory file from another session", async () => {
+	it("rejects memory:// in bash even when the router names a foreign session file", async () => {
 		const cwd = await mkdtemp(path.join(tmpdir(), "bash-mem-a-"));
 		const otherCwd = await mkdtemp(path.join(tmpdir(), "bash-mem-b-"));
 		const agentDir = await mkdtemp(path.join(tmpdir(), "bash-mem-agent-"));
 		try {
-			const sourcePath = path.join(memoryRootFor(agentDir, otherCwd), "memory_summary.md");
-			await mkdir(path.dirname(sourcePath), { recursive: true });
-			await writeFile(sourcePath, "other-memory");
-			const router = createInternalRouter({ "memory://root/memory_summary.md": { sourcePath } });
-			await expect(
-				expandInternalUrls("printf x >> memory://root/memory_summary.md", {
-					skills: [],
-					internalRouter: router,
-					sessionCwd: cwd,
-					sessionAgentDir: agentDir,
-				}),
-			).rejects.toThrow(/outside this session/);
-		} finally {
-			await rm(cwd, { recursive: true, force: true });
-			await rm(otherCwd, { recursive: true, force: true });
-			await rm(agentDir, { recursive: true, force: true });
-		}
-	});
-
-	it("expands the caller memory file when the router names a foreign session file", async () => {
-		const cwd = await mkdtemp(path.join(tmpdir(), "bash-mem-caller-"));
-		const otherCwd = await mkdtemp(path.join(tmpdir(), "bash-mem-foreign-"));
-		const agentDir = await mkdtemp(path.join(tmpdir(), "bash-mem-agent-"));
-		try {
-			const own = path.join(memoryRootFor(agentDir, cwd), "memory_summary.md");
 			const foreign = path.join(memoryRootFor(agentDir, otherCwd), "memory_summary.md");
-			await mkdir(path.dirname(own), { recursive: true });
 			await mkdir(path.dirname(foreign), { recursive: true });
-			await writeFile(own, "own");
-			await writeFile(foreign, "foreign");
-			const router = createInternalRouter({
-				"memory://root": { sourcePath: foreign },
-				"memory://root/": { sourcePath: foreign },
-				"memory://root/notes.md": { sourcePath: foreign },
-			});
+			await writeFile(foreign, "other-memory");
+			const urls = [
+				"memory://root/memory_summary.md",
+				"memory://%72oot/",
+				"memory://root/#section",
+				"memory://root/?q=1",
+			];
+			const router = createInternalRouter(Object.fromEntries(urls.map(url => [url, { sourcePath: foreign }])));
 			const options = { skills: [], internalRouter: router, sessionCwd: cwd, sessionAgentDir: agentDir };
-			await expectExpandsToSource("cat memory://root", options, own);
-			await expectExpandsToSource("cat memory://root/", options, own);
-			const notes = path.join(memoryRootFor(agentDir, cwd), "notes.md");
-			await writeFile(notes, "notes");
-			await expectExpandsToSource("cat memory://root/notes.md", options, notes);
-		} finally {
-			await rm(cwd, { recursive: true, force: true });
-			await rm(otherCwd, { recursive: true, force: true });
-			await rm(agentDir, { recursive: true, force: true });
-		}
-	});
-
-	it("expands an encoded memory namespace and a fragment or query to the caller file when the router names a foreign session file", async () => {
-		const cwd = await mkdtemp(path.join(tmpdir(), "bash-mem-alias-caller-"));
-		const otherCwd = await mkdtemp(path.join(tmpdir(), "bash-mem-alias-foreign-"));
-		const agentDir = await mkdtemp(path.join(tmpdir(), "bash-mem-alias-agent-"));
-		try {
-			const own = path.join(memoryRootFor(agentDir, cwd), "memory_summary.md");
-			const foreign = path.join(memoryRootFor(agentDir, otherCwd), "memory_summary.md");
-			await mkdir(path.dirname(own), { recursive: true });
-			await mkdir(path.dirname(foreign), { recursive: true });
-			await writeFile(own, "own");
-			await writeFile(foreign, "foreign");
-			const router = createInternalRouter({
-				"memory://%72oot/": { sourcePath: foreign },
-				"memory://root/#section": { sourcePath: foreign },
-				"memory://root/?q=1": { sourcePath: foreign },
-			});
-			const options = { skills: [], internalRouter: router, sessionCwd: cwd, sessionAgentDir: agentDir };
-			await expectExpandsToSource("cat memory://%72oot/", options, own);
-			await expectExpandsToSource("cat memory://root/#section", options, own);
-			await expectExpandsToSource("cat memory://root/?q=1", options, own);
+			for (const url of urls) {
+				await expect(expandInternalUrls(`printf x >> ${url}`, options)).rejects.toThrow(
+					/memory:\/\/ URLs cannot be expanded/,
+				);
+			}
 		} finally {
 			await rm(cwd, { recursive: true, force: true });
 			await rm(otherCwd, { recursive: true, force: true });
@@ -1113,49 +1058,35 @@ describe("expandInternalUrls session scope", () => {
 		}
 	});
 
-	it("still allows a rule and memory file in a session directory that ends with a space", async () => {
+	it("still allows a rule file in a session directory that ends with a space", async () => {
 		const parent = await mkdtemp(path.join(tmpdir(), "bash-space-ok-"));
 		try {
 			const cwd = path.join(parent, "proj ");
 			const agentDir = path.join(parent, "agent");
 			const rulePath = path.join(cwd, "own.md");
-			const memoryPath = path.join(memoryRootFor(agentDir, cwd), "MEMORY.md");
 			await mkdir(cwd);
-			await mkdir(path.dirname(memoryPath), { recursive: true });
 			await writeFile(rulePath, "own-rule");
-			await writeFile(memoryPath, "own-memory");
-			const router = createInternalRouter({
-				"rule://own": { sourcePath: rulePath },
-				"memory://own": { sourcePath: memoryPath },
-			});
+			const router = createInternalRouter({ "rule://own": { sourcePath: rulePath } });
 			const options = { skills: [], internalRouter: router, sessionCwd: cwd, sessionAgentDir: agentDir };
 			await expectExpandsToSource("cat rule://own", options, rulePath);
-			await expectExpandsToSource("cat memory://own", options, memoryPath);
 		} finally {
 			await rm(parent, { recursive: true, force: true });
 		}
 	});
 
-	it("refuses a rule and memory file in the directory named by trimming the session directory", async () => {
+	it("refuses a rule file in the directory named by trimming the session directory", async () => {
 		const parent = await mkdtemp(path.join(tmpdir(), "bash-space-no-"));
 		try {
 			const cwd = path.join(parent, "proj ");
 			const trimmed = cwd.trim();
 			const agentDir = path.join(parent, "agent");
 			const rulePath = path.join(trimmed, "secret.md");
-			const memoryPath = path.join(memoryRootFor(agentDir, trimmed), "MEMORY.md");
 			await mkdir(cwd);
 			await mkdir(trimmed);
-			await mkdir(path.dirname(memoryPath), { recursive: true });
 			await writeFile(rulePath, "foreign-rule");
-			await writeFile(memoryPath, "foreign-memory");
-			const router = createInternalRouter({
-				"rule://secret": { sourcePath: rulePath },
-				"memory://secret": { sourcePath: memoryPath },
-			});
+			const router = createInternalRouter({ "rule://secret": { sourcePath: rulePath } });
 			const options = { skills: [], internalRouter: router, sessionCwd: cwd, sessionAgentDir: agentDir };
 			await expect(expandInternalUrls("cat rule://secret", options)).rejects.toThrow(/outside this session/);
-			await expect(expandInternalUrls("cat memory://secret", options)).rejects.toThrow(/outside this session/);
 		} finally {
 			await rm(parent, { recursive: true, force: true });
 		}
@@ -1350,6 +1281,37 @@ describe("bash session agent directory", () => {
 				expect(textOf(cwdResult)).toContain(requestedReal);
 			} finally {
 				resetActiveRulesForTests();
+				await rm(parent, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"rejects memory:// in bash command, env, and cwd for two projects that share a folded memory root",
+		async () => {
+			const parent = await mkdtemp(path.join(tmpdir(), "bash-tool-mem-"));
+			try {
+				const agentDir = path.join(parent, "agent");
+				const firstCwd = path.join(parent, "work", "acme-api", "server");
+				const secondCwd = path.join(parent, "work", "acme", "api-server");
+				const sharedRoot = memoryRootFor(agentDir, firstCwd);
+				expect(memoryRootFor(agentDir, secondCwd)).toBe(sharedRoot);
+				await mkdir(sharedRoot, { recursive: true });
+				await writeFile(path.join(sharedRoot, "memory_summary.md"), "first-project-memory");
+				for (const cwd of [firstCwd, secondCwd]) {
+					await mkdir(cwd, { recursive: true });
+					const tool = createAgentDirBashTool(cwd, agentDir, path.join(parent, "settings-agent"));
+					await expect(
+						tool.execute("call-mem-command", { command: "cat memory://root/memory_summary.md" }),
+					).rejects.toThrow(/memory:\/\/ URLs cannot be expanded/);
+					await expect(
+						tool.execute("call-mem-env", { command: "printf '%s' \"$FOO\"", env: { FOO: "memory://root" } }),
+					).rejects.toThrow(/memory:\/\/ URLs cannot be expanded/);
+					await expect(tool.execute("call-mem-cwd", { command: "pwd", cwd: "memory://root" })).rejects.toThrow(
+						/memory:\/\/ URLs cannot be expanded/,
+					);
+				}
+			} finally {
 				await rm(parent, { recursive: true, force: true });
 			}
 		},
