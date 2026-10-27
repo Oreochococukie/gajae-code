@@ -1,3 +1,4 @@
+import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { $ } from "bun";
@@ -69,13 +70,27 @@ async function cleanupStaleTemps(dir: string): Promise<void> {
 }
 
 async function installBinary(src: string, dest: string): Promise<void> {
-	const tempPath = `${dest}.tmp.${process.pid}`;
-
-	await fs.copyFile(src, tempPath);
+	let tempPath: string | undefined;
+	for (let attempt = 0; attempt < 3; attempt++) {
+		const candidate = `${dest}.tmp.${process.pid}.${crypto.randomUUID()}`;
+		try {
+			// Exclusive create: an existing name, including a planted symlink, is left untouched.
+			await fs.copyFile(src, candidate, fs.constants.COPYFILE_EXCL);
+			tempPath = candidate;
+			break;
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code === "EEXIST") continue;
+			throw new Error(`Failed to install ${path.basename(dest)}: ${(err as Error).message}`);
+		}
+	}
+	if (!tempPath) {
+		throw new Error(`Failed to install ${path.basename(dest)}: could not create an exclusive temporary file`);
+	}
+	const created = tempPath;
 
 	try {
 		// Atomic rename - works even if dest is loaded on Linux/macOS (old inode stays valid)
-		await fs.rename(tempPath, dest);
+		await fs.rename(created, dest);
 	} catch {
 		// On Windows, loaded DLLs cannot be overwritten via rename
 		// Try delete-then-rename as fallback
@@ -83,7 +98,7 @@ async function installBinary(src: string, dest: string): Promise<void> {
 			await fs.unlink(dest);
 		} catch (unlinkErr) {
 			if ((unlinkErr as NodeJS.ErrnoException).code !== "ENOENT") {
-				await fs.unlink(tempPath).catch(() => {});
+				await fs.unlink(created).catch(() => {});
 				const isWindows = process.platform === "win32";
 				throw new Error(
 					`Cannot replace ${path.basename(dest)}${isWindows ? " (file may be in use - close any running processes)" : ""}: ${(unlinkErr as Error).message}`,
@@ -91,9 +106,9 @@ async function installBinary(src: string, dest: string): Promise<void> {
 			}
 		}
 		try {
-			await fs.rename(tempPath, dest);
+			await fs.rename(created, dest);
 		} catch (finalErr) {
-			await fs.unlink(tempPath).catch(() => {});
+			await fs.unlink(created).catch(() => {});
 			throw new Error(`Failed to install ${path.basename(dest)}: ${(finalErr as Error).message}`);
 		}
 	}

@@ -156,6 +156,57 @@ test.skipIf(!canSymlink)(
 	},
 );
 
+test.skipIf(!canSymlink)(
+	"installGeneratedBindings ignores a symlink at the old predictable temporary name",
+	async () => {
+		const installGeneratedBindings = await loadInstall();
+		const outside = await fs.mkdtemp(path.join(os.tmpdir(), "native-binding-temp-"));
+		const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), "native-binding-out-"));
+		try {
+			await withNativeFiles(async () => {
+				const sentinel = path.join(outside, "sentinel");
+				const planted = `${dtsPath}.tmp.${process.pid}`;
+				await fs.writeFile(sentinel, "SECRET");
+				await fs.writeFile(path.join(outputDir, "index.d.ts"), "new-bindings");
+				await fs.writeFile(dtsPath, "old-bindings");
+				await fs.symlink(sentinel, planted);
+				await installGeneratedBindings(outputDir);
+				expect(await fs.readFile(sentinel, "utf8")).toBe("SECRET");
+				expect((await fs.lstat(planted)).isSymbolicLink()).toBe(true);
+				const st = await fs.lstat(dtsPath);
+				expect(st.isSymbolicLink()).toBe(false);
+				expect(st.isFile()).toBe(true);
+				expect(await fs.readFile(dtsPath, "utf8")).toBe("new-bindings");
+				const leftovers = (await fs.readdir(nativeDir)).filter(entry => entry.includes(".tmp."));
+				expect(leftovers).toEqual([path.basename(planted)]);
+			});
+		} finally {
+			await fs.rm(outside, { recursive: true, force: true });
+			await fs.rm(outputDir, { recursive: true, force: true });
+		}
+	},
+);
+
+test("installGeneratedBindings finishes with one regular declaration when two installs overlap", async () => {
+	const installGeneratedBindings = await loadInstall();
+	const outputA = await fs.mkdtemp(path.join(os.tmpdir(), "native-binding-a-"));
+	const outputB = await fs.mkdtemp(path.join(os.tmpdir(), "native-binding-b-"));
+	try {
+		await withNativeFiles(async () => {
+			await fs.writeFile(path.join(outputA, "index.d.ts"), "bindings-a");
+			await fs.writeFile(path.join(outputB, "index.d.ts"), "bindings-b");
+			await fs.writeFile(dtsPath, "old-bindings");
+			await Promise.all([installGeneratedBindings(outputA), installGeneratedBindings(outputB)]);
+			expect(["bindings-a", "bindings-b"]).toContain(await fs.readFile(dtsPath, "utf8"));
+			expect((await fs.lstat(dtsPath)).isSymbolicLink()).toBe(false);
+			expect((await fs.readdir(nativeDir)).filter(entry => entry.includes(".tmp."))).toEqual([]);
+		});
+	} finally {
+		await fs.rm(outputA, { recursive: true, force: true });
+		await fs.rm(outputB, { recursive: true, force: true });
+	}
+});
+
 test.skipIf(process.platform === "win32")(
 	"installGeneratedBindings publishes index.d.ts as a new file when another hard link exists",
 	async () => {
