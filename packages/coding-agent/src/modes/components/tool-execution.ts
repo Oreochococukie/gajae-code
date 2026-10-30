@@ -1,3 +1,4 @@
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { type AgentTool, isToolFailureEnvelope } from "@gajae-code/agent-core";
 import {
 	type AnimationRegistration,
@@ -9,6 +10,7 @@ import {
 	ImageProtocol,
 	imageFallback,
 	isTerminalGraphicsFallbackActive,
+	Markdown,
 	registerAnimationCallback,
 	Spacer,
 	TERMINAL,
@@ -36,7 +38,12 @@ import {
 import { formatExpandHint, replaceTabs, resolveImageOptions, truncateToWidth } from "../../tools/render-utils";
 import { toolRenderers } from "../../tools/renderers";
 import { renderStatusLine } from "../../tui";
-import { containsSixelSequence, getSixelLineMask, sanitizeWithOptionalSixelPassthrough } from "../../utils/sixel";
+import {
+	containsSixelSequence,
+	getSixelLineMask,
+	isSixelPassthroughEnabled,
+	sanitizeWithOptionalSixelPassthrough,
+} from "../../utils/sixel";
 import { renderDiff } from "./diff";
 
 const SGR_FINAL = 0x6d;
@@ -97,22 +104,20 @@ function consumeCsi(line: string, index: number): PaintSpan {
 function isSixelDcs(line: string, start: number, end: number): boolean {
 	if (TERMINAL.imageProtocol !== ImageProtocol.Sixel) return false;
 	let cursor = start + 2;
-	while (cursor < end) {
+	while (cursor < end && "0123456789;".includes(line[cursor] ?? "")) cursor++;
+	if (line.charCodeAt(cursor) !== 0x71) return false;
+	for (cursor++; cursor < end; cursor++) {
 		const code = line.charCodeAt(cursor);
-		if (code === 0x3b || (code >= 0x30 && code <= 0x39)) {
-			cursor++;
-			continue;
-		}
-		return code === 0x71;
+		if (code !== 0x09 && (code < 0x20 || code > 0x7e)) return false;
 	}
-	return false;
+	return cursor === end;
 }
 
-function consumeStringTerm(line: string, index: number, keep: (end: number) => boolean): PaintSpan {
+function consumeStringTerm(line: string, index: number, keep: (end: number) => boolean, keepBel: boolean): PaintSpan {
 	let cursor = index;
 	while (cursor < line.length) {
 		const code = line.charCodeAt(cursor);
-		if (code === 0x07) return { next: cursor + 1, keep: false };
+		if (code === 0x07) return { next: cursor + 1, keep: keepBel && keep(cursor) };
 		if (code === 0x1b) {
 			if (line.charCodeAt(cursor + 1) === 0x5c) return { next: cursor + 2, keep: keep(cursor) };
 			return { next: cursor, keep: false };
@@ -126,9 +131,10 @@ function consumeEscape(line: string, start: number): PaintSpan {
 	if (start + 1 >= line.length) return { next: line.length, keep: false };
 	const kind = line.charCodeAt(start + 1);
 	if (kind === 0x5b) return consumeCsi(line, start + 2);
-	if (kind === 0x5d) return consumeStringTerm(line, start + 2, end => isSafeFileOsc8(line.slice(start + 2, end)));
+	if (kind === 0x5d)
+		return consumeStringTerm(line, start + 2, end => isSafeFileOsc8(line.slice(start + 2, end)), true);
 	if (kind === 0x50 || kind === 0x5e || kind === 0x5f) {
-		return consumeStringTerm(line, start + 2, end => kind === 0x50 && isSixelDcs(line, start, end));
+		return consumeStringTerm(line, start + 2, end => kind === 0x50 && isSixelDcs(line, start, end), false);
 	}
 	return { next: Math.min(line.length, start + 2), keep: false };
 }
@@ -167,21 +173,257 @@ export function sanitizePaintedToolLine(line: string): string {
 	return out.length === line.length ? line : out;
 }
 
-function ensureInvalidate(component: unknown): Component {
-	const inner = component as Component;
-	if (!inner.invalidate) inner.invalidate = () => {};
-	// Paint only. The renderer already resolved edit operations from the original paths.
-	return {
-		render(width: number): string[] {
-			return inner.render(width).map(sanitizePaintedToolLine);
-		},
-		invalidate(): void {
-			inner.invalidate?.();
-		},
-		dispose(): void {
-			inner.dispose?.();
-		},
+function filterPaintedLines(lines: string[], sixel: boolean): string[] {
+	if (!sixel || !isSixelPassthroughEnabled()) return lines.map(sanitizePaintedToolLine);
+	const text = lines.join("\n");
+	let out = "";
+	let i = 0;
+	while (i < text.length) {
+		const at = text.indexOf("\x1bP", i);
+		out += text
+			.slice(i, at < 0 ? text.length : at)
+			.split("\n")
+			.map(sanitizePaintedToolLine)
+			.join("\n");
+		if (at < 0) break;
+		const mark = takePaintedSixel(text, at);
+		if (mark > 0) out += text.slice(at, mark);
+		else if (mark === -2) out += text.slice(at).split("\n").map(sanitizePaintedToolLine).join("\n");
+		if (mark === -1 || mark === -2) break;
+		i = mark > 0 ? mark : -mark;
+	}
+	return out.split("\n");
+}
+
+function takePaintedSixel(text: string, at: number): number {
+	let i = at + 2;
+	while (i < text.length && "0123456789;".includes(text[i] ?? "")) i++;
+	if (text.charCodeAt(i) !== 0x71) return -2;
+	let ok = true;
+	for (i++; i < text.length; i++) {
+		const code = text.charCodeAt(i);
+		const end = code === 0x07 ? i + 1 : code === 0x1b && text.charCodeAt(i + 1) === 0x5c ? i + 2 : 0;
+		if (end) return ok ? end : -end;
+		if (code !== 0x09 && code !== 0x0a && code !== 0x0d && (code < 0x20 || code > 0x7e)) ok = false;
+	}
+	return -1;
+}
+
+// Keyed mac beside each Image/Markdown line. A shared line budget dropped copy
+// markers once a card grew past it; the mac travels with the row instead.
+const PAINT_PREFIX = "\x1b_AGJC_PAINT:";
+const MAC_HEX = 32;
+const TRUST_KEY = randomBytes(32);
+const paintedWrap = new WeakMap<object, Component>();
+let paintArmed = false;
+let trustDepth = 0;
+
+function trustMac(payload: string): string {
+	return createHmac("sha256", TRUST_KEY).update(payload).digest("hex").slice(0, MAC_HEX);
+}
+
+function stampLine(line: string): string {
+	return `${PAINT_PREFIX}${trustMac(line)}:${line.length}\x1b\\${line}`;
+}
+
+function isHexMac(mac: string): boolean {
+	if (mac.length !== MAC_HEX) return false;
+	for (let i = 0; i < mac.length; i++) {
+		const code = mac.charCodeAt(i);
+		const hex = (code >= 0x30 && code <= 0x39) || (code >= 0x61 && code <= 0x66);
+		if (!hex) return false;
+	}
+	return true;
+}
+
+function macMatches(mac: string, payload: string): boolean {
+	if (!isHexMac(mac)) return false;
+	const expect = trustMac(payload);
+	const left = Buffer.from(mac);
+	const right = Buffer.from(expect);
+	if (left.length !== right.length) return false;
+	try {
+		return timingSafeEqual(left, right);
+	} catch {
+		return false;
+	}
+}
+
+function armTrustedPaint(): void {
+	if (paintArmed) return;
+	paintArmed = true;
+	let rendererDepth = 0;
+	for (const Ctor of [Image, Markdown]) {
+		const proto = Ctor.prototype as { render: (width: number) => string[] };
+		const render = proto.render;
+		proto.render = function (this: Component, width: number) {
+			rendererDepth++;
+			try {
+				const lines = render.call(this, width);
+				if (rendererDepth !== 1 || trustDepth === 0) return lines;
+				const stamped = new Array<string>(lines.length);
+				for (let i = 0; i < lines.length; i++) stamped[i] = stampLine(lines[i] ?? "");
+				return stamped;
+			} finally {
+				rendererDepth--;
+			}
+		};
+	}
+}
+
+function isSgrSpan(line: string, start: number): number {
+	const code = line.charCodeAt(start);
+	const eight = code === 0x9b;
+	if (!eight && !(code === 0x1b && line.charCodeAt(start + 1) === 0x5b)) return -1;
+	let cursor = eight ? start + 1 : start + 2;
+	while (cursor < line.length) {
+		const param = line.charCodeAt(cursor);
+		if (param >= 0x40 && param <= 0x7e) return param === 0x6d ? cursor + 1 : -1;
+		if (!((param >= 0x30 && param <= 0x3f) || (param >= 0x20 && param <= 0x2f))) return -1;
+		cursor++;
+	}
+	return -1;
+}
+
+function isPaintPadding(line: string, start: number, end: number): boolean {
+	let cursor = start;
+	while (cursor < end) {
+		if (line.charCodeAt(cursor) === 0x20) {
+			cursor++;
+			continue;
+		}
+		const next = isSgrSpan(line, cursor);
+		if (next < 0 || next > end) return false;
+		cursor = next;
+	}
+	return true;
+}
+
+function unwrapStamped(line: string): string | undefined {
+	const at = line.indexOf(PAINT_PREFIX);
+	if (at < 0) return undefined;
+	if (!isPaintPadding(line, 0, at)) return undefined;
+	let cursor = at + PAINT_PREFIX.length;
+	if (cursor + MAC_HEX >= line.length) return undefined;
+	const mac = line.slice(cursor, cursor + MAC_HEX);
+	cursor += MAC_HEX;
+	if (line.charCodeAt(cursor) !== 0x3a) return undefined;
+	cursor++;
+	const lenStart = cursor;
+	while (cursor < line.length) {
+		const code = line.charCodeAt(cursor);
+		if (code < 0x30 || code > 0x39) break;
+		cursor++;
+	}
+	if (cursor === lenStart || line.charCodeAt(cursor) !== 0x1b || line.charCodeAt(cursor + 1) !== 0x5c) {
+		return undefined;
+	}
+	const len = Number(line.slice(lenStart, cursor));
+	if (!Number.isSafeInteger(len)) return undefined;
+	const payloadStart = cursor + 2;
+	const payloadEnd = payloadStart + len;
+	if (payloadEnd > line.length) return undefined;
+	const payload = line.slice(payloadStart, payloadEnd);
+	if (!macMatches(mac, payload)) return undefined;
+	if (!isPaintPadding(line, payloadEnd, line.length)) return undefined;
+	if (at === 0 && payloadEnd === line.length) return payload;
+	return line.slice(0, at) + payload + line.slice(payloadEnd);
+}
+
+function filterOneLine(line: string, sixel: boolean): string {
+	return filterPaintedLines([line], sixel)[0] ?? "";
+}
+
+function settleTrustedLines(lines: string[], sixel: boolean): string[] {
+	if (trustDepth > 1) return lines;
+	if (sixel) {
+		const out: string[] = [];
+		let raw: string[] = [];
+		const flush = () => {
+			if (raw.length === 0) return;
+			out.push(...filterPaintedLines(raw, true));
+			raw = [];
+		};
+		for (const line of lines) {
+			const trusted = unwrapStamped(line ?? "");
+			if (trusted !== undefined) {
+				flush();
+				out.push(trusted);
+				continue;
+			}
+			raw.push(line ?? "");
+		}
+		flush();
+		return out;
+	}
+	const out = new Array<string>(lines.length);
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i] ?? "";
+		out[i] = unwrapStamped(line) ?? filterOneLine(line, false);
+	}
+	return out;
+}
+
+function filterTrustedRender(render: (width: number) => string[], width: number, sixel: boolean): string[] {
+	trustDepth++;
+	try {
+		return settleTrustedLines(render(width), sixel);
+	} finally {
+		trustDepth--;
+	}
+}
+
+function sealChildren(component: { children?: Component[] }, sixel: boolean): void {
+	const kids = component.children;
+	if (!kids) return;
+	for (let n = 0; n < kids.length; n++) {
+		const child = kids[n];
+		if (child) ensureInvalidate(child, sixel);
+	}
+}
+
+function ensureInvalidate(component: unknown, sixel = false): Component {
+	const inner = component as Component & {
+		children?: Component[];
+		addChild?: (child: Component) => void;
+		replaceChildren?: (children: Component[]) => void;
 	};
+	armTrustedPaint();
+	if (!inner.invalidate) inner.invalidate = () => {};
+	const cached = paintedWrap.get(inner);
+	if (cached) return cached;
+	const builtinImage = inner instanceof Image && inner.render === Image.prototype.render;
+	const builtinMarkdown = inner instanceof Markdown && inner.render === Markdown.prototype.render;
+	if (builtinImage || builtinMarkdown) {
+		paintedWrap.set(inner, inner);
+		return inner;
+	}
+	if ((inner instanceof Box || inner instanceof Container) && inner.addChild && inner.children) {
+		const add = inner.addChild.bind(inner);
+		const render = inner.render.bind(inner);
+		inner.addChild = child => {
+			ensureInvalidate(child, sixel);
+			add(child);
+		};
+		if (inner instanceof Container) {
+			const replace = inner.replaceChildren.bind(inner);
+			inner.replaceChildren = children => {
+				for (const child of children) ensureInvalidate(child, sixel);
+				replace(children);
+			};
+		}
+		inner.render = width => {
+			sealChildren(inner, sixel);
+			return filterTrustedRender(render, width, sixel);
+		};
+		sealChildren(inner, sixel);
+		paintedWrap.set(inner, inner);
+		return inner;
+	}
+	const render = inner.render.bind(inner);
+	inner.render = width => filterTrustedRender(render, width, sixel);
+	paintedWrap.set(inner, inner);
+	return inner;
 }
 
 const SIXEL_FALLBACK_PLACEHOLDER = "[SIXEL image hidden while IRC sidebar is visible]";
@@ -811,7 +1053,7 @@ export class ToolExecutionComponent extends Container {
 				try {
 					const callComponent = tool.renderCall(this.#getCallArgsForRender(), this.#renderState, theme);
 					if (callComponent) {
-						this.#contentBox.addChild(ensureInvalidate(callComponent));
+						this.#contentBox.addChild(ensureInvalidate(callComponent, this.#toolName === "bash"));
 					}
 				} catch (err) {
 					logger.warn("Tool renderer failed", { tool: this.#toolName, error: String(err) });
@@ -843,7 +1085,7 @@ export class ToolExecutionComponent extends Container {
 						this.#args,
 					);
 					if (resultComponent) {
-						this.#contentBox.addChild(ensureInvalidate(resultComponent));
+						this.#contentBox.addChild(ensureInvalidate(resultComponent, this.#toolName === "bash"));
 					}
 				} catch (err) {
 					logger.warn("Tool renderer failed", { tool: this.#toolName, error: String(err) });
@@ -981,7 +1223,7 @@ export class ToolExecutionComponent extends Container {
 							this.#getCallArgsForRender(),
 						);
 						if (resultComponent) {
-							this.#contentBox.addChild(ensureInvalidate(resultComponent));
+							this.#contentBox.addChild(ensureInvalidate(resultComponent, this.#toolName === "bash"));
 						}
 					} catch (err) {
 						logger.warn("Tool renderer failed", { tool: this.#toolName, error: String(err) });
