@@ -5,7 +5,7 @@ import { $ } from "bun";
 import { detectHostAvx2Support } from "../../../scripts/host-detect";
 import { type NativeBuildProfile, recordDiagnosticArtifactDigest } from "./diagnostic-artifact-manifest";
 import { assertRequiredSymbols } from "./embed-guard";
-import { generateEnumExports } from "./gen-enums";
+import { generateEnumExports, readRegularFileNoFollow, refuseIfTempGone, writeReplacingDestination } from "./gen-enums";
 import { resolveCargoToolchainPath } from "./rust-toolchain-path";
 
 const repoRoot = path.join(import.meta.dir, "../../..");
@@ -61,6 +61,13 @@ async function cleanupStaleTemps(dir: string): Promise<void> {
 		const entries = await fs.readdir(dir);
 		for (const entry of entries) {
 			if (entry.includes(".tmp.") || entry.includes(".old.") || entry.includes(".new.")) {
+				const pid = Number(entry.match(/\.(?:tmp|old|new)\.(\d+)(?:\.|$)/)?.[1]);
+				try {
+					if (Number.isInteger(pid) && pid > 0) process.kill(pid, 0);
+					if (Number.isInteger(pid) && pid > 0) continue;
+				} catch (err) {
+					if ((err as NodeJS.ErrnoException).code === "EPERM") continue;
+				}
 				await fs.unlink(path.join(dir, entry)).catch(() => {});
 			}
 		}
@@ -91,7 +98,8 @@ async function installBinary(src: string, dest: string): Promise<void> {
 	try {
 		// Atomic rename - works even if dest is loaded on Linux/macOS (old inode stays valid)
 		await fs.rename(created, dest);
-	} catch {
+	} catch (renameErr) {
+		await refuseIfTempGone(created, dest, renameErr);
 		// On Windows, loaded DLLs cannot be overwritten via rename
 		// Try delete-then-rename as fallback
 		try {
@@ -199,8 +207,8 @@ export async function installGeneratedBindings(outputDir: string): Promise<void>
 	const sourcePath = path.join(outputDir, "index.d.ts");
 	const destPath = path.join(nativeDir, "index.d.ts");
 	try {
-		// Same install as the addon: rename replaces a destination symlink instead of following it.
-		await installBinary(sourcePath, destPath);
+		const text = await fs.readFile(sourcePath, "utf8");
+		await writeReplacingDestination(destPath, text);
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		throw new Error(`Failed to install generated index.d.ts: ${message}`);
@@ -209,17 +217,17 @@ export async function installGeneratedBindings(outputDir: string): Promise<void>
 
 async function normalizeGeneratedDeclarationSpacing(): Promise<void> {
 	const declarationPath = path.join(nativeDir, "index.d.ts");
-	const bindings = await Bun.file(declarationPath).text();
+	const bindings = readRegularFileNoFollow(declarationPath);
 	const normalized = bindings.replace(
 		/(^export declare class ComputerController \{[\s\S]*?^\}\n)(\/\*\*\n \* Long-lived macOS appearance observer\.)/m,
 		"$1\n$2",
 	);
-	if (normalized !== bindings) await Bun.write(declarationPath, normalized);
+	if (normalized !== bindings) await writeReplacingDestination(declarationPath, normalized);
 }
 
 async function ensurePublishDiagnosticDeclaration(): Promise<void> {
 	const declarationPath = path.join(nativeDir, "index.d.ts");
-	const bindings = await Bun.file(declarationPath).text();
+	const bindings = readRegularFileNoFollow(declarationPath);
 	if (bindings.includes("export interface NativePublishDiagnostic")) return;
 	if (!bindings.includes("diagnostic: NativePublishDiagnostic"))
 		throw new Error("napi build did not generate the native publish diagnostic reference");
@@ -239,7 +247,7 @@ export interface NativePublishDiagnostic {
   syncFailures?: Array<NativePublishSyncFailure>
 }
 `;
-	await Bun.write(declarationPath, `${bindings.trimEnd()}\n${declaration}`);
+	await writeReplacingDestination(declarationPath, `${bindings.trimEnd()}\n${declaration}`);
 }
 
 const requiredGeneratedBindingSymbols = [
